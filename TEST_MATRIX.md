@@ -27,7 +27,7 @@ Env: `CI-sim` = GitHub Actions simulator · `CI-dev` = generic device build · `
 | D021 | exact GELU known values | RAN (pending CI on next push) | CI-sim |
 | H002 | CPU timestep reference | AnimaXSTests | pending | CI-sim |
 | H003 | CPU modulation reference (LayerNorm, SiLU) | AnimaXSTests (ModulationTests) | RAN (pending CI on next push) | CI-sim |
-| H004 | CPU RoPE reference | AnimaXSTests | pending | CI-sim |
+| H004 | CPU RoPE reference (config, thetas, t/h/w order, 2×2 layout) | AnimaXSTests (DitRoPETests) | RAN (harness; pending CI on next push) | CI-sim |
 | J003 | GroupNorm CPU reference | AnimaXSTests | pending | CI-sim |
 | H001 | DiT input patchify ordering + token count (1024×68) + inChannels 17 | AnimaXSTests (DiTInputTests) | RAN (pending CI on next push) | CI-sim |
 | H002 | Timestep sinusoidal vs torch reference + SiLU | AnimaXSTests (TimestepEmbedderTests) | RAN (pending CI on next push) | CI-sim |
@@ -54,6 +54,7 @@ Env: `CI-sim` = GitHub Actions simulator · `CI-dev` = generic device build · `
 | H001 | DiT input x_embedder [1024,2048] ≈ oracle (cosine 1.000000, maxAbs 6.6e-7) | RAN (harness, real pack) | local |
 | H002 | timestep embedding + adaln [6144] ≈ oracle (cosine 1.000000, all finite) | RAN (harness, real pack) | local |
 | H003 | AdaLN shift/scale/gate all branches ≈ oracle (cosine 1.000000, all finite) | RAN (harness, real pack) | local |
+| H004 | DiT 3-D RoPE [1024,64,2,2] ≈ oracle (cosine 1.000000, maxAbs 4.8e-7) | RAN (harness, no pack needed) | local |
 | H005 | block 0 ≈ golden | pending | CI-sim/A12 |
 | H006 | 28 blocks finite | pending | CI-sim/A12 |
 | I002 | 8 step latents finite/≈ step_latents | pending | CI-sim/A12 |
