@@ -96,10 +96,13 @@
       6,
       20135,
       60,
-      7
+      7,
+      1
     ],
-    "t5_len": 46,
-    "qwen_pad_token": 151643
+    "t5_len": 47,
+    "qwen_pad_token": 151643,
+    "t5_eos_token": 1,
+    "parity_note": "T5 = encode(prompt,no_specials) + [1] (trailing </s>); Qwen = encode(prompt,no_specials)"
   },
   "case2_natural_language": {
     "prompt": "masterpiece, best quality. Digital artwork of a young witch with short silver hair and green eyes, wearing a dark purple cloak with a large hood and golden star clasps, standing in a moonlit forest clearing surrounded by glowing blue mushrooms and fireflies, holding a staff with a glowing crystal, soft mist and volumetric light, highly detailed, painterly.",
@@ -262,10 +265,13 @@
       2383,
       49,
       120,
-      5
+      5,
+      1
     ],
-    "t5_len": 84,
-    "qwen_pad_token": 151643
+    "t5_len": 85,
+    "qwen_pad_token": 151643,
+    "t5_eos_token": 1,
+    "parity_note": "T5 = encode(prompt,no_specials) + [1] (trailing </s>); Qwen = encode(prompt,no_specials)"
   },
   "case3_long_mixed": {
     "prompt": "year 2025, newest, normal quality, score_5, highres, safe, 1boy, 1girl, oomuro sakurako, yuru yuri, @nnn yryr, smile, brown hair, hat, solo, fur-trimmed gloves, open mouth, long hair, gift box, fang, skirt, red gloves, blunt bangs, gloves, one eye closed, brown eyes, santa costume, red hat, white background. A cozy winter scene with warm lighting and falling snow, both characters exchanging wrapped presents with cheerful expressions.",
@@ -527,9 +533,12 @@
       25675,
       3893,
       7,
-      5
+      5,
+      1
     ],
-    "t5_len": 133,
-    "qwen_pad_token": 151643
+    "t5_len": 134,
+    "qwen_pad_token": 151643,
+    "t5_eos_token": 1,
+    "parity_note": "T5 = encode(prompt,no_specials) + [1] (trailing </s>); Qwen = encode(prompt,no_specials)"
   }
 }
