@@ -160,6 +160,27 @@ def main():
     print(f"  x_emb allFinite={np.isfinite(x_emb).all()}  x_emb min/max={float(x_emb.min()):.4f}/{float(x_emb.max()):.4f}")
     print(f"  x_emb token0 d0..3={[round(float(v),6) for v in x_emb[0,:4]]}")
 
+    # -----------------------------------------------------------------------
+    # H003: AdaLN-LoRA modulation — Block.forward (predict2.py:486-516, 520-521)
+    # -----------------------------------------------------------------------
+    print("=== AdaLN-LoRA modulation (block 0, sigma=1.0) ===")
+    emb_b = sw_ts_emb                      # t_embedding_B_T_D [2048]
+    adaln_b = sw_adaln                     # adaln_lora_B_T_3D [6144]
+    for branch in ["self_attn", "cross_attn", "mlp"]:
+        w1 = load_f32(os.path.join(args.indir, f"dit_mod_{branch}_w1.f32"), (256, 2048))
+        w2 = load_f32(os.path.join(args.indir, f"dit_mod_{branch}_w2.f32"), (6144, 256))
+        # adaln_modulation_* = nn.Sequential(SiLU, Linear(2048→256), Linear(256→6144))
+        # (predict2.py:451-465). Order: mod = Linear2( Linear1( SiLU(emb) ) ) + adaln_lora.
+        silu = emb_b * (1.0 / (1.0 + np.exp(-emb_b)))          # SiLU first
+        h1 = (silu @ w1.T).astype(np.float32)                   # Linear1 [256]
+        mod = (h1 @ w2.T).astype(np.float32) + adaln_b          # Linear2 [6144] + lora
+        shift, scale, gate = np.split(mod, 3)                   # chunk(3, dim=-1)
+        for name, arr, sw in [("shift", shift, f"dit_mod_{branch}_shift.f32"),
+                              ("scale", scale, f"dit_mod_{branch}_scale.f32"),
+                              ("gate",  gate,  f"dit_mod_{branch}_gate.f32")]:
+            s = load_f32(os.path.join(args.indir, sw), (2048,))
+            print(f"  {branch}.{name}: cosine={cosine(arr, s):.8f} maxAbs={maxabs(arr, s):.2e} allFinite={np.isfinite(arr).all()}")
+
     # Write oracle outputs for the record
     os.makedirs(args.out, exist_ok=True)
     np.savez_compressed(os.path.join(args.out, "dit_input_timestep_oracle_case1.npz"),
