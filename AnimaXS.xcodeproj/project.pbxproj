@@ -20,6 +20,7 @@
 		2F02983AD55700559562DA54 /* qwen_tokenizer.json in Resources */ = {isa = PBXBuildFile; fileRef = F28A65A79E0706DF0F0D5AB2 /* qwen_tokenizer.json */; };
 		30116E9CBC6BF3DBEA66C41E /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C8E968875980A2C9ACC94E5 /* ContentView.swift */; };
 		47ABE68F485121B325537344 /* DiTInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EBD5ADCDE21EF89090D0058 /* DiTInput.swift */; };
+		4CF42C1FB7991B03E9360B0D /* DitRoPE.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63D78F224C62E12AE65A076F /* DitRoPE.swift */; };
 		5506617DD3116BF72E8154BD /* QuantDecoders.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A12B10FC621499B2CA281B3 /* QuantDecoders.swift */; };
 		556D3B10877CD4D85A9D4D9F /* TestPackFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 830D15B6FF7E37A06B2C08B2 /* TestPackFactory.swift */; };
 		5A84CFBB6B28FE55EBE82D86 /* AnimapkParsingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1506F4F789C146E6B646F18C /* AnimapkParsingTests.swift */; };
@@ -38,6 +39,7 @@
 		8E5DA5D7D9950B728513D3E5 /* GqaHeadMappingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2D891A141A49EBC60BDB3DA /* GqaHeadMappingTests.swift */; };
 		914187C1B6254DDCA7ED3C32 /* QwenNumerics.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0EFD572B87262AE5AAEB996 /* QwenNumerics.swift */; };
 		938A4049C06BE05E39F6BCC1 /* MetalContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F6A1853CF522E32A3743ACB /* MetalContext.swift */; };
+		AF5BAAFDACD2451A4B01C9E4 /* DitRoPETests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38E139072D28862327122F48 /* DitRoPETests.swift */; };
 		B1F8396CD4627BF03101D935 /* case1_danbooru_seed1337_fixture.json in Resources */ = {isa = PBXBuildFile; fileRef = 929D59E59198EBA4F4C291AC /* case1_danbooru_seed1337_fixture.json */; };
 		BF1511FA336984DB3696C3E4 /* t5_tokenizer_config.json in Resources */ = {isa = PBXBuildFile; fileRef = FA4C64A421E46C82C2311767 /* t5_tokenizer_config.json */; };
 		C11949003CD5B39806C65EA3 /* tokenizer_reference_ids.json in Resources */ = {isa = PBXBuildFile; fileRef = CCD024BBBC7CB75E037214B8 /* tokenizer_reference_ids.json */; };
@@ -72,12 +74,14 @@
 		24AA7FDE4D5F416423C74125 /* RealPackDecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealPackDecoderTests.swift; sourceTree = "<group>"; };
 		28C2E8E80AFBE05DB0577977 /* DiTInputTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTInputTests.swift; sourceTree = "<group>"; };
 		2ED51EC9A960D08D2A6835BB /* QuantDecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuantDecoderTests.swift; sourceTree = "<group>"; };
+		38E139072D28862327122F48 /* DitRoPETests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DitRoPETests.swift; sourceTree = "<group>"; };
 		3F6A1853CF522E32A3743ACB /* MetalContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalContext.swift; sourceTree = "<group>"; };
 		43FB54A2EC11428E9AFC19A4 /* Crc32.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Crc32.swift; sourceTree = "<group>"; };
 		4C7A6A2DAA97C767D88AE25B /* AnimaKernels.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = AnimaKernels.metal; sourceTree = "<group>"; };
 		4C8E968875980A2C9ACC94E5 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		4D8B417D7B9040B477BC8CA5 /* DiTWeights.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTWeights.swift; sourceTree = "<group>"; };
 		52E7305B1912F5357ACCAEE5 /* Modulation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Modulation.swift; sourceTree = "<group>"; };
+		63D78F224C62E12AE65A076F /* DitRoPE.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DitRoPE.swift; sourceTree = "<group>"; };
 		67B56E4FB7D12CC1F63A52F9 /* t5_special_tokens_map.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = t5_special_tokens_map.json; sourceTree = "<group>"; };
 		684C63379028C718819607CA /* ModelConstants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelConstants.swift; sourceTree = "<group>"; };
 		6EBD5ADCDE21EF89090D0058 /* DiTInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTInput.swift; sourceTree = "<group>"; };
@@ -193,6 +197,7 @@
 			isa = PBXGroup;
 			children = (
 				6EBD5ADCDE21EF89090D0058 /* DiTInput.swift */,
+				63D78F224C62E12AE65A076F /* DitRoPE.swift */,
 				4D8B417D7B9040B477BC8CA5 /* DiTWeights.swift */,
 				94BC4122B33299CE60424C44 /* LLMAdapter.swift */,
 				52E7305B1912F5357ACCAEE5 /* Modulation.swift */,
@@ -263,6 +268,7 @@
 			children = (
 				1506F4F789C146E6B646F18C /* AnimapkParsingTests.swift */,
 				28C2E8E80AFBE05DB0577977 /* DiTInputTests.swift */,
+				38E139072D28862327122F48 /* DitRoPETests.swift */,
 				D2D891A141A49EBC60BDB3DA /* GqaHeadMappingTests.swift */,
 				C509546307CB21BE0D1A9146 /* LLMAdapterTests.swift */,
 				14DA44DE36980DC498AB4B99 /* ModulationTests.swift */,
@@ -392,6 +398,7 @@
 			files = (
 				5A84CFBB6B28FE55EBE82D86 /* AnimapkParsingTests.swift in Sources */,
 				774F60C7B433299EA6C55C9B /* DiTInputTests.swift in Sources */,
+				AF5BAAFDACD2451A4B01C9E4 /* DitRoPETests.swift in Sources */,
 				8E5DA5D7D9950B728513D3E5 /* GqaHeadMappingTests.swift in Sources */,
 				7DB2CBB89F9ABC72D09B6089 /* LLMAdapterTests.swift in Sources */,
 				7387F6A165EC6A2781B76716 /* ModulationTests.swift in Sources */,
@@ -419,6 +426,7 @@
 				1E52ED71A9AD8B33A91D049C /* Crc32.swift in Sources */,
 				47ABE68F485121B325537344 /* DiTInput.swift in Sources */,
 				0CC965727D9BE3124B87BC36 /* DiTWeights.swift in Sources */,
+				4CF42C1FB7991B03E9360B0D /* DitRoPE.swift in Sources */,
 				263D4D4D7FB4D3766DF07296 /* LLMAdapter.swift in Sources */,
 				EEB3C16094E91013C9ABB9CA /* MappedFile.swift in Sources */,
 				938A4049C06BE05E39F6BCC1 /* MetalContext.swift in Sources */,
