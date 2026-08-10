@@ -1,5 +1,5 @@
 import Foundation
-@_spi(_UnstableSPI)
+import Hub
 import Tokenizers
 
 /// Loads the Qwen + T5 tokenizers from the bundled `tokenizer.json` files (flat, unique
