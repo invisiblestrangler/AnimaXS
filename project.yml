@@ -20,14 +20,19 @@ targets:
       - path: AnimaXS
     resources:
       - path: AnimaXS/Resources
+    info:
+      path: AnimaXS/Info.plist
+      properties:
+        CFBundleDisplayName: AnimaXS
+        UILaunchScreen:
+          UIColorName: ""
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.invisiblestrangler.AnimaXS
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
-        ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: YES
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
     dependencies:
