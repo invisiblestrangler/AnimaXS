@@ -110,10 +110,12 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
 
 ## H — DiT
 
-- [ ] **H001** — DiT input: 17-ch (16 latent + padding mask), patchify 2×2 → 1024 tokens ×68, input proj → 2048 fp32 residual.
+- [x] **H001** — DiT input: 17-ch (16 latent + padding mask), patchify 2×2 → 1024 tokens ×68, input proj → 2048 fp32 residual.
   - deps: E004, E006 · output: DiTInput.swift · validation: shape/token count exact
-- [ ] **H002** — Timestep: sigma-based sinusoidal embed dim 2048 base 10000 + model RMSNorm/MLP path; full fp32.
+  - **DONE 2026-08-10.** `AnimaXS/Runtime/Text/DiTInput.swift` (patchify 2×2, r=1 → (c·4+m·2+n) feature order, x_embedder Linear(68→2048) W4, fp32 residual). Transcribed from `comfy/ldm/cosmos/predict2.py` PatchEmbed (299-309) + prepare_embedded_sequence padding-mask concat (806-816). Validated vs pinned-ComfyUI oracle (`scripts/dit_input_timestep_oracle.py`, commit cbbc9da, same W4 pack): tokens shape (1024,68) exact, x_embedder [1024,2048] cosine **1.00000000** (maxAbs 6.6e-7), all finite. CPU tests `DiTInputTests` (patchify ordering, token count 1024, inChannels 17).
+- [x] **H002** — Timestep: sigma-based sinusoidal embed dim 2048 base 10000 + model RMSNorm/MLP path; full fp32.
   - deps: E005 · output: TimestepEmbedder.swift + CPU reference test · validation: CPU unit test matches
+  - **DONE 2026-08-10.** `AnimaXS/Runtime/Text/TimestepEmbedder.swift` (sigma→sinusoidal dim 2048 base 10000, cos[0:1024]/sin[1024:2048]; Linear1(2048→2048 no bias)→SiLU→Linear2(2048→6144 no bias) = adaln_lora_B_T_3D; RMSNorm on raw sinusoidal = t_embedding_B_T_D; all fp32). Transcribed from predict2.py Timesteps (219-238), TimestepEmbedding (241-269), t_embedding_norm (737, 881-882). Validated vs oracle (same W4 pack): raw sinusoid cosine **1.00000000**, embedding (RMSNorm'd) cosine **1.00000000**, adaln_lora [6144] cosine **1.00000000** (maxAbs 9.9e-5), all finite. CPU tests `TimestepEmbedderTests` (sinusoidal vs torch ref, SiLU).
 - [ ] **H003** — AdaLN LoRA modulation: shift/scale/gate chunk ordering exact per block branch (self/cross/MLP); fp32.
   - deps: H002 · output: Modulation.swift + CPU test · validation: CPU unit test equations exact
 - [ ] **H004** — DiT 3-D RoPE: T/H/W axes, 42/42/44 split, theta 42871.1/10000, 2×2 rotation blocks; CPU impl first; self-attn only.

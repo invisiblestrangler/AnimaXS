@@ -29,6 +29,8 @@ Env: `CI-sim` = GitHub Actions simulator · `CI-dev` = generic device build · `
 | H003 | CPU modulation reference | AnimaXSTests | pending | CI-sim |
 | H004 | CPU RoPE reference | AnimaXSTests | pending | CI-sim |
 | J003 | GroupNorm CPU reference | AnimaXSTests | pending | CI-sim |
+| H001 | DiT input patchify ordering + token count (1024×68) + inChannels 17 | AnimaXSTests (DiTInputTests) | RAN (pending CI on next push) | CI-sim |
+| H002 | Timestep sinusoidal vs torch reference + SiLU | AnimaXSTests (TimestepEmbedderTests) | RAN (pending CI on next push) | CI-sim |
 
 ## Metal (where a Metal device exists)
 | ID | Test | Status | Env |
@@ -49,6 +51,8 @@ Env: `CI-sim` = GitHub Actions simulator · `CI-dev` = generic device build · `
 | F005 | TE final context ≈ golden (cosine 0.992, structural 1.0 vs oracle) | RAN (harness, real pack) | local |
 | G001 | adapter conditioning [1,512,1024] ≈ oracle (cosine 1.000000) | RAN (harness, real pack) | local |
 | G001 | adapter output finite + padded tail zero | RAN (harness, real pack) | local |
+| H001 | DiT input x_embedder [1024,2048] ≈ oracle (cosine 1.000000, maxAbs 6.6e-7) | RAN (harness, real pack) | local |
+| H002 | timestep embedding + adaln [6144] ≈ oracle (cosine 1.000000, all finite) | RAN (harness, real pack) | local |
 | H005 | block 0 ≈ golden | pending | CI-sim/A12 |
 | H006 | 28 blocks finite | pending | CI-sim/A12 |
 | I002 | 8 step latents finite/≈ step_latents | pending | CI-sim/A12 |
