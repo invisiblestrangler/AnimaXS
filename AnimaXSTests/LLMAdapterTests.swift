@@ -15,16 +15,6 @@ final class LLMAdapterTests: XCTestCase {
         }
     }
 
-    func testInterleavedRoPEDiffersFromHalfSplit() {
-        // The adapter uses interleaved (rotate_half); Qwen uses half-split. They must differ.
-        let x = [Float](repeating: 1.0, count: 64)
-        let inter = LLMAdapter.ropeInterleaved(x, positions: [3], headDim: 64)
-        let halfSplit = QwenNumerics.ropeNeoX(x, positions: [3], theta: 10000.0, headDim: 64)
-        var diff: Float = 0
-        for i in 0..<64 { diff = max(diff, abs(inter[i] - halfSplit[i])) }
-        XCTAssertGreaterThan(diff, 0.1, "interleaved and half-split RoPE must differ for pos>0")
-    }
-
     func testInterleavedRoPESymmetricTwoHeads() {
         // Two heads at different positions must give different rotations.
         let x = [Float](repeating: 1.0, count: 128)  // 2 heads

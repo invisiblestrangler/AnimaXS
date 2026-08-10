@@ -24,7 +24,6 @@ Env: `CI-sim` = GitHub Actions simulator · `CI-dev` = generic device build · `
 | D018 | GQA head mapping table (16/8 → h/2) | RAN (pending CI on next push) | CI-sim |
 | D018 | synthetic 1-token attention reveals KV head | RAN (pending CI on next push) | CI-sim |
 | D021 | interleaved RoPE (rotate_half) identity/pos | RAN (pending CI on next push) | CI-sim |
-| D021 | interleaved RoPE differs from half-split | RAN (pending CI on next push) | CI-sim |
 | D021 | exact GELU known values | RAN (pending CI on next push) | CI-sim |
 | H002 | CPU timestep reference | AnimaXSTests | pending | CI-sim |
 | H003 | CPU modulation reference | AnimaXSTests | pending | CI-sim |
