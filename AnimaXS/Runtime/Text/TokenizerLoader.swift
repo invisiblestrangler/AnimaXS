@@ -53,9 +53,11 @@ enum TokenizerLoader {
             bridged[NSString(string: String(describing: key))] = value
         }
         let tokenizerData = Config(bridged)
+        // Build the config with explicit Config values (a String *variable* does not
+        // auto-convert to Config; only string literals do via ExpressibleByStringLiteral).
         let tokenizerConfig: Config = [
-            "tokenizer_class": tokenizerClass,
-            "clean_up_tokenization_spaces": false,
+            "tokenizer_class": Config(tokenizerClass),
+            "clean_up_tokenization_spaces": Config(false),
         ]
         return try AutoTokenizer.from(tokenizerConfig: tokenizerConfig, tokenizerData: tokenizerData)
     }
