@@ -19,7 +19,9 @@ targets:
     sources:
       - path: AnimaXS
     resources:
-      - path: AnimaXS/Resources
+      - path: AnimaXS/Resources/Tokenizers
+        type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.invisiblestrangler.AnimaXS
