@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+  XCODEGEN_VERSION: 2.44.1
+
+jobs:
+  # Job 1 — project consistency: regenerate from project.yml, fail if committed project differs.
+  project-consistency:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26.3 (fail if wrong)
+        run: |
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          V=$(xcodebuild -version | awk '/Xcode/{print $2}')
+          echo "Xcode $V"
+          [ "$V" = "26.3" ] || { echo "Expected Xcode 26.3, got $V"; exit 1; }
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphonesimulator --show-sdk-version
+          df -h
+      - name: Ensure Metal toolchain
+        run: |
+          if ! xcrun --find metal >/dev/null 2>&1; then
+            echo "Metal compiler missing — downloading MetalToolchain component"
+            xcodebuild -downloadComponent MetalToolchain
+            sudo xcode-select -s "$DEVELOPER_DIR"
+          else
+            echo "Metal compiler present: $(xcrun --find metal)"
+          fi
+      - name: Install XcodeGen
+        run: |
+          which xcodegen || brew install xcodegen
+          xcodegen version
+      - name: Regenerate and assert no diff
+        run: |
+          xcodegen generate
+          if ! git diff --exit-code -- AnimaXS.xcodeproj project.yml; then
+            echo "::error::Committed xcodeproj out of sync with project.yml. Run bootstrap-project workflow or commit the regeneration."
+            exit 1
+          fi
+
+  # Job 2 — iPhone (device) build without signing.
+  iphone-build:
+    runs-on: macos-15
+    needs: project-consistency
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26.3 + Metal toolchain
+        run: |
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          xcodebuild -version
+          if ! xcrun --find metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+            sudo xcode-select -s "$DEVELOPER_DIR"
+          fi
+      - name: Build for generic iOS device (no signing)
+        run: |
+          xcodebuild \
+            -project AnimaXS.xcodeproj \
+            -scheme AnimaXS \
+            -configuration Debug \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+  # Job 3 — simulator unit tests (discover an available iPhone simulator dynamically).
+  simulator-tests:
+    runs-on: macos-15
+    needs: project-consistency
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26.3 + Metal toolchain
+        run: |
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          xcodebuild -version
+          if ! xcrun --find metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+            sudo xcode-select -s "$DEVELOPER_DIR"
+          fi
+      - name: Find an available iPhone simulator
+        id: sim
+        run: |
+          DEST=$(xcrun simctl list devices available -j \
+            | python3 -c "import sys,json;d=json.load(sys.stdin);[print(dv['udid']) for rt in d['devices'].values() for dv in rt if 'iPhone' in dv['name'] and dv['isAvailable']]" \
+            | head -1)
+          echo "Using simulator udid: $DEST"
+          echo "sim=$DEST" >> "$GITHUB_OUTPUT"
+      - name: Run unit tests on simulator
+        run: |
+          xcodebuild \
+            -project AnimaXS.xcodeproj \
+            -scheme AnimaXS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.sim }}" \
+            CODE_SIGNING_ALLOWED=NO \
+            test
+
+  # Job 4 — pure-reference tests that never need GPU/device behavior.
+  # (Simulator job already covers most; this is the explicit reference-test gate.)
+  reference-tests:
+    runs-on: macos-15
+    needs: project-consistency
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode 26.3
+        run: |
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          xcodebuild -version
+      - name: Find an available iPhone simulator
+        id: sim
+        run: |
+          DEST=$(xcrun simctl list devices available -j \
+            | python3 -c "import sys,json;d=json.load(sys.stdin);[print(dv['udid']) for rt in d['devices'].values() for dv in rt if 'iPhone' in dv['name'] and dv['isAvailable']]" \
+            | head -1)
+          echo "sim=$DEST" >> "$GITHUB_OUTPUT"
+      - name: Run reference-only test suite
+        run: |
+          # Runs the full test target on the simulator. Parser/decoder/sampler/numeric/manifest
+          # tests are pure Swift and need no GPU. As each named suite (AnimapkParsingTests,
+          # QuantDecoderTests, SamplerTests, ReferenceNumericTests, ManifestAndCheckpointTests)
+          # lands, narrow this with -only-testing filters to keep the reference gate explicit.
+          xcodebuild \
+            -project AnimaXS.xcodeproj \
+            -scheme AnimaXS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.sim }}" \
+            CODE_SIGNING_ALLOWED=NO \
+            test

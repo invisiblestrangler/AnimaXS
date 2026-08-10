@@ -1,0 +1,26 @@
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Model packs — NEVER commit large weights to git
+*.animapk
+
+# Local model cache
+Models/
+
+# OS
+.DS_Store
+
+# Secrets
+*.pem
+*.key
+GITHUB_PAT*

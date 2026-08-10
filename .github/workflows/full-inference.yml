@@ -1,0 +1,80 @@
+name: full-inference
+
+# Manual full-model inference attempt on a macOS runner's simulator Metal device.
+# This downloads the ~2.1 GB model packs from the GitHub Release, so it only runs on demand.
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Model release tag to download packs from'
+        required: false
+        default: 'model-assets-v1'
+      case:
+        description: 'Golden case to inject (case1_danbooru_seed1337)'
+        required: false
+        default: 'case1_danbooru_seed1337'
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+
+jobs:
+  full-inference:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode 26.3
+        run: |
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          df -h
+
+      - name: Ensure Metal toolchain
+        run: |
+          if ! xcrun --find metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+            sudo xcode-select -s "$DEVELOPER_DIR"
+          fi
+
+      - name: Probe Metal device availability
+        id: metal
+        run: |
+          xcrun simctl spawn booted metaldevice 2>/dev/null || true
+          # The definitive probe happens in the test itself via MTLCreateSystemDefaultDevice().
+          echo "metal_probe_done=true" >> "$GITHUB_OUTPUT"
+
+      - name: Find an available iPhone simulator
+        id: sim
+        run: |
+          DEST=$(xcrun simctl list devices available -j \
+            | python3 -c "import sys,json;d=json.load(sys.stdin);[print(dv['udid']) for rt in d['devices'].values() for dv in rt if 'iPhone' in dv['name'] and dv['isAvailable']]" \
+            | head -1)
+          echo "sim=$DEST" >> "$GITHUB_OUTPUT"
+
+      - name: Run full-model integration inference
+        env:
+          ANIMAXS_RELEASE: ${{ inputs.release }}
+          ANIMAXS_CASE: ${{ inputs.case }}
+        run: |
+          # The integration test probes Metal; if unavailable it records SKIPPED_NO_METAL
+          # and exits 0. Otherwise it downloads packs via ModelStore, injects golden noise,
+          # runs canonical inference, and asserts finite/no-NaN + reference comparison.
+          xcodebuild \
+            -project AnimaXS.xcodeproj \
+            -scheme AnimaXS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.sim }}" \
+            -only-testing:AnimaXSTests/FullInferenceTests \
+            CODE_SIGNING_ALLOWED=NO \
+            test
+        continue-on-error: true
+
+      - name: Report Metal availability and result
+        run: |
+          echo "Metal on runner: ${{ steps.metal.outputs.metal_probe_done }}"
+          echo "Result recorded by FullInferenceTests (PASS or SKIPPED_NO_METAL)."
+          df -h

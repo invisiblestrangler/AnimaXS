@@ -1,0 +1,50 @@
+name: AnimaXS
+options:
+  bundleIdPrefix: com.invisiblestrangler
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+    CODE_SIGN_STYLE: Automatic
+    # No DEVELOPMENT_TEAM committed — user selects their team locally.
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+targets:
+  AnimaXS:
+    type: application
+    platform: iOS
+    sources:
+      - path: AnimaXS
+    resources:
+      - path: AnimaXS/Resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.invisiblestrangler.AnimaXS
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+    dependencies:
+      - package: swift-transformers
+  AnimaXSTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: AnimaXSTests
+    dependencies:
+      - target: AnimaXS
+        embed: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.invisiblestrangler.AnimaXSTests
+        GENERATE_INFOPLIST_FILE: YES
+packages:
+  swift-transformers:
+    url: https://github.com/huggingface/swift-transformers
+    exactVersion: 1.3.3
