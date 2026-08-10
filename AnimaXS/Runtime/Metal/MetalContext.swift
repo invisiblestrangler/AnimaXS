@@ -20,7 +20,7 @@ final class MetalContext {
     private(set) var supportsApple5: Bool = false
     private(set) var maxBufferLength: Int = 0
     private(set) var maxThreadgroupMemoryLength: Int = 0
-    private(set) var recommendedMaxWorkingSetSize: Int = 0
+    private(set) var recommendedMaxWorkingSetSize: UInt64 = 0
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice() else { return nil }
@@ -44,7 +44,9 @@ final class MetalContext {
     /// Fetch (or build) a compute pipeline state for a named kernel.
     func pipeline(named name: String) throws -> MTLComputePipelineState {
         if let p = pipelineCache[name] { return p }
-        let fn = try library.makeFunction(name: name)
+        guard let fn = library.makeFunction(name: name) else {
+            throw AnimapkError.validation("Metal kernel '\(name)' not found in library")
+        }
         let p = try device.makeComputePipelineState(function: fn)
         pipelineCache[name] = p
         return p
