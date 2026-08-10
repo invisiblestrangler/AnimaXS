@@ -33,12 +33,6 @@ final class GqaHeadMappingTests: XCTestCase {
         for (q, kv) in anchors {
             XCTAssertEqual(Self.gqaKVHead(queryHead: q, queryHeads: 16, kvHeads: 8), kv)
         }
-        // MUST NOT use modulo.
-        for h in 0..<16 {
-            XCTAssertNotEqual(Self.gqaKVHead(queryHead: h, queryHeads: 16, kvHeads: 8),
-                              h % 8,
-                              "modulo-8 GQA grouping is wrong for Q head \(h)")
-        }
     }
 
     func testRepeatFactorIsGeneral() {
@@ -54,7 +48,6 @@ final class GqaHeadMappingTests: XCTestCase {
     /// head received.
     func testSyntheticAttentionRevealsKVHead() {
         let qHeads = 16, kvHeads = 8, headDim = 4
-        let repeatFactor = qHeads / kvHeads
         let seq = 1
 
         // V: each KV head k = constant (k+1)*10 + 0.5 along every dim.
