@@ -14,6 +14,7 @@
 		1CE2D9C17323437A5B23EBF3 /* ReferenceTestsPlaceholder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 745BAB5E53065E6639F8BEA2 /* ReferenceTestsPlaceholder.swift */; };
 		1E52ED71A9AD8B33A91D049C /* Crc32.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43FB54A2EC11428E9AFC19A4 /* Crc32.swift */; };
 		21F05B3A1A0BB661716C0512 /* TokenizerParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1319CA9D168F08F49BA3EB /* TokenizerParityTests.swift */; };
+		263D4D4D7FB4D3766DF07296 /* LLMAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94BC4122B33299CE60424C44 /* LLMAdapter.swift */; };
 		2BB3F23123E300162C938052 /* Hub in Frameworks */ = {isa = PBXBuildFile; productRef = A3FB76126987D0B653947E56 /* Hub */; };
 		2F02983AD55700559562DA54 /* qwen_tokenizer.json in Resources */ = {isa = PBXBuildFile; fileRef = F28A65A79E0706DF0F0D5AB2 /* qwen_tokenizer.json */; };
 		30116E9CBC6BF3DBEA66C41E /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C8E968875980A2C9ACC94E5 /* ContentView.swift */; };
@@ -25,6 +26,7 @@
 		71B669F9AF60FB45E4842F57 /* t5_special_tokens_map.json in Resources */ = {isa = PBXBuildFile; fileRef = 67B56E4FB7D12CC1F63A52F9 /* t5_special_tokens_map.json */; };
 		79E4DFD6600B4D04E8C93CD6 /* TestExtensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC3BA5B832C616E518D657FC /* TestExtensions.swift */; };
 		7CD76E6444C119FE1BDBC89F /* AnimaXSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D9CD1A114D528F42F21C527 /* AnimaXSApp.swift */; };
+		7DB2CBB89F9ABC72D09B6089 /* LLMAdapterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C509546307CB21BE0D1A9146 /* LLMAdapterTests.swift */; };
 		7E991650CBABF20B20E112AE /* AnimapkTensor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C416E0528D650EED48130A92 /* AnimapkTensor.swift */; };
 		869CE73742B23D7225305BC1 /* ModelConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 684C63379028C718819607CA /* ModelConstants.swift */; };
 		89975ACE65D7BB793965DA7B /* QuantDecoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2ED51EC9A960D08D2A6835BB /* QuantDecoderTests.swift */; };
@@ -72,8 +74,10 @@
 		830D15B6FF7E37A06B2C08B2 /* TestPackFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestPackFactory.swift; sourceTree = "<group>"; };
 		8DBF5298EC8B0B81AF89019C /* TokenizerLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenizerLoader.swift; sourceTree = "<group>"; };
 		929D59E59198EBA4F4C291AC /* case1_danbooru_seed1337_fixture.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = case1_danbooru_seed1337_fixture.json; sourceTree = "<group>"; };
+		94BC4122B33299CE60424C44 /* LLMAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMAdapter.swift; sourceTree = "<group>"; };
 		9DA452A409BF52C73769318E /* MappedFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MappedFile.swift; sourceTree = "<group>"; };
 		C416E0528D650EED48130A92 /* AnimapkTensor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkTensor.swift; sourceTree = "<group>"; };
+		C509546307CB21BE0D1A9146 /* LLMAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMAdapterTests.swift; sourceTree = "<group>"; };
 		CCD024BBBC7CB75E037214B8 /* tokenizer_reference_ids.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = tokenizer_reference_ids.json; sourceTree = "<group>"; };
 		D2D891A141A49EBC60BDB3DA /* GqaHeadMappingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GqaHeadMappingTests.swift; sourceTree = "<group>"; };
 		D576867ECC53CBF14CC30F79 /* AnimapkFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkFile.swift; sourceTree = "<group>"; };
@@ -174,6 +178,7 @@
 		8A48E27B74EE38F1C7DF8E71 /* Text */ = {
 			isa = PBXGroup;
 			children = (
+				94BC4122B33299CE60424C44 /* LLMAdapter.swift */,
 				8094627F9958515821CFE276 /* QwenEncoderCPU.swift */,
 				E0EFD572B87262AE5AAEB996 /* QwenNumerics.swift */,
 				8DBF5298EC8B0B81AF89019C /* TokenizerLoader.swift */,
@@ -240,6 +245,7 @@
 			children = (
 				1506F4F789C146E6B646F18C /* AnimapkParsingTests.swift */,
 				D2D891A141A49EBC60BDB3DA /* GqaHeadMappingTests.swift */,
+				C509546307CB21BE0D1A9146 /* LLMAdapterTests.swift */,
 				2ED51EC9A960D08D2A6835BB /* QuantDecoderTests.swift */,
 				24AA7FDE4D5F416423C74125 /* RealPackDecoderTests.swift */,
 				745BAB5E53065E6639F8BEA2 /* ReferenceTestsPlaceholder.swift */,
@@ -365,6 +371,7 @@
 			files = (
 				5A84CFBB6B28FE55EBE82D86 /* AnimapkParsingTests.swift in Sources */,
 				8E5DA5D7D9950B728513D3E5 /* GqaHeadMappingTests.swift in Sources */,
+				7DB2CBB89F9ABC72D09B6089 /* LLMAdapterTests.swift in Sources */,
 				89975ACE65D7BB793965DA7B /* QuantDecoderTests.swift in Sources */,
 				19655429A907FC60821F1867 /* RealPackDecoderTests.swift in Sources */,
 				1CE2D9C17323437A5B23EBF3 /* ReferenceTestsPlaceholder.swift in Sources */,
@@ -386,6 +393,7 @@
 				7E991650CBABF20B20E112AE /* AnimapkTensor.swift in Sources */,
 				30116E9CBC6BF3DBEA66C41E /* ContentView.swift in Sources */,
 				1E52ED71A9AD8B33A91D049C /* Crc32.swift in Sources */,
+				263D4D4D7FB4D3766DF07296 /* LLMAdapter.swift in Sources */,
 				EEB3C16094E91013C9ABB9CA /* MappedFile.swift in Sources */,
 				938A4049C06BE05E39F6BCC1 /* MetalContext.swift in Sources */,
 				869CE73742B23D7225305BC1 /* ModelConstants.swift in Sources */,
