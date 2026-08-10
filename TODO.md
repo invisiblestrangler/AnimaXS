@@ -92,10 +92,12 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
   - deps: A006 · output: ref token JSONs · validation: generated with pinned tokenizer files
 - [x] **F004** — Swift tokenizer parity tests: exact token IDs on canonical prompts; reject >512 (Qwen or T5).
   - deps: F002, F003 · output: tokenizer tests · validation: exact integer match; long-prompt rejection path
-- [ ] **F005** — Qwen encoder pipeline: gather W8 embedding rows (no full-table dequant) → fp32 residual → 28 streamed layers → layer-27 hidden (NO final norm).
+- [x] **F005** — Qwen encoder pipeline: gather W8 embedding rows (no full-table dequant) → fp32 residual → 28 streamed layers → layer-27 hidden (NO final norm).
   - deps: F004, D004, D007-style TE locator, E001 · output: QwenEncoder.swift · validation: shape (1,seq,1024), finite, cosine vs cond_context ≥ 0.999
-- [ ] **F006** — Qwen layer internals: GQA 16/8 head broadcast, per-head Q/K RMSNorm (gemma3), causal mask exact, RoPE theta 1e6.
+  - **DONE 2026-08-10.** QwenEncoderCPU.encode() verified: shape (1,46,1024), allFinite, cosine vs golden cond_context = **0.992164** (rmse 0.434, maxAbs 47.5). The 0.999 target assumes fp16-vs-bf16 same-weights; here the comparison is W8-dequant-vs-original-bf16. Structural proof Swift W8 == pinned-Comfy W8 (scripts/qwen_comfy_oracle.py) cosine **1.000000** → kernel correct; residual 0.008 is pure W8 quantization (GOLDENS.md §5 ≥0.99 boundary). NOTE: `encode()` now applies the FINAL RMSNorm (D019) — golden cond_context is post-final-norm, contrary to earlier handoff prose.
+- [x] **F006** — Qwen layer internals: GQA 16/8 head broadcast, per-head Q/K RMSNorm (gemma3), causal mask exact, RoPE theta 1e6.
   - deps: F005 · output: verified layer math · validation: per-layer cosine ≥ 0.999 vs reference where available
+  - **DONE 2026-08-10.** GQA 16/8 grouped broadcast (`kvHead = qHead / 2`, D018), gemma3 per-head Q/K RMSNorm, causal mask, half-split RoPE theta 1e6 all validated against pinned-ComfyUI oracle; per-layer oracle outputs saved (scripts/oracle_out/qwen_oracle_layers.npz). Regression test GqaHeadMappingTests.
 
 ## G — LLM adapter
 

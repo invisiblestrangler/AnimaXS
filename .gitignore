@@ -25,3 +25,6 @@ Models/
 *.pem
 *.key
 GITHUB_PAT*
+
+# Oracle raw output (regenerable by harness); keep the .npz fixtures, drop .f32
+scripts/oracle_out/*.f32

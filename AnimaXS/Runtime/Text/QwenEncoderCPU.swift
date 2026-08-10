@@ -12,6 +12,7 @@ struct QwenEncoderCPU {
     let pack: AnimapkFile
     let embedding: AnimapkTensor
     let layerTensors: [[String: AnimapkTensor]]  // 28 layers, each 11 tensors by suffix
+    let finalNorm: AnimapkTensor?               // model.norm.weight (final RMSNorm)
 
     private static let layerCount = 28
     private static let hidden = 1024
@@ -25,6 +26,7 @@ struct QwenEncoderCPU {
         self.pack = pack
         guard let emb = pack.tensor(named: "model.embed_tokens.weight") else { return nil }
         self.embedding = emb
+        self.finalNorm = pack.tensor(named: "model.norm.weight")
 
         var layers: [[String: AnimapkTensor]] = []
         for l in 0..<Self.layerCount {
@@ -87,11 +89,20 @@ struct QwenEncoderCPU {
 
     // MARK: - Forward
 
-    /// Encode a token sequence → [seq, hidden] last-layer hidden (no final norm).
+    /// Encode a token sequence → [seq, hidden] cond_context.
+    /// Pinned ComfyUI: cond_context = BaseLlama.forward last-layer output AFTER the final
+    /// RMSNorm. Qwen3_06BConfig.final_norm=True (llama.py:130) AND anima.py Qwen3_06BModel
+    /// layer_norm_hidden_state=False only suppresses final norm on the *intermediate* path;
+    /// the main output z (layer=="last") is post-final-norm. Verified: golden cond_context
+    /// matches oracle POST-final-norm (cosine 0.992) vs pre-final-norm (0.62).
     func encode(tokenIDs: [Int]) -> [[Float]] {
         var x = gatherEmbedding(rows: tokenIDs)   // [seq, 1024]
         for l in 0..<Self.layerCount {
             x = runLayer(x, layerIndex: l)
+        }
+        if let norm = finalNorm {
+            let w = dequantVector(norm, n: Self.hidden)
+            x = QwenNumerics.rmsNormRows(x, weight: w, eps: Self.eps)
         }
         return x
     }
@@ -146,13 +157,18 @@ struct QwenEncoderCPU {
         let qRope = QwenNumerics.ropeNeoX(qFlat, positions: qPositions, theta: 1_000_000, headDim: Self.headDim)
         let kRope = QwenNumerics.ropeNeoX(kFlat, positions: kPositions, theta: 1_000_000, headDim: Self.headDim)
 
-        // GQA attention: Q head h reads KV head (h % 8). head_dim 128. Causal mask.
+        // GQA attention: Q head h reads KV head (h / repeatFactor), repeatFactor = heads/kvHeads = 2.
+        // Pinned ComfyUI comfy/ops.repeat_kv_for_gqa uses repeat_interleave(n_rep) → contiguous
+        // grouped KV heads [K0,K0,K1,K1,...]. See docs/QWEN_ENCODER_DEBUG.md + GqaHeadMappingTests.
+        // Do NOT use h % kvHeads (round-robin) — that is the wrong grouping.
         var attnOut = [[Float]](repeating: [Float](repeating: 0, count: 16 * 128), count: seq)
         let qHidden = 16 * 128
         let kvHidden = 8 * 128
+        let repeatFactor = Self.heads / Self.kvHeads
+        precondition(Self.heads % Self.kvHeads == 0, "query heads must be divisible by kv heads")
         for i in 0..<seq {
             for h in 0..<Self.heads {
-                let kvHead = h % Self.kvHeads  // GQA
+                let kvHead = h / repeatFactor  // GQA (grouped); NOT h % kvHeads
                 // q head h of token i
                 var qHead = [Float](repeating: 0, count: Self.headDim)
                 let qBase = i * qHidden + h * Self.headDim

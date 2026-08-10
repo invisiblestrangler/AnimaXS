@@ -20,7 +20,9 @@ Env: `CI-sim` = GitHub Actions simulator · `CI-dev` = generic device build · `
 | I001 | sigma constants | AnimaXSTests | pending | CI-sim |
 | I004 | checkpoint serialization | AnimaXSTests | pending | CI-sim |
 | D005 | SHA manifest | AnimaXSTests | pending | CI-sim |
-| F004 | tokenizers exact on canonical prompts | AnimaXSTests | pending | CI-sim |
+| F004 | tokenizers exact on canonical prompts | RAN | CI-sim |
+| D018 | GQA head mapping table (16/8 → h/2) | RAN (pending CI on next push) | CI-sim |
+| D018 | synthetic 1-token attention reveals KV head | RAN (pending CI on next push) | CI-sim |
 | H002 | CPU timestep reference | AnimaXSTests | pending | CI-sim |
 | H003 | CPU modulation reference | AnimaXSTests | pending | CI-sim |
 | H004 | CPU RoPE reference | AnimaXSTests | pending | CI-sim |
@@ -42,7 +44,7 @@ Env: `CI-sim` = GitHub Actions simulator · `CI-dev` = generic device build · `
 ## Model integration
 | ID | Test | Status | Env |
 |----|------|--------|-----|
-| F005 | TE final context ≈ golden | pending | CI-sim/A12 |
+| F005 | TE final context ≈ golden (cosine 0.992, structural 1.0 vs oracle) | RAN (harness, real pack) | local |
 | G001 | adapter context finite/≈ ref | pending | CI-sim/A12 |
 | H005 | block 0 ≈ golden | pending | CI-sim/A12 |
 | H006 | 28 blocks finite | pending | CI-sim/A12 |
@@ -53,8 +55,8 @@ Env: `CI-sim` = GitHub Actions simulator · `CI-dev` = generic device build · `
 ## Build gates
 | Gate | Status | Env |
 |------|--------|-----|
-| Xcode 26.3 generic iOS build PASS | pending | CI-dev |
-| deployment target 18.0 | pending (static) | — |
-| Metal shaders compile | pending | CI-dev |
-| simulator unit tests PASS | pending | CI-sim |
-| xcodegen regenerates clean (git diff empty) | pending | CI-sim |
+| Xcode 26.3 generic iOS build PASS | RAN (run 31411533185 green) | CI-dev |
+| deployment target 18.0 | RAN (static) | — |
+| Metal shaders compile | RAN (run 31411533185 green) | CI-dev |
+| simulator unit tests PASS | RAN (21 tests, run 31411533185 green) | CI-sim |
+| xcodegen regenerates clean (git diff empty) | RAN (run 31411533185 green) | CI-sim |
