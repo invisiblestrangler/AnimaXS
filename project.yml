@@ -32,6 +32,7 @@ targets:
         SUPPORTS_MACCATALYST: NO
     dependencies:
       - package: swift-transformers
+        product: Tokenizers
   AnimaXSTests:
     type: bundle.unit-test
     platform: iOS
