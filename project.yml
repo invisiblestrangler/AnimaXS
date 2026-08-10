@@ -20,19 +20,15 @@ targets:
       - path: AnimaXS
     resources:
       - path: AnimaXS/Resources
-    info:
-      path: AnimaXS/Info.plist
-      properties:
-        CFBundleDisplayName: AnimaXS
-        UILaunchScreen:
-          UIColorName: ""
-        UIApplicationSceneManifest:
-          UIApplicationSupportsMultipleScenes: false
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.invisiblestrangler.AnimaXS
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
+        # Committed Info.plist (see AnimaXS/Info.plist). A committed plist is used rather
+        # than XcodeGen 'info:' generation so a clean clone always has the file.
+        INFOPLIST_FILE: AnimaXS/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
     dependencies:
