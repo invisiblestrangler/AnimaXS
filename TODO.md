@@ -48,13 +48,13 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
 
 ## D — Animapk / model store
 
-- [ ] **D001** — Swift ANMA v1 parser: MappedFile (mmap), AnimapkHeader, AnimapkTensor, AnimapkFile; JSON-authoritative names/shapes; blobOffset index; full validation (magic/version/size/alignment/ranges).
+- [x] **D001** — Swift ANMA v1 parser: MappedFile (mmap), AnimapkHeader, AnimapkTensor, AnimapkFile; JSON-authoritative names/shapes; blobOffset index; full validation (magic/version/size/alignment/ranges).
   - deps: B002 · output: 4 Swift files · validation: parser unit tests pass (synthetic + real pack where available)
-- [ ] **D002** — CRC32 (zlib) per-tensor verification in parser.
+- [x] **D002** — CRC32 (zlib) per-tensor verification in parser.
   - deps: D001 · output: crc check API · validation: synthetic fixture crc passes; real packs 0 mismatches
-- [ ] **D003** — CPU reference W4 decoder (nibble order, group=64, fp16 scale/zero) + known vector test (block0 mlp.layer1 first bytes/scales).
+- [x] **D003** — CPU reference W4 decoder (nibble order, group=64, fp16 scale/zero) + known vector test (block0 mlp.layer1 first bytes/scales).
   - deps: D001 · output: W4Decoder.swift + tests · validation: known first-values match handoff
-- [ ] **D004** — CPU reference W8 decoder + real embedding-row vector test.
+- [x] **D004** — CPU reference W8 decoder + real embedding-row vector test.
   - deps: D001 · output: W8Decoder.swift + tests · validation: matches HANDOFF.md documented vector
 - [ ] **D005** — ModelManifest: built-in manifest struct (filename/size/sha256/URL/component) + incremental CryptoKit SHA256.
   - deps: B002 · output: ModelManifest.swift · validation: unit tests on synthetic file + known hash

@@ -1,13 +1,18 @@
 # STATUS — AnimaXS (keep short & current)
 
-- **Current milestone:** Phase 3 bootstrap (repo + project + CI green)
-- **Current task:** B002 project.yml + app skeleton
-- **Last green commit:** (none yet — repo initialized)
-- **Current CI run:** (none yet)
-- **What currently works:** Preflight complete. All model assets verified by SHA-256. GitHub creds OK, repo `invisiblestrangler/AnimaXS` verified empty+public. Runner facts verified (Xcode 26.3 / iOS 26.2 SDK / XcodeGen not preinstalled / swift-transformers 1.3.3). Persistent context files created.
-- **What currently fails:** Nothing built yet.
-- **Known device-only unknowns:** MPS fp16 accuracy on Apple5; A12 memory/jetsam; A12 perf/watchdog/thermal. (PENDING — no physical device.)
+- **Current milestone:** Phase 3 — animapk parser + quant decoders validated against real packs
+- **Current task:** Commit parser + tests; wire CI green; then Metal context (E001)
+- **Last green commit:** 5b1ec67 (ci: require committed xcodeproj) + bootstrap committed xcodeproj (c38a7af)
+- **Current CI run:** (push CI; last one failed on missing committed xcodeproj — now committed)
+- **What currently works:**
+  - Repo `invisiblestrangler/AnimaXS` populated, xcodeproj generated+committed (XcodeGen)
+  - Swift ANMA v1 parser: header/JSON/table, JSON-authoritative names+shapes, blobOffset index, CRC-32, alignment, range checks
+  - CPU W4/W8 decoders (fp16 scale/zero, group 64, nibble order)
+  - Validated against real packs: all 1,189 tensors CRC-clean, all blobOffsets 16 KB aligned, W4/W8 known vectors byte-exact, DiT block + TE layer physical ordering confirmed
+  - 3 test suites: AnimapkParsingTests (synthetic), QuantDecoderTests (mechanics), RealPackDecoderTests (env-gated real packs)
+- **What currently fails:** Nothing known. CI not yet re-run after parser commit.
+- **Known device-only unknowns:** MPS fp16 accuracy on Apple5; A12 memory/jetsam/perf/watchdog/thermal. (PENDING — no physical device.)
 - **Next three tasks:**
-  1. B002 — project.yml + app skeleton + test target
-  2. B003 — bootstrap job generates + commits xcodeproj
-  3. B004–B006 — ci.yml jobs 1–3 green
+  1. Commit parser+decoders+tests; push; get CI green
+  2. E001 — MetalContext + probe
+  3. E002 — Metal dequant kernels (w4/w8 to half)
