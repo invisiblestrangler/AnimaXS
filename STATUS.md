@@ -1,9 +1,9 @@
 # STATUS — AnimaXS (keep short & current)
 
 - **Current milestone:** Phase 3 — Qwen encoder + LLM adapter validated; **DiT input (H001) + timestep embedder (H002) DONE and validated vs oracle**. Next: H003 AdaLN modulation.
-- **Current task:** Commit H001/H002 + tests + oracle; green CI; then H003 AdaLN LoRA modulation.
-- **Last green commit:** a02582d (CI run 31423768681, all 3 jobs GREEN). HEAD currently at H001/H002 work (uncommitted).
-- **Current CI run:** pending (H001/H002 commit not yet pushed).
+- **Current task:** H003 AdaLN LoRA modulation (shift/scale/gate chunk ordering per branch; fp32) + CPU test.
+- **Last green commit:** 870741f (xcodeproj regen for H001/H002). CI run 31428466054 — all 3 jobs GREEN (project-consistency, iphone-build, simulator-tests incl. new DiTInputTests + TimestepEmbedderTests).
+- **Current CI run:** GREEN (31428466054 on 870741f).
 - **What currently works:**
   - **CI fully green**: Xcode 26.3 ARM device build (incl. Metal shaders + swift-transformers), simulator tests pass
   - Swift ANMA parser (JSON-authoritative, CRC-32, alignment, ranges) — validated vs real packs
