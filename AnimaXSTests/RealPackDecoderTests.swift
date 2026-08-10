@@ -45,13 +45,10 @@ final class RealPackDecoderTests: XCTestCase {
         let url = URL(fileURLWithPath: Self.packEnv! + "/anima-turbo-v1.0-xsmax-w4.animapk")
         let file = try AnimapkFile(url: url)
         let t = try XCTUnwrap(file.tensor(named: "model.diffusion_model.blocks.0.mlp.layer1.weight"))
-        var out = [Float](repeating: 0, count: 8)
-        out.withUnsafeMutableBytes { ob in
-            QuantDecoders.dequantW4(data: file.dataBytes(t),
-                                    scale: file.scaleBytes(t)!,
-                                    zero: file.zeroBytes(t)!,
-                                    k: 8, into: ob)
-        }
+        let out = QuantDecoders.dequantW4(data: file.dataBytes(t).data,
+                                          scale: file.scaleBytes(t)!.data,
+                                          zero: file.zeroBytes(t)!.data,
+                                          k: 8)
         // HANDOFF.md §12: dequantized first 8 values
         let ref: [Float] = [0.00304, -0.00059, -0.00014, 0.00032, -0.00104, -0.00150, -0.00014, -0.00195]
         for i in 0..<8 {
@@ -64,13 +61,10 @@ final class RealPackDecoderTests: XCTestCase {
         let url = URL(fileURLWithPath: Self.packEnv! + "/qwen3-0.6b-xsmax-w8.animapk")
         let file = try AnimapkFile(url: url)
         let t = try XCTUnwrap(file.tensor(named: "model.embed_tokens.weight"))
-        var out = [Float](repeating: 0, count: 8)
-        out.withUnsafeMutableBytes { ob in
-            QuantDecoders.dequantW8(data: file.dataBytes(t),
-                                    scale: file.scaleBytes(t)!,
-                                    zero: file.zeroBytes(t)!,
-                                    k: 8, into: ob)
-        }
+        let out = QuantDecoders.dequantW8(data: file.dataBytes(t).data,
+                                          scale: file.scaleBytes(t)!.data,
+                                          zero: file.zeroBytes(t)!.data,
+                                          k: 8)
         // HANDOFF.md §13: dequantized first 8 values
         let ref: [Float] = [-0.00342, 0.03285, -0.07002, -0.01990, -0.00540, -0.01727, -0.03046, 0.00516]
         for i in 0..<8 {

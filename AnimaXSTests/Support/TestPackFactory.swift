@@ -29,7 +29,6 @@ enum TestPackFactory {
     }
 
     // 1) Build the JSON body (authoritative) with final blob offsets filled in later.
-    var jsonBody: Data
     // helper to serialize tensorMeta given blob offsets
     func makeJSON(offsets: [UInt64]) throws -> Data {
         var tensorMeta: [[String: Any]] = []

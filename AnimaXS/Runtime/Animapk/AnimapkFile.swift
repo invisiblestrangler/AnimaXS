@@ -164,3 +164,10 @@ final class AnimapkFile {
         return bad
     }
 }
+
+extension UnsafeRawBufferPointer {
+    /// Copy the buffer into a `Data` (used to hand mmap slices to the Data-based decoders).
+    var data: Data {
+        Data(bytes: baseAddress!, count: count)
+    }
+}
