@@ -28,11 +28,13 @@
 		7E991650CBABF20B20E112AE /* AnimapkTensor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C416E0528D650EED48130A92 /* AnimapkTensor.swift */; };
 		869CE73742B23D7225305BC1 /* ModelConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 684C63379028C718819607CA /* ModelConstants.swift */; };
 		89975ACE65D7BB793965DA7B /* QuantDecoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2ED51EC9A960D08D2A6835BB /* QuantDecoderTests.swift */; };
+		914187C1B6254DDCA7ED3C32 /* QwenNumerics.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0EFD572B87262AE5AAEB996 /* QwenNumerics.swift */; };
 		938A4049C06BE05E39F6BCC1 /* MetalContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F6A1853CF522E32A3743ACB /* MetalContext.swift */; };
 		B1F8396CD4627BF03101D935 /* case1_danbooru_seed1337_fixture.json in Resources */ = {isa = PBXBuildFile; fileRef = 929D59E59198EBA4F4C291AC /* case1_danbooru_seed1337_fixture.json */; };
 		BF1511FA336984DB3696C3E4 /* t5_tokenizer_config.json in Resources */ = {isa = PBXBuildFile; fileRef = FA4C64A421E46C82C2311767 /* t5_tokenizer_config.json */; };
 		C11949003CD5B39806C65EA3 /* tokenizer_reference_ids.json in Resources */ = {isa = PBXBuildFile; fileRef = CCD024BBBC7CB75E037214B8 /* tokenizer_reference_ids.json */; };
 		C4484A695C46B97717819332 /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = 594D2C66F916CBD132EA5517 /* Tokenizers */; };
+		E8B287C14227EAB23ED6D5DB /* QwenEncoderCPU.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8094627F9958515821CFE276 /* QwenEncoderCPU.swift */; };
 		EEB3C16094E91013C9ABB9CA /* MappedFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DA452A409BF52C73769318E /* MappedFile.swift */; };
 		EED314EA6D67446AAFE181EC /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 220DB7AE4DC9E7B009A9C5DF /* README.md */; };
 		FC52DE8FE0010D498F008967 /* AnimapkFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = D576867ECC53CBF14CC30F79 /* AnimapkFile.swift */; };
@@ -65,6 +67,7 @@
 		684C63379028C718819607CA /* ModelConstants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelConstants.swift; sourceTree = "<group>"; };
 		745BAB5E53065E6639F8BEA2 /* ReferenceTestsPlaceholder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReferenceTestsPlaceholder.swift; sourceTree = "<group>"; };
 		7A12B10FC621499B2CA281B3 /* QuantDecoders.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuantDecoders.swift; sourceTree = "<group>"; };
+		8094627F9958515821CFE276 /* QwenEncoderCPU.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenEncoderCPU.swift; sourceTree = "<group>"; };
 		830D15B6FF7E37A06B2C08B2 /* TestPackFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestPackFactory.swift; sourceTree = "<group>"; };
 		8DBF5298EC8B0B81AF89019C /* TokenizerLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenizerLoader.swift; sourceTree = "<group>"; };
 		929D59E59198EBA4F4C291AC /* case1_danbooru_seed1337_fixture.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = case1_danbooru_seed1337_fixture.json; sourceTree = "<group>"; };
@@ -74,6 +77,7 @@
 		D576867ECC53CBF14CC30F79 /* AnimapkFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkFile.swift; sourceTree = "<group>"; };
 		D8E235B12BDFBC6DCA8B439E /* AnimaXS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AnimaXS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		DD10CAEE3E25726CE527243D /* SmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmokeTests.swift; sourceTree = "<group>"; };
+		E0EFD572B87262AE5AAEB996 /* QwenNumerics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenNumerics.swift; sourceTree = "<group>"; };
 		E26E470D56048A5E382959A7 /* AnimaXSTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = AnimaXSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		EFA18C3237EA1D76A8C2CB94 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F28A65A79E0706DF0F0D5AB2 /* qwen_tokenizer.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = qwen_tokenizer.json; sourceTree = "<group>"; };
@@ -168,6 +172,8 @@
 		8A48E27B74EE38F1C7DF8E71 /* Text */ = {
 			isa = PBXGroup;
 			children = (
+				8094627F9958515821CFE276 /* QwenEncoderCPU.swift */,
+				E0EFD572B87262AE5AAEB996 /* QwenNumerics.swift */,
 				8DBF5298EC8B0B81AF89019C /* TokenizerLoader.swift */,
 			);
 			path = Text;
@@ -380,6 +386,8 @@
 				938A4049C06BE05E39F6BCC1 /* MetalContext.swift in Sources */,
 				869CE73742B23D7225305BC1 /* ModelConstants.swift in Sources */,
 				5506617DD3116BF72E8154BD /* QuantDecoders.swift in Sources */,
+				E8B287C14227EAB23ED6D5DB /* QwenEncoderCPU.swift in Sources */,
+				914187C1B6254DDCA7ED3C32 /* QwenNumerics.swift in Sources */,
 				027A9C7FE57956074F77229D /* TokenizerLoader.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
