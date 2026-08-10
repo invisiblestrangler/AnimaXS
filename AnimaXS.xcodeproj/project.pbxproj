@@ -27,6 +27,7 @@
 		6047DFE4E9621A2084E5679B /* AnimapkHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F9C4BE87CB32EE0326FB3E4 /* AnimapkHeader.swift */; };
 		6534C4B5076F415D14D07AA2 /* TimestepEmbedderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D08BB48D952EAD6537D49B5E /* TimestepEmbedderTests.swift */; };
 		71B669F9AF60FB45E4842F57 /* t5_special_tokens_map.json in Resources */ = {isa = PBXBuildFile; fileRef = 67B56E4FB7D12CC1F63A52F9 /* t5_special_tokens_map.json */; };
+		7387F6A165EC6A2781B76716 /* ModulationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14DA44DE36980DC498AB4B99 /* ModulationTests.swift */; };
 		774F60C7B433299EA6C55C9B /* DiTInputTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28C2E8E80AFBE05DB0577977 /* DiTInputTests.swift */; };
 		79E4DFD6600B4D04E8C93CD6 /* TestExtensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC3BA5B832C616E518D657FC /* TestExtensions.swift */; };
 		7CD76E6444C119FE1BDBC89F /* AnimaXSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D9CD1A114D528F42F21C527 /* AnimaXSApp.swift */; };
@@ -41,6 +42,7 @@
 		BF1511FA336984DB3696C3E4 /* t5_tokenizer_config.json in Resources */ = {isa = PBXBuildFile; fileRef = FA4C64A421E46C82C2311767 /* t5_tokenizer_config.json */; };
 		C11949003CD5B39806C65EA3 /* tokenizer_reference_ids.json in Resources */ = {isa = PBXBuildFile; fileRef = CCD024BBBC7CB75E037214B8 /* tokenizer_reference_ids.json */; };
 		C4484A695C46B97717819332 /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = 594D2C66F916CBD132EA5517 /* Tokenizers */; };
+		CC5F144445E89AD37FF24021 /* Modulation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52E7305B1912F5357ACCAEE5 /* Modulation.swift */; };
 		D49309A80BBD9F702F9E71A8 /* TimestepEmbedder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D7DEF4C7D7998D60A743925 /* TimestepEmbedder.swift */; };
 		E8B287C14227EAB23ED6D5DB /* QwenEncoderCPU.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8094627F9958515821CFE276 /* QwenEncoderCPU.swift */; };
 		EEB3C16094E91013C9ABB9CA /* MappedFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DA452A409BF52C73769318E /* MappedFile.swift */; };
@@ -63,6 +65,7 @@
 		0D9CD1A114D528F42F21C527 /* AnimaXSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimaXSApp.swift; sourceTree = "<group>"; };
 		0F9C4BE87CB32EE0326FB3E4 /* AnimapkHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkHeader.swift; sourceTree = "<group>"; };
 		12DDD5E1C624A51A586B866E /* t5_tokenizer.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = t5_tokenizer.json; sourceTree = "<group>"; };
+		14DA44DE36980DC498AB4B99 /* ModulationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModulationTests.swift; sourceTree = "<group>"; };
 		1506F4F789C146E6B646F18C /* AnimapkParsingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkParsingTests.swift; sourceTree = "<group>"; };
 		1A1319CA9D168F08F49BA3EB /* TokenizerParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenizerParityTests.swift; sourceTree = "<group>"; };
 		220DB7AE4DC9E7B009A9C5DF /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
@@ -74,6 +77,7 @@
 		4C7A6A2DAA97C767D88AE25B /* AnimaKernels.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = AnimaKernels.metal; sourceTree = "<group>"; };
 		4C8E968875980A2C9ACC94E5 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		4D8B417D7B9040B477BC8CA5 /* DiTWeights.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTWeights.swift; sourceTree = "<group>"; };
+		52E7305B1912F5357ACCAEE5 /* Modulation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Modulation.swift; sourceTree = "<group>"; };
 		67B56E4FB7D12CC1F63A52F9 /* t5_special_tokens_map.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = t5_special_tokens_map.json; sourceTree = "<group>"; };
 		684C63379028C718819607CA /* ModelConstants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelConstants.swift; sourceTree = "<group>"; };
 		6EBD5ADCDE21EF89090D0058 /* DiTInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTInput.swift; sourceTree = "<group>"; };
@@ -191,6 +195,7 @@
 				6EBD5ADCDE21EF89090D0058 /* DiTInput.swift */,
 				4D8B417D7B9040B477BC8CA5 /* DiTWeights.swift */,
 				94BC4122B33299CE60424C44 /* LLMAdapter.swift */,
+				52E7305B1912F5357ACCAEE5 /* Modulation.swift */,
 				8094627F9958515821CFE276 /* QwenEncoderCPU.swift */,
 				E0EFD572B87262AE5AAEB996 /* QwenNumerics.swift */,
 				0D7DEF4C7D7998D60A743925 /* TimestepEmbedder.swift */,
@@ -260,6 +265,7 @@
 				28C2E8E80AFBE05DB0577977 /* DiTInputTests.swift */,
 				D2D891A141A49EBC60BDB3DA /* GqaHeadMappingTests.swift */,
 				C509546307CB21BE0D1A9146 /* LLMAdapterTests.swift */,
+				14DA44DE36980DC498AB4B99 /* ModulationTests.swift */,
 				2ED51EC9A960D08D2A6835BB /* QuantDecoderTests.swift */,
 				24AA7FDE4D5F416423C74125 /* RealPackDecoderTests.swift */,
 				745BAB5E53065E6639F8BEA2 /* ReferenceTestsPlaceholder.swift */,
@@ -388,6 +394,7 @@
 				774F60C7B433299EA6C55C9B /* DiTInputTests.swift in Sources */,
 				8E5DA5D7D9950B728513D3E5 /* GqaHeadMappingTests.swift in Sources */,
 				7DB2CBB89F9ABC72D09B6089 /* LLMAdapterTests.swift in Sources */,
+				7387F6A165EC6A2781B76716 /* ModulationTests.swift in Sources */,
 				89975ACE65D7BB793965DA7B /* QuantDecoderTests.swift in Sources */,
 				19655429A907FC60821F1867 /* RealPackDecoderTests.swift in Sources */,
 				1CE2D9C17323437A5B23EBF3 /* ReferenceTestsPlaceholder.swift in Sources */,
@@ -416,6 +423,7 @@
 				EEB3C16094E91013C9ABB9CA /* MappedFile.swift in Sources */,
 				938A4049C06BE05E39F6BCC1 /* MetalContext.swift in Sources */,
 				869CE73742B23D7225305BC1 /* ModelConstants.swift in Sources */,
+				CC5F144445E89AD37FF24021 /* Modulation.swift in Sources */,
 				5506617DD3116BF72E8154BD /* QuantDecoders.swift in Sources */,
 				E8B287C14227EAB23ED6D5DB /* QwenEncoderCPU.swift in Sources */,
 				914187C1B6254DDCA7ED3C32 /* QwenNumerics.swift in Sources */,
