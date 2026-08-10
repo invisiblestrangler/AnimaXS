@@ -40,7 +40,7 @@ final class ModulationTests: XCTestCase {
         let scale: [Float] = [0, 0, 0, 0]
         let shift: [Float] = [0, 0, 0, 0]
         // var = mean((x-mean)^2) = mean([2.25,0.25,0.25,2.25]) = 1.25; std=sqrt(1.25)
-        let std = sqrt(1.25)
+        let std = Float(sqrt(1.25))
         let out = Modulation.applyLayerNormModulation(x, scale: scale, shift: shift)
         let expected = (0..<4).map { (x[$0] - 1.5) / std }
         for i in 0..<4 {
