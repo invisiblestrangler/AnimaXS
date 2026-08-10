@@ -34,7 +34,7 @@ final class RealPackDecoderTests: XCTestCase {
         for (name, sha) in expected {
             let url = URL(fileURLWithPath: dir + "/" + name)
             let data = try Data(contentsOf: url) // 2 GB max — acceptable for the real-pack gate only
-            XCTAssertEqual(data.sha256Hex(), sha, "SHA-256 mismatch for \(name)")
+            XCTAssertEqual(data.sha256Hex, sha, "SHA-256 mismatch for \(name)")
             let file = try AnimapkFile(url: url)
             XCTAssertEqual(file.crc32MismatchCount(), 0, "CRC-32 mismatch in \(name)")
         }
