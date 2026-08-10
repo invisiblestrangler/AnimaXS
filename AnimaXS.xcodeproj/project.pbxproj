@@ -21,7 +21,7 @@
 		7E991650CBABF20B20E112AE /* AnimapkTensor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C416E0528D650EED48130A92 /* AnimapkTensor.swift */; };
 		869CE73742B23D7225305BC1 /* ModelConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 684C63379028C718819607CA /* ModelConstants.swift */; };
 		89975ACE65D7BB793965DA7B /* QuantDecoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2ED51EC9A960D08D2A6835BB /* QuantDecoderTests.swift */; };
-		C4484A695C46B97717819332 /* swift-transformers in Frameworks */ = {isa = PBXBuildFile; productRef = 279708E2ECC2D49BCF4BD080 /* swift-transformers */; };
+		C4484A695C46B97717819332 /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = 594D2C66F916CBD132EA5517 /* Tokenizers */; };
 		EEB3C16094E91013C9ABB9CA /* MappedFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DA452A409BF52C73769318E /* MappedFile.swift */; };
 		EED314EA6D67446AAFE181EC /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 220DB7AE4DC9E7B009A9C5DF /* README.md */; };
 		FC52DE8FE0010D498F008967 /* AnimapkFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = D576867ECC53CBF14CC30F79 /* AnimapkFile.swift */; };
@@ -64,7 +64,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				C4484A695C46B97717819332 /* swift-transformers in Frameworks */,
+				C4484A695C46B97717819332 /* Tokenizers in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -211,7 +211,7 @@
 			);
 			name = AnimaXS;
 			packageProductDependencies = (
-				279708E2ECC2D49BCF4BD080 /* swift-transformers */,
+				594D2C66F916CBD132EA5517 /* Tokenizers */,
 			);
 			productName = AnimaXS;
 			productReference = D8E235B12BDFBC6DCA8B439E /* AnimaXS.app */;
@@ -553,10 +553,10 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		279708E2ECC2D49BCF4BD080 /* swift-transformers */ = {
+		594D2C66F916CBD132EA5517 /* Tokenizers */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = A64A67BA9D56C4A82C812211 /* XCRemoteSwiftPackageReference "swift-transformers" */;
-			productName = "swift-transformers";
+			productName = Tokenizers;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
