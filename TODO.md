@@ -90,7 +90,7 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
   - deps: F001 · output: Resources/Tokenizers/* · validation: files present, no HF network needed
 - [x] **F003** — Python reference token IDs for 3 canonical prompts (Qwen + T5); fixtures.
   - deps: A006 · output: ref token JSONs · validation: generated with pinned tokenizer files
-- [ ] **F004** — Swift tokenizer parity tests: exact token IDs on canonical prompts; reject >512 (Qwen or T5).
+- [~] **F004** — Swift tokenizer parity tests: exact token IDs on canonical prompts; reject >512 (Qwen or T5).
   - deps: F002, F003 · output: tokenizer tests · validation: exact integer match; long-prompt rejection path
 - [ ] **F005** — Qwen encoder pipeline: gather W8 embedding rows (no full-table dequant) → fp32 residual → 28 streamed layers → layer-27 hidden (NO final norm).
   - deps: F004, D004, D007-style TE locator, E001 · output: QwenEncoder.swift · validation: shape (1,seq,1024), finite, cosine vs cond_context ≥ 0.999
