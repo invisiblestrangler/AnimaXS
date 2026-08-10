@@ -19,9 +19,9 @@ targets:
     sources:
       - path: AnimaXS
     resources:
+      # Tokenizer data as flat unique-named files (no subfolder collisions). The exact
+      # Qwen2Tokenizer pre-tokenization regex is baked into qwen_tokenizer.json.
       - path: AnimaXS/Resources/Tokenizers
-        type: folder
-        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.invisiblestrangler.AnimaXS
