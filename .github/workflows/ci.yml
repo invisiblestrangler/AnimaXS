@@ -41,6 +41,12 @@ jobs:
         run: |
           which xcodegen || brew install xcodegen
           xcodegen version
+      - name: Require committed xcodeproj
+        run: |
+          if ! git ls-files --error-unmatch AnimaXS.xcodeproj >/dev/null 2>&1; then
+            echo "::error::AnimaXS.xcodeproj is not committed. Run the bootstrap-project workflow (or push after it commits) so the generated project exists."
+            exit 1
+          fi
       - name: Regenerate and assert no diff
         run: |
           xcodegen generate
