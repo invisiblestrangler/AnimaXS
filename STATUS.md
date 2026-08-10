@@ -2,8 +2,8 @@
 
 - **Current milestone:** Phase 3 — Qwen encoder + LLM adapter validated; **DiT input (H001), timestep (H002), AdaLN modulation (H003), 3-D RoPE (H004) DONE and validated vs oracle**. Next: H005 DiT block 0 end-to-end.
 - **Current task:** H005 DiT block 0 end-to-end vs golden block_00_out (needs H001–H004 + Metal attention/MPS primitives).
-- **Last green commit:** a138854 (H004 docs prep). **H004 source is ready for CI** (DitRoPE.swift + DitRoPETests + dit_rope_oracle.py) — pending xcodeproj regen + CI run.
-- **Current CI run:** GREEN (31428466054 on 870741f).
+- **Last green commit:** b7823d4 (xcodeproj regen for H004). CI run 31433566279 — all 3 jobs GREEN (project-consistency, iphone-build, simulator-tests incl. new DitRoPETests).
+- **Current CI run:** GREEN (31433566279 on b7823d4) — H004 DitRoPE + DitRoPETests (8 tests) all green.
 - **What currently works:**
   - **CI fully green**: Xcode 26.3 ARM device build (incl. Metal shaders + swift-transformers), simulator tests pass
   - Swift ANMA parser (JSON-authoritative, CRC-32, alignment, ranges) — validated vs real packs
