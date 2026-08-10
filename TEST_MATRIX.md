@@ -23,6 +23,9 @@ Env: `CI-sim` = GitHub Actions simulator · `CI-dev` = generic device build · `
 | F004 | tokenizers exact on canonical prompts | RAN | CI-sim |
 | D018 | GQA head mapping table (16/8 → h/2) | RAN (pending CI on next push) | CI-sim |
 | D018 | synthetic 1-token attention reveals KV head | RAN (pending CI on next push) | CI-sim |
+| D021 | interleaved RoPE (rotate_half) identity/pos | RAN (pending CI on next push) | CI-sim |
+| D021 | interleaved RoPE differs from half-split | RAN (pending CI on next push) | CI-sim |
+| D021 | exact GELU known values | RAN (pending CI on next push) | CI-sim |
 | H002 | CPU timestep reference | AnimaXSTests | pending | CI-sim |
 | H003 | CPU modulation reference | AnimaXSTests | pending | CI-sim |
 | H004 | CPU RoPE reference | AnimaXSTests | pending | CI-sim |
@@ -45,7 +48,8 @@ Env: `CI-sim` = GitHub Actions simulator · `CI-dev` = generic device build · `
 | ID | Test | Status | Env |
 |----|------|--------|-----|
 | F005 | TE final context ≈ golden (cosine 0.992, structural 1.0 vs oracle) | RAN (harness, real pack) | local |
-| G001 | adapter context finite/≈ ref | pending | CI-sim/A12 |
+| G001 | adapter conditioning [1,512,1024] ≈ oracle (cosine 1.000000) | RAN (harness, real pack) | local |
+| G001 | adapter output finite + padded tail zero | RAN (harness, real pack) | local |
 | H005 | block 0 ≈ golden | pending | CI-sim/A12 |
 | H006 | 28 blocks finite | pending | CI-sim/A12 |
 | I002 | 8 step latents finite/≈ step_latents | pending | CI-sim/A12 |

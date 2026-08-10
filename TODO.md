@@ -101,10 +101,12 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
 
 ## G — LLM adapter
 
-- [ ] **G001** — Adapter: T5 ids → W4 embedding gather → 6 blocks → out_proj → RMSNorm → T5-weight multiply → zero-pad to 512 → [1,512,1024] conditioning.
+- [x] **G001** — Adapter: T5 ids → W4 embedding gather → 6 blocks → out_proj → RMSNorm → T5-weight multiply → zero-pad to 512 → [1,512,1024] conditioning.
   - deps: F005, D003, E001 · output: LLMAdapter.swift · validation: cosine ≥ 0.999 vs reference cond; finite
-- [ ] **G002** — Resolve from pinned source (not handoff guess): adapter MLP activation, self-attn causality, cross-attn mask, RoPE placement, norm order, bias behavior.
+  - **DONE 2026-08-10.** `AnimaXS/Runtime/Text/LLMAdapter.swift` implemented (reads W4 DiT pack `model.diffusion_model.llm_adapter.*`). Validated against pinned-ComfyUI oracle (`scripts/anima_adapter_oracle.py`, commit cbbc9da, same W4 weights): weighted [1,47,1024] cosine **1.000000** (rmse 5.2e-7, maxAbs 3.3e-6); padded [1,512,1024] cosine 1.000000, tail all-zero, all finite. Structural parity proven.
+- [x] **G002** — Resolve from pinned source (not handoff guess): adapter MLP activation, self-attn causality, cross-attn mask, RoPE placement, norm order, bias behavior.
   - deps: G001 · output: DECISIONS entry + code comments · validation: source-cited, matches reference numerics
+  - **DONE 2026-08-10.** All resolved from `comfy/ldm/anima/model.py` (see D021): MLP = exact GELU (nn.GELU, not SiLU); self-attn = MHA 16/16 bidirectional (no causal mask, target_attention_mask=None); cross-attn = MHA over Qwen context (source_attention_mask=None); RoPE = INTERLEAVED (rotate_half, HF-style), theta 10000, applied to Q&K of both attns (DIFFERS from Qwen's half-split); norm = RMSNorm(eps 1e-6) before each attn + before MLP + final after out_proj; biases: out_proj + MLP have bias, attn projections do NOT.
 
 ## H — DiT
 
