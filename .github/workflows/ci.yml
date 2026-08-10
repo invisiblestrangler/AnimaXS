@@ -122,47 +122,9 @@ jobs:
             -derivedDataPath .derivedData \
             CODE_SIGNING_ALLOWED=NO \
             test
-        timeout-minutes: 25
+        timeout-minutes: 30
 
-  # Job 4 — pure-reference tests that never need GPU/device behavior.
-  # (Simulator job already covers most; this is the explicit reference-test gate.)
-  reference-tests:
-    runs-on: macos-15
-    needs: project-consistency
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
-        with:
-          # Cache only the SPM dependency *sources* (downloaded checkouts), not build products,
-          # so restored artifacts are never stale vs the current Swift sources.
-          path: |
-            .derivedData/SourcePackages
-          key: animaxs-spm-${{ runner.os }}-${{ hashFiles('**/Package.resolved', 'project.yml') }}
-          restore-keys: |
-            animaxs-spm-${{ runner.os }}-
-      - name: Select Xcode 26.3
-        run: |
-          sudo xcode-select -s "$DEVELOPER_DIR"
-          xcodebuild -version
-      - name: Find an available iPhone simulator
-        id: sim
-        run: |
-          DEST=$(xcrun simctl list devices available -j \
-            | python3 -c "import sys,json;d=json.load(sys.stdin);[print(dv['udid']) for rt in d['devices'].values() for dv in rt if 'iPhone' in dv['name'] and dv['isAvailable']]" \
-            | head -1)
-          echo "sim=$DEST" >> "$GITHUB_OUTPUT"
-      - name: Run reference-only test suite (timeout-guarded)
-        run: |
-          # Runs the full test target on the simulator. Parser/decoder/sampler/numeric/manifest
-          # tests are pure Swift and need no GPU. As each named suite (AnimapkParsingTests,
-          # QuantDecoderTests, SamplerTests, ReferenceNumericTests, ManifestAndCheckpointTests)
-          # lands, narrow this with -only-testing filters to keep the reference gate explicit.
-          xcodebuild \
-            -project AnimaXS.xcodeproj \
-            -scheme AnimaXS \
-            -configuration Debug \
-            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.sim }}" \
-            -derivedDataPath .derivedData \
-            CODE_SIGNING_ALLOWED=NO \
-            test
-        timeout-minutes: 25
+  # Job 4 — folded into simulator-tests (runbook §11). The pure-reference tests
+  # (parser, W4/W8 CPU, sampler, numeric refs, manifest, checkpoint, tokenizer parity)
+  # run as part of the full simulator test target; there is no separate job to avoid
+  # compiling the large swift-transformers dependency graph a second time.
