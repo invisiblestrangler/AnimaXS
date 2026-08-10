@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		1303514D8DBE7F84010B07A7 /* AnimaKernels.metal in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A6A2DAA97C767D88AE25B /* AnimaKernels.metal */; };
 		19655429A907FC60821F1867 /* RealPackDecoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24AA7FDE4D5F416423C74125 /* RealPackDecoderTests.swift */; };
 		1CE2D9C17323437A5B23EBF3 /* ReferenceTestsPlaceholder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 745BAB5E53065E6639F8BEA2 /* ReferenceTestsPlaceholder.swift */; };
 		1E52ED71A9AD8B33A91D049C /* Crc32.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43FB54A2EC11428E9AFC19A4 /* Crc32.swift */; };
@@ -21,6 +22,7 @@
 		7E991650CBABF20B20E112AE /* AnimapkTensor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C416E0528D650EED48130A92 /* AnimapkTensor.swift */; };
 		869CE73742B23D7225305BC1 /* ModelConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 684C63379028C718819607CA /* ModelConstants.swift */; };
 		89975ACE65D7BB793965DA7B /* QuantDecoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2ED51EC9A960D08D2A6835BB /* QuantDecoderTests.swift */; };
+		938A4049C06BE05E39F6BCC1 /* MetalContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F6A1853CF522E32A3743ACB /* MetalContext.swift */; };
 		C4484A695C46B97717819332 /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = 594D2C66F916CBD132EA5517 /* Tokenizers */; };
 		EEB3C16094E91013C9ABB9CA /* MappedFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DA452A409BF52C73769318E /* MappedFile.swift */; };
 		EED314EA6D67446AAFE181EC /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 220DB7AE4DC9E7B009A9C5DF /* README.md */; };
@@ -44,7 +46,9 @@
 		220DB7AE4DC9E7B009A9C5DF /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		24AA7FDE4D5F416423C74125 /* RealPackDecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealPackDecoderTests.swift; sourceTree = "<group>"; };
 		2ED51EC9A960D08D2A6835BB /* QuantDecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuantDecoderTests.swift; sourceTree = "<group>"; };
+		3F6A1853CF522E32A3743ACB /* MetalContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalContext.swift; sourceTree = "<group>"; };
 		43FB54A2EC11428E9AFC19A4 /* Crc32.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Crc32.swift; sourceTree = "<group>"; };
+		4C7A6A2DAA97C767D88AE25B /* AnimaKernels.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = AnimaKernels.metal; sourceTree = "<group>"; };
 		4C8E968875980A2C9ACC94E5 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		684C63379028C718819607CA /* ModelConstants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelConstants.swift; sourceTree = "<group>"; };
 		745BAB5E53065E6639F8BEA2 /* ReferenceTestsPlaceholder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReferenceTestsPlaceholder.swift; sourceTree = "<group>"; };
@@ -56,6 +60,7 @@
 		D8E235B12BDFBC6DCA8B439E /* AnimaXS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AnimaXS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		DD10CAEE3E25726CE527243D /* SmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmokeTests.swift; sourceTree = "<group>"; };
 		E26E470D56048A5E382959A7 /* AnimaXSTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = AnimaXSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		EFA18C3237EA1D76A8C2CB94 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		FC3BA5B832C616E518D657FC /* TestExtensions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestExtensions.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -105,9 +110,11 @@
 		6EE0DC88EAA782438F9E7217 /* AnimaXS */ = {
 			isa = PBXGroup;
 			children = (
+				EFA18C3237EA1D76A8C2CB94 /* Info.plist */,
 				6524648BBA022DD295EB8F51 /* App */,
 				887036D8E2A1A0017DA5BA1F /* Resources */,
 				781BD54167F9F29EE7367307 /* Runtime */,
+				B1C81774FC3BF5323861B98C /* Shaders */,
 			);
 			path = AnimaXS;
 			sourceTree = "<group>";
@@ -117,6 +124,7 @@
 			children = (
 				050C4FD7742F731394068190 /* Animapk */,
 				9D03EB80B5F6548BFFD3456B /* Generation */,
+				C3A550BE880CA62DBCC3BFF4 /* Metal */,
 			);
 			path = Runtime;
 			sourceTree = "<group>";
@@ -161,6 +169,22 @@
 				FF9E33DBE1A99A3FEA662C7A /* AnimaXSTests */,
 				1F88044D4A8DADCE956D8301 /* Products */,
 			);
+			sourceTree = "<group>";
+		};
+		B1C81774FC3BF5323861B98C /* Shaders */ = {
+			isa = PBXGroup;
+			children = (
+				4C7A6A2DAA97C767D88AE25B /* AnimaKernels.metal */,
+			);
+			path = Shaders;
+			sourceTree = "<group>";
+		};
+		C3A550BE880CA62DBCC3BFF4 /* Metal */ = {
+			isa = PBXGroup;
+			children = (
+				3F6A1853CF522E32A3743ACB /* MetalContext.swift */,
+			);
+			path = Metal;
 			sourceTree = "<group>";
 		};
 		FF9E33DBE1A99A3FEA662C7A /* AnimaXSTests */ = {
@@ -287,6 +311,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1303514D8DBE7F84010B07A7 /* AnimaKernels.metal in Sources */,
 				7CD76E6444C119FE1BDBC89F /* AnimaXSApp.swift in Sources */,
 				FC52DE8FE0010D498F008967 /* AnimapkFile.swift in Sources */,
 				6047DFE4E9621A2084E5679B /* AnimapkHeader.swift in Sources */,
@@ -294,6 +319,7 @@
 				30116E9CBC6BF3DBEA66C41E /* ContentView.swift in Sources */,
 				1E52ED71A9AD8B33A91D049C /* Crc32.swift in Sources */,
 				EEB3C16094E91013C9ABB9CA /* MappedFile.swift in Sources */,
+				938A4049C06BE05E39F6BCC1 /* MetalContext.swift in Sources */,
 				869CE73742B23D7225305BC1 /* ModelConstants.swift in Sources */,
 				5506617DD3116BF72E8154BD /* QuantDecoders.swift in Sources */,
 			);
@@ -314,11 +340,9 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CURRENT_PROJECT_VERSION = 1;
-				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_FILE = AnimaXS/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -352,11 +376,9 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
-				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				CURRENT_PROJECT_VERSION = 1;
-				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
-				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_FILE = AnimaXS/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
