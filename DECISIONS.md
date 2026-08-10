@@ -18,3 +18,12 @@ Record non-obvious choices and why. Append only; newest at bottom.
 - **D011: Every tensor blob (all 1,189 across 3 packs) verified 16 KB aligned and CRC-32 clean** (0 mismatches) by the Swift parser. W4/W8 known vectors byte-exact vs HANDOFF.md §12–§13.
 - **D012: DiT physical block order confirmed** = `0,1,10..19,2,20..27,3..9` (string sort). Each block's 20 tensors are contiguous and span exactly 38,993,920 B; adjacent blocks tile without gaps.
 - **D013: `TestPackFactory` (synthetic ANMA v1 writer) uses a FIXED region layout** mirroring real packs: JSON at 256, table at 16 KB, payload after. This avoids JSON-size/offset circular dependency and keeps synthetic tests free of multi-GB assets. (Iteration note: `Data._Representation.init(count:)` aborts on negative counts — guard all padding arithmetic.)
+
+## Tokenizer parity (validated against goldens 2026-08-10)
+- **D014: Tokenizer parity rule (VALIDATED against case1/2/3 seed1337 goldens):**
+  - **Qwen** (Qwen2Tokenizer, qwen25_tokenizer/ vocab.json+merges.txt): `encode(prompt, add_special_tokens=False)` — NO start/end token, NO trailing token. Produces EXACTLY the golden `cond_context` sequence lengths (46/72/122).
+  - **T5** (T5TokenizerFast, t5_tokenizer/ tokenizer.json): `encode(prompt, no_specials)` **+ one trailing `</s>` (id 1)**. The reference appends a T5 EOS. Golden has exactly prompt_len+1 T5 IDs (47/85/134).
+  - Source: `comfy/text_encoders/anima.py` (Qwen3Tokenizer/T5XXLTokenizer) + golden cross-check.
+- **D015: Tokenizer assets bundled as app resources** (`Resources/Tokenizers/qwen`, `/t5`, ~6.7 MB) — loaded locally by swift-transformers `Tokenizers`; no HF network at runtime. Assets copied from `comfy/text_encoders/qwen25_tokenizer` + `t5_tokenizer`.
+- **D016: Tokenization done via Python `transformers` oracle** (`scripts/gen_tokenizer_ref.py`) → fixture `Fixtures/tokenizer_reference_ids.json`. Swift must match exactly; v1 rejects prompts >512 tokens (Qwen or T5) instead of truncating (runbook §16).
+- **D017: `QuantDecoders` are Data-based** (not UnsafeRawBufferPointer) — scopes `withUnsafeBytes` internally. Passing `withUnsafeBytes{ $0.baseAddress }` results across closures is a dangling-pointer bug that silently returns garbage/0 for small Data; the mmap-backed real-pack path masked it. This is a pitfall for all future Metal/CPU buffer code.
