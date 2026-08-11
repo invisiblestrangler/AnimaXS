@@ -98,8 +98,12 @@ final class DiTBlockExecutorTests: XCTestCase {
     /// project workstation and may also be injected into a dedicated macOS runner.
     func testRealPackBlock0AgainstSameW4Oracle() async throws {
         let environment = ProcessInfo.processInfo.environment
-        guard let packs = environment["ANIMAXS_PACKS_DIR"],
-              let oracle = environment["ANIMAXS_BLOCK0_ORACLE_DIR"] else {
+        let bundledPack = bundledFixture(named: "anima-turbo-v1.0-xsmax-w4.animapk")
+        let bundledOracle = bundledFixture(named: "block0_input_x.f32")
+        guard let packs = environment["ANIMAXS_PACKS_DIR"]
+                ?? bundledPack?.deletingLastPathComponent().path,
+              let oracle = environment["ANIMAXS_BLOCK0_ORACLE_DIR"]
+                ?? bundledOracle?.deletingLastPathComponent().path else {
             throw XCTSkip("ANIMAXS_PACKS_DIR/ANIMAXS_BLOCK0_ORACLE_DIR not set")
         }
         let context = try requireContext()
@@ -139,6 +143,14 @@ final class DiTBlockExecutorTests: XCTestCase {
         print("E009_BLOCK0 maxAbs=\(maxAbsolute) rmse=\(rmse) cosine=\(cosine)")
         XCTAssertGreaterThanOrEqual(cosine, 0.999)
         XCTAssertLessThan(rmse, 0.1)
+    }
+
+    private func bundledFixture(named name: String) -> URL? {
+        guard let root = Bundle(for: Self.self).resourceURL,
+              let enumerator = FileManager.default.enumerator(
+                at: root, includingPropertiesForKeys: nil) else { return nil }
+        for case let url as URL in enumerator where url.lastPathComponent == name { return url }
+        return nil
     }
 
     private func encodeUnary(

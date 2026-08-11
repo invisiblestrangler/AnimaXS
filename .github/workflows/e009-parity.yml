@@ -13,6 +13,8 @@ permissions:
 
 env:
   DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+  XCODEGEN_VERSION: 2.46.0
+  XCODEGEN_ZIP_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
 
 jobs:
   block-zero:
@@ -48,6 +50,17 @@ jobs:
             --dir "$RUNNER_TEMP/e009"
           tar --zstd -xf "$RUNNER_TEMP/e009/e009-block0-fixture.tar.zst" \
             -C "$RUNNER_TEMP/e009"
+          mkdir -p AnimaXSTests/Fixtures/E009
+          cp -R "$RUNNER_TEMP/e009/packs" "$RUNNER_TEMP/e009/oracle" \
+            AnimaXSTests/Fixtures/E009/
+      - name: Regenerate the ephemeral fixture-bearing test project
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+            --output "$RUNNER_TEMP/xcodegen.zip"
+          echo "${XCODEGEN_ZIP_SHA256}  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
+          ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP"
+          "$RUNNER_TEMP/xcodegen/bin/xcodegen" generate
       - name: Run real block-0 parity
         env:
           ANIMAXS_PACKS_DIR: ${{ runner.temp }}/e009/packs
