@@ -162,6 +162,212 @@ final class MetalExecutionTests: XCTestCase {
         _ = context.thermalState
     }
 
+    func testExactArithmeticKernels() throws {
+        let context = try requireContext()
+        try checkActivations(context)
+        try checkNorms(context)
+        try checkModulationAndResiduals(context)
+    }
+
+    private func checkActivations(_ context: MetalContext) throws {
+        let input: [Float] = [-4, -1, -0.25, 0, 0.5, 1, 3]
+        let geluValues = try runUnaryFloat(context, kernel: "gelu", input: input)
+        let siluValues = try runUnaryFloat(context, kernel: "silu", input: input)
+        for i in input.indices {
+            let x = input[i]
+            let exactGELU = 0.5 * x * (1 + Float(erf(Double(x) / sqrt(2.0))))
+            let exactSiLU = x / (1 + exp(-x))
+            XCTAssertEqual(geluValues[i], exactGELU, accuracy: 2e-6)
+            XCTAssertEqual(siluValues[i], exactSiLU, accuracy: 2e-6)
+        }
+        // x=3 distinguishes exact erf GELU from the removed tanh approximation.
+        XCTAssertGreaterThan(abs(geluValues[6] - 2.9963627), 0.0003)
+    }
+
+    private func runUnaryFloat(
+        _ context: MetalContext, kernel: String, input: [Float]
+    ) throws -> [Float] {
+        let pipeline = try context.pipeline(named: kernel)
+        let inputBuffer = makeBuffer(input, on: context.device)
+        let sentinel: Float = 1_234_567
+        let outputBuffer = makeBuffer(
+            [Float](repeating: sentinel, count: input.count + 8), on: context.device)
+        var count = UInt32(input.count)
+        let commandBuffer = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let encoder = try XCTUnwrap(commandBuffer.makeComputeCommandEncoder())
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(inputBuffer, offset: 0, index: 0)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 1)
+        encoder.setBytes(&count, length: 4, index: 2)
+        encoder.dispatchThreads(
+            MTLSize(width: input.count + 8, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: min(32, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        XCTAssertNil(commandBuffer.error)
+        let pointer = outputBuffer.contents().bindMemory(to: Float.self, capacity: input.count + 8)
+        let values = Array(UnsafeBufferPointer(start: pointer, count: input.count + 8))
+        XCTAssertTrue(values[input.count...].allSatisfy { $0 == sentinel })
+        return Array(values.prefix(input.count))
+    }
+
+    private func checkNorms(_ context: MetalContext) throws {
+        let rows = 2, columns = 7
+        let input: [Float] = [-3, -1, 0, 1, 2, 4, 7, 9, 5, 2, -2, -4, 0.5, 3]
+        let weight: [Float16] = [0.5, 1, 1.5, 2, -0.5, 0.25, 3]
+        let eps: Float = 1e-6
+        let rms = try runNorm(
+            context, kernel: "rmsnorm_f32_to_f32", input: input,
+            weight: weight, rows: rows, columns: columns, eps: eps)
+        let layer = try runNorm(
+            context, kernel: "layernorm_f32_to_f32", input: input,
+            weight: nil, rows: rows, columns: columns, eps: eps)
+        for row in 0..<rows {
+            let values = Array(input[(row * columns)..<((row + 1) * columns)])
+            let squareMean = values.reduce(Float.zero) { $0 + $1 * $1 } / Float(columns)
+            let mean = values.reduce(0, +) / Float(columns)
+            let variance = values.reduce(Float.zero) { $0 + ($1 - mean) * ($1 - mean) } / Float(columns)
+            for column in 0..<columns {
+                let index = row * columns + column
+                let expectedRMS = values[column] / sqrt(squareMean + eps) * Float(weight[column])
+                let expectedLayer = (values[column] - mean) / sqrt(variance + eps)
+                XCTAssertEqual(rms[index], expectedRMS, accuracy: 3e-5)
+                XCTAssertEqual(layer[index], expectedLayer, accuracy: 3e-5)
+            }
+        }
+    }
+
+    private func runNorm(
+        _ context: MetalContext, kernel: String, input: [Float],
+        weight: [Float16]?, rows: Int, columns: Int, eps: Float
+    ) throws -> [Float] {
+        let pipeline = try context.pipeline(named: kernel)
+        let inputBuffer = makeBuffer(input, on: context.device)
+        let outputBuffer = makeBuffer(
+            [Float](repeating: 1_234_567, count: input.count + columns), on: context.device)
+        let weightBuffer = makeBuffer((weight ?? [0]).map(\.bitPattern), on: context.device)
+        var n = UInt32(columns), epsilon = eps, rowCount = UInt32(rows)
+        var useWeight: UInt32 = weight == nil ? 0 : 1
+        let commandBuffer = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let encoder = try XCTUnwrap(commandBuffer.makeComputeCommandEncoder())
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(inputBuffer, offset: 0, index: 0)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 1)
+        if kernel == "rmsnorm_f32_to_f32" {
+            encoder.setBuffer(weightBuffer, offset: 0, index: 2)
+            encoder.setBytes(&n, length: 4, index: 3)
+            encoder.setBytes(&epsilon, length: 4, index: 4)
+            encoder.setBytes(&useWeight, length: 4, index: 5)
+            encoder.setBytes(&rowCount, length: 4, index: 6)
+        } else {
+            encoder.setBytes(&n, length: 4, index: 2)
+            encoder.setBytes(&epsilon, length: 4, index: 3)
+            encoder.setBytes(&rowCount, length: 4, index: 4)
+        }
+        encoder.dispatchThreadgroups(
+            MTLSize(width: rows + 1, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        XCTAssertNil(commandBuffer.error)
+        let pointer = outputBuffer.contents().bindMemory(to: Float.self, capacity: input.count + columns)
+        let result = Array(UnsafeBufferPointer(start: pointer, count: input.count + columns))
+        XCTAssertTrue(result[input.count...].allSatisfy { $0 == 1_234_567 })
+        return Array(result.prefix(input.count))
+    }
+
+    private func checkModulationAndResiduals(_ context: MetalContext) throws {
+        let n = 3
+        let normalized: [Float] = [-1, 0, 2, 3, -2, 0.5]
+        let scale: [Float] = [0.5, -0.25, 2]
+        let shift: [Float] = [1, -1, 0.25]
+        let modulated = try runModulate(
+            context, normalized: normalized, scale: scale, shift: shift, columns: n)
+        for i in normalized.indices {
+            XCTAssertEqual(modulated[i], normalized[i] * (1 + scale[i % n]) + shift[i % n], accuracy: 1e-6)
+        }
+
+        let branch: [Float16] = [0.5, -2, 3, -4, 0.25, 1.5]
+        let gate: [Float] = [2, -0.5, 0.25]
+        let residual: [Float] = [1, 2, 3, 4, 5, 6]
+        let gated = try runResidual(
+            context, kernel: "gate_add_half_f32", residual: residual,
+            branch: branch, gate: gate, columns: n)
+        let added = try runResidual(
+            context, kernel: "add_half_into_float", residual: residual,
+            branch: branch, gate: nil, columns: n)
+        for i in residual.indices {
+            XCTAssertEqual(gated[i], residual[i] + Float(branch[i]) * gate[i % n], accuracy: 1e-6)
+            XCTAssertEqual(added[i], residual[i] + Float(branch[i]), accuracy: 1e-6)
+        }
+    }
+
+    private func runModulate(
+        _ context: MetalContext, normalized: [Float], scale: [Float],
+        shift: [Float], columns: Int
+    ) throws -> [Float] {
+        let pipeline = try context.pipeline(named: "modulate_f32")
+        let inputs = makeBuffer(normalized, on: context.device)
+        let scales = makeBuffer(scale, on: context.device)
+        let shifts = makeBuffer(shift, on: context.device)
+        let output = makeBuffer([Float](repeating: 1_234_567, count: normalized.count + 8), on: context.device)
+        var n = UInt32(columns), count = UInt32(normalized.count)
+        let commandBuffer = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let encoder = try XCTUnwrap(commandBuffer.makeComputeCommandEncoder())
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(inputs, offset: 0, index: 0)
+        encoder.setBuffer(scales, offset: 0, index: 1)
+        encoder.setBuffer(shifts, offset: 0, index: 2)
+        encoder.setBuffer(output, offset: 0, index: 3)
+        encoder.setBytes(&n, length: 4, index: 4)
+        encoder.setBytes(&count, length: 4, index: 5)
+        encoder.dispatchThreads(MTLSize(width: normalized.count + 8, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 16, height: 1, depth: 1))
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        XCTAssertNil(commandBuffer.error)
+        let pointer = output.contents().bindMemory(to: Float.self, capacity: normalized.count + 8)
+        let values = Array(UnsafeBufferPointer(start: pointer, count: normalized.count + 8))
+        XCTAssertTrue(values[normalized.count...].allSatisfy { $0 == 1_234_567 })
+        return Array(values.prefix(normalized.count))
+    }
+
+    private func runResidual(
+        _ context: MetalContext, kernel: String, residual: [Float],
+        branch: [Float16], gate: [Float]?, columns: Int
+    ) throws -> [Float] {
+        let pipeline = try context.pipeline(named: kernel)
+        let residualBuffer = makeBuffer(residual + [Float](repeating: 1_234_567, count: 8), on: context.device)
+        let branchBuffer = makeBuffer(branch.map(\.bitPattern), on: context.device)
+        let gateBuffer = makeBuffer(gate ?? [0], on: context.device)
+        var n = UInt32(columns), count = UInt32(residual.count)
+        let commandBuffer = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let encoder = try XCTUnwrap(commandBuffer.makeComputeCommandEncoder())
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(residualBuffer, offset: 0, index: 0)
+        encoder.setBuffer(branchBuffer, offset: 0, index: 1)
+        if gate != nil {
+            encoder.setBuffer(gateBuffer, offset: 0, index: 2)
+            encoder.setBytes(&n, length: 4, index: 3)
+            encoder.setBytes(&count, length: 4, index: 4)
+        } else {
+            encoder.setBytes(&count, length: 4, index: 2)
+        }
+        encoder.dispatchThreads(MTLSize(width: residual.count + 8, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 16, height: 1, depth: 1))
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        XCTAssertNil(commandBuffer.error)
+        let pointer = residualBuffer.contents().bindMemory(to: Float.self, capacity: residual.count + 8)
+        let values = Array(UnsafeBufferPointer(start: pointer, count: residual.count + 8))
+        XCTAssertTrue(values[residual.count...].allSatisfy { $0 == 1_234_567 })
+        return Array(values.prefix(residual.count))
+    }
+
     func testMPSMatrixMultiplicationExecutes() throws {
         let context = try requireContext()
         let input: [Float16] = [1, 2, 3, 4]

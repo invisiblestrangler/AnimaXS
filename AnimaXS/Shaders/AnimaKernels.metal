@@ -62,71 +62,135 @@ kernel void dequant_w8_to_half(
 }
 
 // ---------------------------------------------------------------------------
-// RMSNorm (fp32 input → fp32 output; stats in fp32). eps is buffer constant.
-// vector length N per row; rows independent.
+// RMSNorm (fp32 input/output and statistics; fp16 packed weight).
+// Dispatch exactly one threadgroup per row, with at most 256 threads.
 // ---------------------------------------------------------------------------
 kernel void rmsnorm_f32_to_f32(
     device const float *in      [[buffer(0)]],
     device float       *out     [[buffer(1)]],
-    device const float *weight  [[buffer(2)]],   // optional per-element scale; null → identity
+    device const half  *weight  [[buffer(2)]],
     constant uint      &N       [[buffer(3)]],
     constant float     &eps     [[buffer(4)]],
     constant uint      &useWt   [[buffer(5)]],
-    uint2 gid [[thread_position_in_grid]])
+    constant uint      &rows    [[buffer(6)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint3 threads [[threads_per_threadgroup]])
 {
-    uint n = gid.x;
-    uint r = gid.y;
-    // sum of squares
+    if (row >= rows) return;
+    uint threadCount = threads.x;
+    threadgroup float partial[256];
     float sum = 0.0f;
-    for (uint i = 0; i < N; ++i) {
-        float v = in[r * N + i];
-        sum += v * v;
+    for (uint i = tid; i < N; i += threadCount) {
+        float v = in[row * N + i];
+        sum = fma(v, v, sum);
     }
-    float mean = sum / float(N);
-    float inv = rsqrt(mean + eps);
-    float v = in[r * N + n];
-    float w = useWt != 0 ? weight[n] : 1.0f;
-    out[r * N + n] = v * inv * w;
+    partial[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inv = rsqrt(partial[0] / float(N) + eps);
+    for (uint i = tid; i < N; i += threadCount) {
+        float w = useWt != 0 ? float(weight[i]) : 1.0f;
+        out[row * N + i] = in[row * N + i] * inv * w;
+    }
 }
 
 // ---------------------------------------------------------------------------
-// SCAFFOLD ONLY: this tanh approximation is NOT the adapter/DiT reference GELU.
-// E003 must replace it with exact erf GELU and add hosted Metal parity tests.
+// Mean-centered LayerNorm (no affine), fp32 throughout. One group per row.
+// ---------------------------------------------------------------------------
+kernel void layernorm_f32_to_f32(
+    device const float *in   [[buffer(0)]],
+    device float       *out  [[buffer(1)]],
+    constant uint      &N    [[buffer(2)]],
+    constant float     &eps  [[buffer(3)]],
+    constant uint      &rows [[buffer(4)]],
+    uint row [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint3 threads [[threads_per_threadgroup]])
+{
+    if (row >= rows) return;
+    uint threadCount = threads.x;
+    threadgroup float partial[256];
+    float sum = 0.0f;
+    for (uint i = tid; i < N; i += threadCount) sum += in[row * N + i];
+    partial[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float mean = partial[0] / float(N);
+    float squareSum = 0.0f;
+    for (uint i = tid; i < N; i += threadCount) {
+        float centered = in[row * N + i] - mean;
+        squareSum = fma(centered, centered, squareSum);
+    }
+    partial[tid] = squareSum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inv = rsqrt(partial[0] / float(N) + eps);
+    for (uint i = tid; i < N; i += threadCount) {
+        out[row * N + i] = (in[row * N + i] - mean) * inv;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Exact reference activations, fp32 input/output with explicit bounds.
 // ---------------------------------------------------------------------------
 kernel void gelu(
-    device const half *in  [[buffer(0)]],
-    device half       *out [[buffer(1)]],
+    device const float *in  [[buffer(0)]],
+    device float       *out [[buffer(1)]],
+    constant uint      &count [[buffer(2)]],
     uint gid [[thread_position_in_grid]])
 {
-    float x = float(in[gid]);
-    // 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3)))
-    float t = tanh(0.7978845608f * (x + 0.044715f * x * x * x));
-    out[gid] = half(0.5f * x * (1.0f + t));
+    if (gid >= count) return;
+    float x = in[gid];
+    out[gid] = 0.5f * x * (1.0f + erf(x * 0.7071067811865475f));
 }
 
-// ---------------------------------------------------------------------------
-// SiLU / Swish.
-// ---------------------------------------------------------------------------
 kernel void silu(
-    device const half *in  [[buffer(0)]],
-    device half       *out [[buffer(1)]],
+    device const float *in  [[buffer(0)]],
+    device float       *out [[buffer(1)]],
+    constant uint      &count [[buffer(2)]],
     uint gid [[thread_position_in_grid]])
 {
-    float x = float(in[gid]);
-    out[gid] = half(x / (1.0f + exp(-x)));
+    if (gid >= count) return;
+    float x = in[gid];
+    out[gid] = x / (1.0f + exp(-x));
 }
 
-// ---------------------------------------------------------------------------
-// SCAFFOLD ONLY: H005 requires a fp32 gate and fp32 residual update.
-// E003 must replace this half-gate signature and add hosted Metal parity tests.
-// ---------------------------------------------------------------------------
-kernel void gate_add_half_into_float(
+// AdaLN: normalized * (1 + scale) + shift, all fp32; vectors broadcast by N.
+kernel void modulate_f32(
+    device const float *normalized [[buffer(0)]],
+    device const float *scale      [[buffer(1)]],
+    device const float *shift      [[buffer(2)]],
+    device float       *out        [[buffer(3)]],
+    constant uint      &N          [[buffer(4)]],
+    constant uint      &count      [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) return;
+    uint column = gid % N;
+    out[gid] = normalized[gid] * (1.0f + scale[column]) + shift[column];
+}
+
+// MPS branches are fp16, but gates and residual arithmetic remain fp32.
+kernel void gate_add_half_f32(
     device float       *residual [[buffer(0)]],
     device const half  *branch   [[buffer(1)]],
-    device const half  *gate     [[buffer(2)]],
+    device const float *gate     [[buffer(2)]],
+    constant uint      &N        [[buffer(3)]],
+    constant uint      &count    [[buffer(4)]],
     uint gid [[thread_position_in_grid]])
 {
-    residual[gid] += float(branch[gid]) * float(gate[gid]);
+    if (gid >= count) return;
+    residual[gid] += float(branch[gid]) * gate[gid % N];
 }
 
 // ---------------------------------------------------------------------------
@@ -135,8 +199,10 @@ kernel void gate_add_half_into_float(
 kernel void add_half_into_float(
     device float       *residual [[buffer(0)]],
     device const half  *branch   [[buffer(1)]],
+    constant uint      &count    [[buffer(2)]],
     uint gid [[thread_position_in_grid]])
 {
+    if (gid >= count) return;
     residual[gid] += float(branch[gid]);
 }
 
