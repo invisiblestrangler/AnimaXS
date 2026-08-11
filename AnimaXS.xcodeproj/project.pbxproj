@@ -62,6 +62,7 @@
 		CC5F144445E89AD37FF24021 /* Modulation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52E7305B1912F5357ACCAEE5 /* Modulation.swift */; };
 		CFD7E41C92A70D6B5ED05B8A /* DiTBlockTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DC1D4D21EFBA6FA29D885A7 /* DiTBlockTests.swift */; };
 		D49309A80BBD9F702F9E71A8 /* TimestepEmbedder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D7DEF4C7D7998D60A743925 /* TimestepEmbedder.swift */; };
+		E03432114D1256677B254408 /* EulerSampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99DD442C7A3CCB6E47D0F488 /* EulerSampler.swift */; };
 		E4237CF411C2158613158D83 /* DiTBlockExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F14B5397CD1B2C4DE3D41CB /* DiTBlockExecutorTests.swift */; };
 		E8B287C14227EAB23ED6D5DB /* QwenEncoderCPU.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8094627F9958515821CFE276 /* QwenEncoderCPU.swift */; };
 		E97696F3A4744A08C6A895BF /* MetalExecutionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DE378A333F7F589CD183A9A /* MetalExecutionTests.swift */; };
@@ -122,6 +123,7 @@
 		8DC1D4D21EFBA6FA29D885A7 /* DiTBlockTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTBlockTests.swift; sourceTree = "<group>"; };
 		929D59E59198EBA4F4C291AC /* case1_danbooru_seed1337_fixture.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = case1_danbooru_seed1337_fixture.json; sourceTree = "<group>"; };
 		94BC4122B33299CE60424C44 /* LLMAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMAdapter.swift; sourceTree = "<group>"; };
+		99DD442C7A3CCB6E47D0F488 /* EulerSampler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EulerSampler.swift; sourceTree = "<group>"; };
 		9D7829F4398EB3A23033ECD8 /* DiTFinalLayerExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTFinalLayerExecutorTests.swift; sourceTree = "<group>"; };
 		9DA452A409BF52C73769318E /* MappedFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MappedFile.swift; sourceTree = "<group>"; };
 		A109D17B6E3524E405A9B85B /* QwenEncoderMetal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenEncoderMetal.swift; sourceTree = "<group>"; };
@@ -181,6 +183,14 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		3245A69EDC5550E24C6F2BEA /* Sampler */ = {
+			isa = PBXGroup;
+			children = (
+				99DD442C7A3CCB6E47D0F488 /* EulerSampler.swift */,
+			);
+			path = Sampler;
+			sourceTree = "<group>";
+		};
 		6524648BBA022DD295EB8F51 /* App */ = {
 			isa = PBXGroup;
 			children = (
@@ -208,6 +218,7 @@
 				050C4FD7742F731394068190 /* Animapk */,
 				9D03EB80B5F6548BFFD3456B /* Generation */,
 				C3A550BE880CA62DBCC3BFF4 /* Metal */,
+				3245A69EDC5550E24C6F2BEA /* Sampler */,
 				8A48E27B74EE38F1C7DF8E71 /* Text */,
 			);
 			path = Runtime;
@@ -495,6 +506,7 @@
 				0CC965727D9BE3124B87BC36 /* DiTWeights.swift in Sources */,
 				22A697C29A4FE1F67A25D118 /* DitForward.swift in Sources */,
 				4CF42C1FB7991B03E9360B0D /* DitRoPE.swift in Sources */,
+				E03432114D1256677B254408 /* EulerSampler.swift in Sources */,
 				263D4D4D7FB4D3766DF07296 /* LLMAdapter.swift in Sources */,
 				10ECAB707F0D3BF55B5F9884 /* LLMAdapterMetal.swift in Sources */,
 				24E784492B6C7FD49E64D227 /* LinearExecutor.swift in Sources */,
