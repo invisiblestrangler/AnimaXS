@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		027A9C7FE57956074F77229D /* TokenizerLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DBF5298EC8B0B81AF89019C /* TokenizerLoader.swift */; };
 		02F04575BA38C8AAF591B6C2 /* t5_tokenizer.json in Resources */ = {isa = PBXBuildFile; fileRef = 12DDD5E1C624A51A586B866E /* t5_tokenizer.json */; };
+		0A89B983F4DC0739BE8E3767 /* DiTFinalLayerExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01AD706F60155A8CFAA47C9F /* DiTFinalLayerExecutor.swift */; };
 		0CC965727D9BE3124B87BC36 /* DiTWeights.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D8B417D7B9040B477BC8CA5 /* DiTWeights.swift */; };
 		1303514D8DBE7F84010B07A7 /* AnimaKernels.metal in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A6A2DAA97C767D88AE25B /* AnimaKernels.metal */; };
 		19655429A907FC60821F1867 /* RealPackDecoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24AA7FDE4D5F416423C74125 /* RealPackDecoderTests.swift */; };
@@ -18,6 +19,7 @@
 		22A697C29A4FE1F67A25D118 /* DitForward.swift in Sources */ = {isa = PBXBuildFile; fileRef = E29ABBFCD1EDD87F59CA9008 /* DitForward.swift */; };
 		24E784492B6C7FD49E64D227 /* LinearExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9346A85EC2056315DFCE66D /* LinearExecutor.swift */; };
 		263D4D4D7FB4D3766DF07296 /* LLMAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94BC4122B33299CE60424C44 /* LLMAdapter.swift */; };
+		2AB966E0818F8C5953CC0DB0 /* DiTFinalLayerExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D7829F4398EB3A23033ECD8 /* DiTFinalLayerExecutorTests.swift */; };
 		2BB3F23123E300162C938052 /* Hub in Frameworks */ = {isa = PBXBuildFile; productRef = A3FB76126987D0B653947E56 /* Hub */; };
 		2F02983AD55700559562DA54 /* qwen_tokenizer.json in Resources */ = {isa = PBXBuildFile; fileRef = F28A65A79E0706DF0F0D5AB2 /* qwen_tokenizer.json */; };
 		30116E9CBC6BF3DBEA66C41E /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C8E968875980A2C9ACC94E5 /* ContentView.swift */; };
@@ -76,6 +78,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		01AD706F60155A8CFAA47C9F /* DiTFinalLayerExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTFinalLayerExecutor.swift; sourceTree = "<group>"; };
 		0B8E57358726DCBA4B39C22A /* WeightStreamer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeightStreamer.swift; sourceTree = "<group>"; };
 		0C22C2203066EFC03BF7FB83 /* AnimapkRangeLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkRangeLocator.swift; sourceTree = "<group>"; };
 		0D7DEF4C7D7998D60A743925 /* TimestepEmbedder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimestepEmbedder.swift; sourceTree = "<group>"; };
@@ -114,6 +117,7 @@
 		8DC1D4D21EFBA6FA29D885A7 /* DiTBlockTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTBlockTests.swift; sourceTree = "<group>"; };
 		929D59E59198EBA4F4C291AC /* case1_danbooru_seed1337_fixture.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = case1_danbooru_seed1337_fixture.json; sourceTree = "<group>"; };
 		94BC4122B33299CE60424C44 /* LLMAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMAdapter.swift; sourceTree = "<group>"; };
+		9D7829F4398EB3A23033ECD8 /* DiTFinalLayerExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTFinalLayerExecutorTests.swift; sourceTree = "<group>"; };
 		9DA452A409BF52C73769318E /* MappedFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MappedFile.swift; sourceTree = "<group>"; };
 		A9346A85EC2056315DFCE66D /* LinearExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinearExecutor.swift; sourceTree = "<group>"; };
 		C416E0528D650EED48130A92 /* AnimapkTensor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkTensor.swift; sourceTree = "<group>"; };
@@ -288,6 +292,7 @@
 			children = (
 				F3F286C454EBE7A92C592214 /* AttentionExecutor.swift */,
 				8CFF9A853F1AA6ED02BB86D8 /* DiTBlockExecutor.swift */,
+				01AD706F60155A8CFAA47C9F /* DiTFinalLayerExecutor.swift */,
 				E29ABBFCD1EDD87F59CA9008 /* DitForward.swift */,
 				A9346A85EC2056315DFCE66D /* LinearExecutor.swift */,
 				3F6A1853CF522E32A3743ACB /* MetalContext.swift */,
@@ -304,6 +309,7 @@
 				347EF3EF52DB8E567909B2D3 /* AttentionExecutorTests.swift */,
 				3F14B5397CD1B2C4DE3D41CB /* DiTBlockExecutorTests.swift */,
 				8DC1D4D21EFBA6FA29D885A7 /* DiTBlockTests.swift */,
+				9D7829F4398EB3A23033ECD8 /* DiTFinalLayerExecutorTests.swift */,
 				28C2E8E80AFBE05DB0577977 /* DiTInputTests.swift */,
 				38E139072D28862327122F48 /* DitRoPETests.swift */,
 				D2D891A141A49EBC60BDB3DA /* GqaHeadMappingTests.swift */,
@@ -440,6 +446,7 @@
 				C34BFD1164209CD709A5A9F8 /* AttentionExecutorTests.swift in Sources */,
 				E4237CF411C2158613158D83 /* DiTBlockExecutorTests.swift in Sources */,
 				CFD7E41C92A70D6B5ED05B8A /* DiTBlockTests.swift in Sources */,
+				2AB966E0818F8C5953CC0DB0 /* DiTFinalLayerExecutorTests.swift in Sources */,
 				774F60C7B433299EA6C55C9B /* DiTInputTests.swift in Sources */,
 				AF5BAAFDACD2451A4B01C9E4 /* DitRoPETests.swift in Sources */,
 				8E5DA5D7D9950B728513D3E5 /* GqaHeadMappingTests.swift in Sources */,
@@ -473,6 +480,7 @@
 				1E52ED71A9AD8B33A91D049C /* Crc32.swift in Sources */,
 				BD81C9C99347181C9AB1E4B2 /* DiTBlockCPU.swift in Sources */,
 				5EE94D1820B6B114D1B66907 /* DiTBlockExecutor.swift in Sources */,
+				0A89B983F4DC0739BE8E3767 /* DiTFinalLayerExecutor.swift in Sources */,
 				47ABE68F485121B325537344 /* DiTInput.swift in Sources */,
 				0CC965727D9BE3124B87BC36 /* DiTWeights.swift in Sources */,
 				22A697C29A4FE1F67A25D118 /* DitForward.swift in Sources */,
