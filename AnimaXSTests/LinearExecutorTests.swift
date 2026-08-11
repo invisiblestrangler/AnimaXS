@@ -31,7 +31,7 @@ final class LinearExecutorTests: XCTestCase {
 
     func testW8TransposedLinearUsesPaddedPackedStrideAndTailTile() async throws {
         let context = try requireContext()
-        let m = 133, n = 8, k = 16, packedStride = 20
+        let m = 133, n = 16, k = 16, packedStride = 20
         let scalarBytes = MemoryLayout<Float16>.stride
 
         let input = try makeBuffer(
@@ -103,7 +103,7 @@ final class LinearExecutorTests: XCTestCase {
 
     func testW4TransposedLinearHonorsNibbleOrderAndPaddedRows() async throws {
         let context = try requireContext()
-        let m = 3, n = 8, k = 16, packedStride = 12
+        let m = 3, n = 16, k = 16, packedStride = 12
         let scalarBytes = MemoryLayout<Float16>.stride
         let input = try makeBuffer(bytes: m * k * scalarBytes, on: context.device)
         var inputValues = [Float](repeating: 0, count: m * k)
@@ -174,7 +174,7 @@ final class LinearExecutorTests: XCTestCase {
     }
 
     private func characterizePrecision(context: MetalContext, k: Int) async throws {
-        let n = 8, groups = k / 64, packedStride = k / 2
+        let n = 16, groups = k / 64, packedStride = k / 2
         var state = UInt32(0xA51A_0000) &+ UInt32(k)
         let normalization = 1 / sqrt(Float(k))
         var inputFloat = [Float](repeating: 0, count: k)
