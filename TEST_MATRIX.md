@@ -51,7 +51,7 @@ Env: `CI-sim` = GitHub Actions standard `macos-15` arm64 iOS Simulator · `CI-de
 | E008 | attention tile | PASS self Q/K=1024 and cross K=512 including row 511 (`31482950188`) | CI-sim; A12 pending |
 | E004 | euler_step_f32 GPU | pending | CI-sim/A12 |
 | E007 | MPS precision K=2048/8192 | PASS; MPS cosine ≥ `0.999999975`, maxAbs ≤ `1.76e-4` (`31482950188`) | CI-sim; A12 repeat pending |
-| E009 | production Metal block 0 vs H005 same-W4 oracle | pending | CI-sim/manual pack-backed/A12 |
+| E009 | production Metal block 0 vs H005 same-W4 oracle | PASS: cosine `0.9999999798`, RMSE `3.750e-4`, maxAbs `2.190e-2` (`31485374918`) | CI-sim pack-backed |
 
 ## Model integration
 | ID | Test | Status | Env |
@@ -68,7 +68,7 @@ Env: `CI-sim` = GitHub Actions standard `macos-15` arm64 iOS Simulator · `CI-de
 | H005-decoder | W4 2×68 + W8 2×65 matrix groups reset at each row | PASS locally and in XCTest (`31452206651`) | local/CI-sim |
 | H005 | block 0 Swift≈NumPy W4 oracle (final golden-hook invocation) | PASS locally: cosine 1.000000000, RMSE 6.18e-6, maxAbs 1.91e-4, finite | local/CI-sim |
 | H005-B | block 0 W4 vs original BF16 golden | ACCEPTED source-proven quantization baseline: Swift 0.998712139; original BF16 source 0.999992303 (D035) | local |
-| H006 | 28 blocks finite | pending | CI-sim/A12 |
+| H006 | 28 blocks finite | PASS: all 28 finite, final min/max `-5063.061`/`39658.49`, 19.46 s (`31486134420`) | CI-sim pack-backed/A12 pending |
 | I002 | 8 step latents finite/≈ step_latents | pending | CI-sim/A12 |
 | J002 | VAE RGB ≈ decoded_rgb | pending | CI-sim/A12 |
 | L001 | full canonical final latent | pending | CI-sim/A12 |

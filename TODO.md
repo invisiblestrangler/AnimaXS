@@ -3,7 +3,7 @@
 Check a task ONLY when its validation criterion passes (not when code is merely written).
 Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` blocked/cancelled.
 
-**Current execution priority:** D007 → E001–E009 → D008/F007/G003 → H006. Do not simply choose the first unchecked item in file order. A005 gates only model-pack release; A006/D005/D006 and UI/release work can proceed when their dependency path becomes relevant.
+**Current execution priority:** H007, then F007/G003 and the sampler/integration dependency path. Do not simply choose the first unchecked item in file order. A005 gates only model-pack release; A006/D005/D006 and UI/release work can proceed when their dependency path becomes relevant.
 
 ---
 
@@ -85,7 +85,7 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
   - deps: E005, E006 · output: test + recorded diagnostics/decision · validation: synthetic representative tests on hosted CI and real-shape result where resources permit; repeat on A12 before device acceptance
 - [x] **E008** — Query-tiled (start at 128) MPS/MPSGraph attention: scaled scores, fp32 softmax, ×V; self K=1024 and cross K=512.
   - deps: E006 · output: `AttentionExecutor.swift` + bounded-memory tests · validation: self/cross small and representative shapes match H005 CPU attention on hosted CI; all 512 padded cross rows retained
-- [ ] **E009** — Production Metal DiT block 0 vertical slice using D007 ranges, one-slot ring, reusable dequant/activation buffers, E002–E008, and no large Swift matrices.
+- [x] **E009** — Production Metal DiT block 0 vertical slice using D007 ranges, one-slot ring, reusable dequant/activation buffers, E002–E008, and no large Swift matrices.
   - deps: D007, E002–E008, H005 · output: `DiTBlockMetal`/executor + pack-backed parity test · validation: bounded memory, finite, and matches the H005 same-W4 oracle within recorded tolerance; hosted manual CI when packs/fixture are available
 
 ## F — Tokenizer / text encoder
@@ -136,7 +136,7 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
   - deps: H001–H004, D003 · output: validated CPU oracle/reference block · validation: same-W4 structural parity plus source-proven golden tolerance; production Metal parity is E009
   - **DONE 2026-08-11.** The `0.7345` failure was a real row-boundary decoder bug: the packer resets group-64 quantization on every matrix row, while Swift flattened rows. Only DiT `x_embedder` has a non-group-aligned K (`68`), so earlier tests missed it. Row-aware W4/W8 matrix decoders plus regressions are now in place (D034).
   - **Final validation:** canonical last hook invocation = sampler step 7, sigma `0.3050089478492737`. Swift-W4 vs independent NumPy-W4: cosine `1.000000000`, RMSE `6.18e-6`, maxAbs `1.91e-4`, finite. NumPy/Swift W4 vs original BF16 golden: cosine `0.998712106`/`0.998712139`, RMSE `9.43e-2`, maxAbs `1.79`, relative L2 `5.074e-2`. Independent original-BF16 source weights vs golden reach cosine `0.999992303`; corrected W4 `x_embedder` output vs source is `0.998998606`. This is the source-proven W4 tolerance exception permitted by the H005 hard gate (D035), not an unresolved graph error.
-- [ ] **H006** — Full 28-block **Metal** loop with one-slot WeightStreamer ring (~39 MB), logical-order execution, real per-block ranges, and reusable buffers.
+- [x] **H006** — Full 28-block **Metal** loop with one-slot WeightStreamer ring (~39 MB), logical-order execution, real per-block ranges, and reusable buffers.
   - deps: D007, E009 · output: `WeightStreamer.swift` + `DitForward.swift` · validation: no CPU/nested-array production fallback; all blocks finite; block 0 remains at E009 parity and block 15/27 match compact/full fixtures where available
 - [ ] **H007** — Post-loop final norm/modulation/projection + unpatchify16 → [1,16,1,64,64] velocity.
   - deps: H006 · output: final projection · validation: finite, shape exact
