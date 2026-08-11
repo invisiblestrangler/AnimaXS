@@ -1,0 +1,198 @@
+import Foundation
+import Metal
+import MetalPerformanceShaders
+
+/// Ring-relative buffers and metadata for a packed W4/W8 `[N,K]` matrix.
+struct QuantizedLinearWeightBuffers {
+    let storage: StorageDtype
+    let packed: MTLBuffer
+    let packedOffset: Int
+    let scale: MTLBuffer
+    let scaleOffset: Int
+    let zero: MTLBuffer
+    let zeroOffset: Int
+    let rows: Int
+    let columns: Int
+    let packedRowStride: Int
+}
+
+/// Common bounded-memory quantized linear path:
+/// `[M,K] fp16 × [N,K]ᵀ quantized → [M,N] fp16`.
+///
+/// The weight matrix is dequantized once into one reusable fp16 scratch buffer.
+/// Input rows are submitted to MPS in tiles so the same executor works for token
+/// matrices without allocating per-tile copies.
+final class LinearExecutor {
+    static let defaultTileRows = 128
+
+    private let context: MetalContext
+    private let buffers: BufferPool
+    let tileRows: Int
+
+    init(context: MetalContext, tileRows: Int = defaultTileRows) {
+        precondition(tileRows > 0)
+        self.context = context
+        self.buffers = BufferPool(device: context.device)
+        self.tileRows = tileRows
+    }
+
+    /// Encode dequantization and all MPS tiles into an existing command buffer.
+    /// The caller owns command-buffer commit/completion.
+    func encode(
+        commandBuffer: MTLCommandBuffer,
+        input: MTLBuffer,
+        inputOffset: Int = 0,
+        weight: QuantizedLinearWeightBuffers,
+        output: MTLBuffer,
+        outputOffset: Int = 0,
+        inputRows: Int
+    ) throws {
+        try validate(input: input, inputOffset: inputOffset, weight: weight,
+                     output: output, outputOffset: outputOffset, inputRows: inputRows)
+
+        let n = weight.rows
+        let k = weight.columns
+        let scratchBytes = try checkedProduct(n, k, MemoryLayout<Float16>.stride)
+        let scratch = buffers.buffer(key: "linear.weight.fp16", bytes: scratchBytes)
+        let kernelName: String
+        switch weight.storage {
+        case .w4: kernelName = "dequant_w4_to_half"
+        case .w8: kernelName = "dequant_w8_to_half"
+        default:
+            throw AnimapkError.validation("LinearExecutor requires W4 or W8 weights")
+        }
+        let pipeline = try context.pipeline(named: kernelName)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create linear dequant encoder")
+        }
+        var columns = UInt32(k)
+        var rowStride = UInt32(weight.packedRowStride)
+        var rows = UInt32(n)
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(weight.packed, offset: weight.packedOffset, index: 0)
+        encoder.setBuffer(weight.scale, offset: weight.scaleOffset, index: 1)
+        encoder.setBuffer(weight.zero, offset: weight.zeroOffset, index: 2)
+        encoder.setBuffer(scratch, offset: 0, index: 3)
+        encoder.setBytes(&columns, length: 4, index: 4)
+        encoder.setBytes(&rowStride, length: 4, index: 5)
+        encoder.setBytes(&rows, length: 4, index: 6)
+        let width = min(16, pipeline.threadExecutionWidth)
+        let height = max(1, min(16, pipeline.maxTotalThreadsPerThreadgroup / width))
+        encoder.dispatchThreads(
+            MTLSize(width: k, height: n, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: width, height: height, depth: 1))
+        encoder.endEncoding()
+
+        let scalarBytes = MemoryLayout<Float16>.stride
+        let rightDescriptor = MPSMatrixDescriptor(
+            rows: n, columns: k, rowBytes: k * scalarBytes, dataType: .float16)
+        let right = MPSMatrix(buffer: scratch, descriptor: rightDescriptor)
+
+        var rowStart = 0
+        while rowStart < inputRows {
+            let rowsThisTile = min(tileRows, inputRows - rowStart)
+            let leftDescriptor = MPSMatrixDescriptor(
+                rows: rowsThisTile, columns: k, rowBytes: k * scalarBytes, dataType: .float16)
+            let outputDescriptor = MPSMatrixDescriptor(
+                rows: rowsThisTile, columns: n, rowBytes: n * scalarBytes, dataType: .float16)
+            let left = MPSMatrix(
+                buffer: input,
+                offset: inputOffset + rowStart * k * scalarBytes,
+                descriptor: leftDescriptor)
+            let result = MPSMatrix(
+                buffer: output,
+                offset: outputOffset + rowStart * n * scalarBytes,
+                descriptor: outputDescriptor)
+            let multiplication = MPSMatrixMultiplication(
+                device: context.device,
+                transposeLeft: false,
+                transposeRight: true,
+                resultRows: rowsThisTile,
+                resultColumns: n,
+                interiorColumns: k,
+                alpha: 1,
+                beta: 0)
+            multiplication.encode(
+                commandBuffer: commandBuffer,
+                leftMatrix: left,
+                rightMatrix: right,
+                resultMatrix: result)
+            rowStart += rowsThisTile
+        }
+    }
+
+    /// Convenience async submission. Completion resumes off the command-buffer callback.
+    func execute(
+        input: MTLBuffer,
+        inputOffset: Int = 0,
+        weight: QuantizedLinearWeightBuffers,
+        output: MTLBuffer,
+        outputOffset: Int = 0,
+        inputRows: Int
+    ) async throws {
+        guard let commandBuffer = context.commandQueue.makeCommandBuffer() else {
+            throw AnimapkError.validation("failed to create linear command buffer")
+        }
+        try encode(commandBuffer: commandBuffer, input: input, inputOffset: inputOffset,
+                   weight: weight, output: output, outputOffset: outputOffset,
+                   inputRows: inputRows)
+        commandBuffer.commit()
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            commandBuffer.addCompletedHandler { completed in
+                if let error = completed.error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume()
+                }
+            }
+        }
+    }
+
+    private func validate(
+        input: MTLBuffer, inputOffset: Int, weight: QuantizedLinearWeightBuffers,
+        output: MTLBuffer, outputOffset: Int, inputRows: Int
+    ) throws {
+        guard inputRows > 0, weight.rows > 0, weight.columns > 0,
+              inputOffset >= 0, outputOffset >= 0,
+              weight.packedOffset >= 0, weight.scaleOffset >= 0, weight.zeroOffset >= 0 else {
+            throw AnimapkError.validation("invalid LinearExecutor shape or offset")
+        }
+        let minimumStride = weight.storage == .w4
+            ? (weight.columns + 1) / 2 : weight.columns
+        guard weight.packedRowStride >= minimumStride else {
+            throw AnimapkError.validation("packed linear row stride is too small")
+        }
+        let inputBytes = try checkedProduct(inputRows, weight.columns, MemoryLayout<Float16>.stride)
+        let outputBytes = try checkedProduct(inputRows, weight.rows, MemoryLayout<Float16>.stride)
+        let packedBytes = try checkedProduct(weight.rows, weight.packedRowStride)
+        let groups = (weight.columns + 63) / 64
+        let parameterBytes = try checkedProduct(weight.rows, groups, MemoryLayout<Float16>.stride)
+        guard try checkedEnd(offset: inputOffset, bytes: inputBytes) <= input.length,
+              try checkedEnd(offset: outputOffset, bytes: outputBytes) <= output.length,
+              try checkedEnd(offset: weight.packedOffset, bytes: packedBytes) <= weight.packed.length,
+              try checkedEnd(offset: weight.scaleOffset, bytes: parameterBytes) <= weight.scale.length,
+              try checkedEnd(offset: weight.zeroOffset, bytes: parameterBytes) <= weight.zero.length else {
+            throw AnimapkError.validation("LinearExecutor buffer range is out of bounds")
+        }
+    }
+
+    private func checkedEnd(offset: Int, bytes: Int) throws -> Int {
+        let (end, overflow) = offset.addingReportingOverflow(bytes)
+        guard !overflow else {
+            throw AnimapkError.validation("LinearExecutor buffer range overflow")
+        }
+        return end
+    }
+
+    private func checkedProduct(_ values: Int...) throws -> Int {
+        var result = 1
+        for value in values {
+            let (next, overflow) = result.multipliedReportingOverflow(by: value)
+            guard !overflow else {
+                throw AnimapkError.validation("LinearExecutor byte size overflow")
+            }
+            result = next
+        }
+        return result
+    }
+}
