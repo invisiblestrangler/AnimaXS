@@ -47,10 +47,10 @@ Env: `CI-sim` = GitHub Actions standard `macos-15` arm64 iOS Simulator · `CI-de
 | E003 | rmsnorm/layernorm GPU | pending | CI-sim/A12 |
 | E003 | GELU/SiLU GPU | pending | CI-sim/A12 |
 | E003 | gate-add GPU | pending | CI-sim/A12 |
-| E006 | MPS linear GEMM | pending | CI-sim/A12 |
-| E008 | attention tile | pending | CI-sim/A12 |
+| E006 | MPS linear GEMM | PASS W4/W8 transpose, packed stride, offsets, M=133 tail (`31482950188`) | CI-sim; A12 pending |
+| E008 | attention tile | PASS self Q/K=1024 and cross K=512 including row 511 (`31482950188`) | CI-sim; A12 pending |
 | E004 | euler_step_f32 GPU | pending | CI-sim/A12 |
-| E007 | MPS precision K=2048/8192 | pending | CI-sim/A12 |
+| E007 | MPS precision K=2048/8192 | PASS; MPS cosine ≥ `0.999999975`, maxAbs ≤ `1.76e-4` (`31482950188`) | CI-sim; A12 repeat pending |
 | E009 | production Metal block 0 vs H005 same-W4 oracle | pending | CI-sim/manual pack-backed/A12 |
 
 ## Model integration

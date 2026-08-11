@@ -79,11 +79,11 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
   - deps: E003 · output: kernels + pack-free tests · validation: small slices match H001/H004/I001 CPU references on hosted Metal
 - [x] **E005** — Direct packed `w4_matvec_f32` for M=1 precision-critical timestep/AdaLN linears.
   - deps: E002 · output: kernel + non-aligned-K test · validation: row-aware dequant, fp32 accumulation, error/cosine recorded against fp64 reference
-- [ ] **E006** — Common MPS linear: row-aware dequant→one reusable fp16 scratch→`MPSMatrixMultiplication` `[M,K]×[N,K]ᵀ`; M-tiling (start at 128); async completion.
+- [x] **E006** — Common MPS linear: row-aware dequant→one reusable fp16 scratch→`MPSMatrixMultiplication` `[M,K]×[N,K]ᵀ`; M-tiling (start at 128); async completion.
   - deps: E001, E002 · output: `LinearExecutor.swift` · validation: transpose/stride tests vs CPU; representative tiled shape on hosted CI; giant real shape only in pack-backed/manual test if CI time/memory permits
-- [ ] **E007** — Precision characterization for K=2048/8192 against CPU fp32/fp64: maxAbs, RMSE, cosine; decide simple vs chunked accumulation.
+- [x] **E007** — Precision characterization for K=2048/8192 against CPU fp32/fp64: maxAbs, RMSE, cosine; decide simple vs chunked accumulation.
   - deps: E005, E006 · output: test + recorded diagnostics/decision · validation: synthetic representative tests on hosted CI and real-shape result where resources permit; repeat on A12 before device acceptance
-- [ ] **E008** — Query-tiled (start at 128) MPS/MPSGraph attention: scaled scores, fp32 softmax, ×V; self K=1024 and cross K=512.
+- [x] **E008** — Query-tiled (start at 128) MPS/MPSGraph attention: scaled scores, fp32 softmax, ×V; self K=1024 and cross K=512.
   - deps: E006 · output: `AttentionExecutor.swift` + bounded-memory tests · validation: self/cross small and representative shapes match H005 CPU attention on hosted CI; all 512 padded cross rows retained
 - [ ] **E009** — Production Metal DiT block 0 vertical slice using D007 ranges, one-slot ring, reusable dequant/activation buffers, E002–E008, and no large Swift matrices.
   - deps: D007, E002–E008, H005 · output: `DiTBlockMetal`/executor + pack-backed parity test · validation: bounded memory, finite, and matches the H005 same-W4 oracle within recorded tolerance; hosted manual CI when packs/fixture are available

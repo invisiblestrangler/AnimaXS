@@ -1,75 +1,44 @@
 # AnimaXS — Next Execution Agent Handoff
 
-Updated 2026-08-11 after completing H005, D007/D008, and E001–E005. The next task is **E006: the common transposed MPS linear executor**. Do not start H006’s 28-block loop before E009 passes.
+Updated 2026-08-11 after E006–E008. The next task is **E009: production Metal DiT block 0**. Do not start H006’s 28-block loop until E009 matches the H005 same-W4 oracle.
 
-## Current branch and proof
+## Proven baseline
 
-Work in `/root/AnimaXS` on `main`. E003–E005 landed at `5d4bf82`; main GitHub Actions run `31479627644` passed:
+Work in `/root/AnimaXS`. Feature head `011cd38` passed hosted CI `31482950188`: deterministic Xcode project, generic iPhone build, and all simulator tests, including real Metal/MPS execution. Local untracked `scripts/oracle_out/block0/` is ~347 MB of regenerable H005 output; preserve it and never commit it.
 
-- deterministic XcodeGen 2.46.0 project check;
-- generic iPhone build with Xcode 26.3;
-- 64 simulator tests, 4 expected no-pack skips, 0 failures;
-- hosted execution of exact arithmetic, split-half RoPE, patch/unpatch, Euler and direct W4 matvec on `Apple iOS simulator GPU`.
+Completed production foundations:
 
-Local `scripts/oracle_out/block0/` contains ~347 MB of ignored/regenerable H005 output and must not be committed.
+- D007/D008 metadata-derived, checked, zero-copy DiT/Qwen execution ranges; maximum DiT block range `38,993,920` bytes.
+- E001–E005 diagnostics, row-aware dequant, exact fp32-sensitive arithmetic, split-half RoPE, patch/unpatch, Euler, and direct W4 fp32 matvec.
+- E006 `LinearExecutor`: `[M,K] × [N,K]ᵀ`, 128-row tiles, reusable padded activation/result buffers and one reusable fp16 dequant matrix, async completion.
+- E007: simple accumulation retained. At K=2048/8192, direct fp32 cosine is effectively 1.0; MPS cosine is at least `0.999999975`, maxAbs at most `1.76e-4`.
+- E008 `AttentionExecutor`: one 128-query score tile, fp32 softmax max/sum, self K=1024 and cross K=512. The test proves cross row 511 participates.
 
-## Reload context
+Hosted CI is a functional Metal gate, not an A12 performance/memory substitute. Repeat E007 and benchmark E008 on A12 before device acceptance.
 
-Read `RUNBOOK.md` (especially §§18–24, 32–33, 48–49, 53), `STATUS.md`, E003–E009 in `TODO.md`, `DECISIONS.md`, and `TEST_MATRIX.md`. Read `/root/H005_ADVANCED_AI_GUIDANCE.md` only when touching H005 equations. Frozen ComfyUI source is `/root/comfy-ref` at `cbbc9dab1f03d0d9a6caa8a8be7d77a7e37e1e44`; the Hermes-compatible Swift harness is `/root/anima-harness` and Swift is `/opt/swift/usr/bin/swift`.
+## E009 objective
 
-## Completed foundation
+Build one bounded-memory production Metal block-0 vertical slice using the real D007 block range and E002–E008. It must not materialize large Swift arrays/Data or retain dequantized matrices. Use one range/ring slot, reusable GPU buffers, fp32 residual/modulation/gates, and fp16 branch/MPS boundaries. Validate finite output and parity against the H005 same-W4 block-0 oracle with a recorded experimental tolerance.
 
-H005 is resolved. Matrix quantization groups reset per row:
+Read `RUNBOOK.md` §§18–24, 32–33, 48–49, 53; E009/H006 in `TODO.md`; D030–D045 in `DECISIONS.md`; `DiTBlockCPU.swift`; `DiTWeights.swift`; and D007 locator APIs. `/root/H005_ADVANCED_AI_GUIDANCE.md` is required only when changing H005 equations. Frozen ComfyUI is `/root/comfy-ref` at `cbbc9dab1f03d0d9a6caa8a8be7d77a7e37e1e44`; Hermes harness is `/root/anima-harness`.
 
-```text
-groupsPerRow = ceil(K / 64)
-group = row * groupsPerRow + column / 64
-```
+## Non-negotiable semantics and pitfalls
 
-Final H005 metrics remain:
+- Quant groups reset per matrix row: `group = row*ceil(K/64) + column/64`.
+- Never guess MPS row stride. Use `MPSMatrixDescriptor.rowBytes(fromColumns:dataType:)`; tight buffers need explicit staging/copy.
+- Register Metal completion handlers before `commit()`.
+- DiT self-attention: 16/16 heads, head dim 128, shared Q/K RMSNorm weights, split-half RoPE pairs `(p,p+64)`, bidirectional, no GQA/mask/extra position embedding.
+- Cross-attention receives all 512 adapter rows, including zero-padded rows; no RoPE or mask.
+- Modulation is `Linear2(Linear1(SiLU(embedding))) + adaln_lora`, then shift/scale/gate chunks. Norm is mean-centering LayerNorm; residual gate-add is fp32.
+- Exact erf GELU; block residual stays fp32; branch inputs/outputs cross fp16 compute boundaries.
+- `DiTBlockCPU` is an oracle only, never a production fallback.
 
-```text
-Swift W4 vs NumPy W4:        cosine 1.000000000, RMSE 6.18e-6, maxAbs 1.91e-4
-Swift W4 vs BF16 golden:     cosine 0.998712139
-Original BF16 vs golden:     cosine 0.999992303
-```
-
-`AnimapkRangeLocator.swift` now provides checked relative spans, `DiTBlockLocator`, and `QwenLayerLocator`. Real-pack audit results:
-
-```text
-DiT:  28 logical blocks, 560 tensors, maximum range 38,993,920 bytes
-Qwen: 28 logical layers, 308 layer tensors, 151,936 checked embedding rows
-```
-
-Ranges use exact prefixes and logical numerical order even though physical order is lexicographic. `AnimapkFile.bytes(in:)` is zero-copy and valid while the file owns its mmap. Production should copy each execution range once into one ring; do not create per-tensor `Data` copies.
-
-`MetalContext` now probes Apple5, buffer/threadgroup/working-set/allocation/physical-memory/thermal values. E002–E005 now provide bounded row-aware dequant, fp32-stat norms, erf-form exact GELU, fp32 modulation/gates/residuals, fused split-half RoPE, patch/unpatch, Euler, and direct packed W4 matvec. The E005 K=68 result versus fp64 is maxAbs `2.09e-6`, cosine `0.9999999999999986`.
-
-## Next implementation order
+Canonical H005 step-7 proof remains:
 
 ```text
-E006  transposed MPS linear with one reusable fp16 dequant scratch
-E007  K=2048/8192 precision characterization and recorded decision
-E008  bounded query-tiled self/cross attention with fp32 softmax
-E009  one production Metal block 0 against the H005 same-W4 oracle
-F007/G003  streamed Metal Qwen and adapter using D008
-H006  streamed 28-block Metal loop
+Swift W4 vs NumPy W4:    cosine 1.000000000, RMSE 6.18e-6, maxAbs 1.91e-4
+Swift W4 vs BF16 golden: cosine 0.998712139
+Original BF16 vs golden: cosine 0.999992303
 ```
 
-For E006, implement `LinearExecutor.swift` around the existing row-aware dequant kernels and `MPSMatrixMultiplication`. Reuse one fp16 weight scratch, interpret weights as `[N,K]`, and multiply `[M,K] × [N,K]ᵀ`. Start with an M tile of 128, support a smaller final tile, preserve asynchronous command-buffer completion, and do not retain dequantized matrices. Add pack-free transpose/stride tests and a representative tiled shape; keep giant pack-backed shapes out of normal CI unless measured safe.
-
-H005 semantics that must survive E003–E009: split-half `(p,p+64)` DiT RoPE, shared `[128]` Q/K RMSNorm weights, all 512 padded cross rows, no DiT mask/GQA/extra position embedding, SiLU before modulation linears, and exact erf GELU. `DiTBlockCPU` is an oracle only and must not become a production fallback.
-
-## Validation commands
-
-Linux checks:
-
-```bash
-/opt/swift/usr/bin/swiftc -parse AnimaXS/Runtime/Animapk/*.swift
-/opt/swift/usr/bin/swiftc -parse AnimaXS/Runtime/Animapk/QuantDecoders.swift \
-  AnimaXS/Runtime/Text/DiTBlockCPU.swift AnimaXSTests/DiTBlockTests.swift
-python3 -m py_compile scripts/dit_block0_oracle.py
-git diff --check
-```
-
-Every Metal change must also run hosted CI: pinned XcodeGen leaves the project clean, generic iPhone build passes, and simulator tests execute the kernels. Keep `generateEmptyDirectories: false`. Do not add extra rings, heaps, bytes-no-copy, or cache tricks without A12 measurements. A12 speed, jetsam, thermal behavior, and Apple5 performance remain device-only acceptance work.
+Start E009 with a small pack-free orchestration test, then a manual/pack-backed block-0 test when the fixture is available. Every Metal edit must run normal hosted CI. Keep giant packs and the 347 MB oracle directory out of git. After E009 passes, proceed in dependency order: H006/H007, F007/G003 where their E009 dependency is satisfied, then sampler/VAE/integration tasks.
