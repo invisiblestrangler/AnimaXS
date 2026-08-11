@@ -135,6 +135,22 @@ final class AnimapkFile {
 
     func tensor(named name: String) -> AnimapkTensor? { byName[name] }
 
+    /// Zero-copy view of a validated absolute file range. The returned pointer is
+    /// valid only while this `AnimapkFile` remains alive.
+    func bytes(in range: Range<UInt64>) throws -> UnsafeRawBufferPointer {
+        let length = range.upperBound - range.lowerBound
+        guard range.lowerBound <= range.upperBound,
+              range.upperBound <= header.fileSize,
+              range.lowerBound <= UInt64(Int.max),
+              length <= UInt64(Int.max) else {
+            throw AnimapkError.validation("mmap byte range \(range) is out of bounds")
+        }
+        return UnsafeRawBufferPointer(
+            start: map.pointer(offset: Int(range.lowerBound)),
+            count: Int(length)
+        )
+    }
+
     /// Raw packed data bytes for a tensor.
     func dataBytes(_ t: AnimapkTensor) -> UnsafeRawBufferPointer {
         UnsafeRawBufferPointer(start: map.pointer(offset: Int(t.blobOffset + t.dataOffset)), count: Int(t.dataSize))

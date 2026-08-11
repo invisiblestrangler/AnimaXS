@@ -21,6 +21,9 @@ final class MetalContext {
     private(set) var maxBufferLength: Int = 0
     private(set) var maxThreadgroupMemoryLength: Int = 0
     private(set) var recommendedMaxWorkingSetSize: UInt64 = 0
+    private(set) var currentAllocatedSize: UInt64 = 0
+    private(set) var physicalMemory: UInt64 = 0
+    private(set) var thermalState: ProcessInfo.ThermalState = .nominal
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice() else { return nil }
@@ -36,9 +39,15 @@ final class MetalContext {
         self.supportsApple5 = device.supportsFamily(.apple5)
         self.maxBufferLength = device.maxBufferLength
         self.maxThreadgroupMemoryLength = device.maxThreadgroupMemoryLength
-        if device.responds(to: #selector(getter: MTLDevice.recommendedMaxWorkingSetSize)) {
-            self.recommendedMaxWorkingSetSize = device.recommendedMaxWorkingSetSize
-        }
+        self.recommendedMaxWorkingSetSize = device.recommendedMaxWorkingSetSize
+        refreshDiagnostics()
+    }
+
+    /// Refresh values that can change while a generation is running.
+    func refreshDiagnostics() {
+        currentAllocatedSize = device.currentAllocatedSize
+        physicalMemory = ProcessInfo.processInfo.physicalMemory
+        thermalState = ProcessInfo.processInfo.thermalState
     }
 
     /// Fetch (or build) a compute pipeline state for a named kernel.

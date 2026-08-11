@@ -4,7 +4,9 @@ options:
   deploymentTarget:
     iOS: "18.0"
   createIntermediateGroups: true
-  generateEmptyDirectories: true
+  # Empty directories are not tracked by git. Omitting them makes XcodeGen output
+  # identical in a populated local checkout and a clean GitHub Actions checkout.
+  generateEmptyDirectories: false
 settings:
   base:
     SWIFT_VERSION: "5.0"

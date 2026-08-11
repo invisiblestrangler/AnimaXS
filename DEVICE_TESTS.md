@@ -8,6 +8,16 @@
 
 No physical iPhone XS Max has been used in this project. Do not read any CI/M1 result as A12 proof.
 
+## Hosted simulator characterization (not A12)
+
+| Check | Result | Run |
+|-------|--------|-----|
+| `MTLCreateSystemDefaultDevice()` | `Apple iOS simulator GPU` | `31452206651` |
+| project W4 Metal kernel execution | PASS | `31452206651` |
+| 2×2 fp16 `MPSMatrixMultiplication` | PASS | `31452206651` |
+
+Use standard hosted Simulator CI for functional Metal/MPS parity. Do not use these results for A12 timing, memory, GPU-family, watchdog, page-cache, or thermal claims.
+
 ## Remains unverified (to be filled on-device)
 - [ ] MPS fp16 accuracy on Apple5 (K=2048/8192)
 - [ ] A12 memory / jetsam threshold

@@ -47,6 +47,45 @@ enum QuantDecoders {
         return out
     }
 
+    /// Dequantize a row-major W4 matrix whose quantization groups reset at every row.
+    /// This distinction is essential when `cols` is not divisible by `groupSize` (for
+    /// example DiT x_embedder [2048,68]). The packer quantizes each [out,in] row
+    /// independently, so flattening the matrix and using `flatIndex / 64` is incorrect.
+    static func dequantW4Matrix(data: Data, scale: Data, zero: Data,
+                                rows: Int, cols: Int, groupSize: Int = 64) -> [Float] {
+        precondition(rows >= 0 && cols >= 0 && groupSize > 0)
+        let bytesPerRow = (cols + 1) / 2
+        let groupsPerRow = (cols + groupSize - 1) / groupSize
+        precondition(data.count >= rows * bytesPerRow)
+        precondition(scale.count >= rows * groupsPerRow * MemoryLayout<UInt16>.size)
+        precondition(zero.count >= rows * groupsPerRow * MemoryLayout<UInt16>.size)
+        var out = [Float](repeating: 0, count: rows * cols)
+        guard rows > 0 && cols > 0 else { return out }
+        data.withUnsafeBytes { dBuf in
+            scale.withUnsafeBytes { sBuf in
+                zero.withUnsafeBytes { zBuf in
+                    let d8 = dBuf.baseAddress!.assumingMemoryBound(to: UInt8.self)
+                    let s16 = sBuf.baseAddress!.assumingMemoryBound(to: UInt16.self)
+                    let z16 = zBuf.baseAddress!.assumingMemoryBound(to: UInt16.self)
+                    out.withUnsafeMutableBytes { ob in
+                        let oF = ob.baseAddress!.assumingMemoryBound(to: Float.self)
+                        for r in 0..<rows {
+                            for c in 0..<cols {
+                                let byte = d8[r * bytesPerRow + (c >> 1)]
+                                let q = (c & 1) == 0 ? UInt16(byte & 0x0F) : UInt16(byte >> 4)
+                                let g = r * groupsPerRow + c / groupSize
+                                let sc = Float(Float16(bitPattern: s16[g]))
+                                let ze = Float(Float16(bitPattern: z16[g]))
+                                oF[r * cols + c] = Float(q) * sc + ze
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return out
+    }
+
     /// Dequantize a W8 tensor into a Float32 output array.
     static func dequantW8(data: Data, scale: Data, zero: Data,
                           k: Int, groupSize: Int = 64) -> [Float] {
@@ -66,6 +105,39 @@ enum QuantDecoders {
                             let sc = Float(Float16(bitPattern: s16[g]))
                             let ze = Float(Float16(bitPattern: z16[g]))
                             oF[i] = Float(q) * sc + ze
+                        }
+                    }
+                }
+            }
+        }
+        return out
+    }
+
+    /// Row-aware W8 counterpart; groups reset at each matrix row.
+    static func dequantW8Matrix(data: Data, scale: Data, zero: Data,
+                                rows: Int, cols: Int, groupSize: Int = 64) -> [Float] {
+        precondition(rows >= 0 && cols >= 0 && groupSize > 0)
+        let groupsPerRow = (cols + groupSize - 1) / groupSize
+        precondition(data.count >= rows * cols)
+        precondition(scale.count >= rows * groupsPerRow * MemoryLayout<UInt16>.size)
+        precondition(zero.count >= rows * groupsPerRow * MemoryLayout<UInt16>.size)
+        var out = [Float](repeating: 0, count: rows * cols)
+        guard rows > 0 && cols > 0 else { return out }
+        data.withUnsafeBytes { dBuf in
+            scale.withUnsafeBytes { sBuf in
+                zero.withUnsafeBytes { zBuf in
+                    let d8 = dBuf.baseAddress!.assumingMemoryBound(to: UInt8.self)
+                    let s16 = sBuf.baseAddress!.assumingMemoryBound(to: UInt16.self)
+                    let z16 = zBuf.baseAddress!.assumingMemoryBound(to: UInt16.self)
+                    out.withUnsafeMutableBytes { ob in
+                        let oF = ob.baseAddress!.assumingMemoryBound(to: Float.self)
+                        for r in 0..<rows {
+                            for c in 0..<cols {
+                                let g = r * groupsPerRow + c / groupSize
+                                let sc = Float(Float16(bitPattern: s16[g]))
+                                let ze = Float(Float16(bitPattern: z16[g]))
+                                oF[r * cols + c] = Float(d8[r * cols + c]) * sc + ze
+                            }
                         }
                     }
                 }

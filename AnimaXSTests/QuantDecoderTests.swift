@@ -11,7 +11,7 @@ final class QuantDecoderTests: XCTestCase {
     private func fp16Data(_ values: [Float]) -> Data {
         var d = Data()
         for v in values {
-            var h = Float16(v)
+            let h = Float16(v)
             var bits = h.bitPattern.littleEndian
             d.append(contentsOf: withUnsafeBytes(of: &bits) { [UInt8]($0) })
         }
@@ -43,6 +43,22 @@ final class QuantDecoderTests: XCTestCase {
         XCTAssertEqual(out[64], 6.0, accuracy: 1e-3, "idx64 group1 q=3 scale=2")
     }
 
+    func testW4MatrixGroupsResetAtEachRow() {
+        // Two [68] rows each have two groups. A flat decoder would incorrectly
+        // continue row 0's second group through the beginning of row 1.
+        let out = QuantDecoders.dequantW4Matrix(
+            data: Data(repeating: 0x11, count: 2 * 34),
+            scale: fp16Data([1.0, 10.0, 100.0, 1000.0]),
+            zero: fp16Data([0.0, 0.0, 0.0, 0.0]),
+            rows: 2,
+            cols: 68
+        )
+        XCTAssertEqual(out[0], 1.0, accuracy: 1e-3)
+        XCTAssertEqual(out[64], 10.0, accuracy: 1e-3)
+        XCTAssertEqual(out[68], 100.0, accuracy: 1e-3)
+        XCTAssertEqual(out[68 + 64], 1000.0, accuracy: 1e-3)
+    }
+
     // MARK: W8 (uint8, group 64, value = q*scale + zero)
 
     func testW8Equation() {
@@ -60,6 +76,20 @@ final class QuantDecoderTests: XCTestCase {
         let out = QuantDecoders.dequantW8(data: data, scale: fp16Data([1.0, 10.0]), zero: fp16Data([0.0, 0.0]), k: 65)
         XCTAssertEqual(out[0], 5.0, accuracy: 1e-3, "idx0 group0 q=5 scale=1")
         XCTAssertEqual(out[64], 9 * 10.0, accuracy: 1e-3, "idx64 group1 q=9 scale=10")
+    }
+
+    func testW8MatrixGroupsResetAtEachRow() {
+        let out = QuantDecoders.dequantW8Matrix(
+            data: Data(repeating: 1, count: 2 * 65),
+            scale: fp16Data([1.0, 10.0, 100.0, 1000.0]),
+            zero: fp16Data([0.0, 0.0, 0.0, 0.0]),
+            rows: 2,
+            cols: 65
+        )
+        XCTAssertEqual(out[0], 1.0, accuracy: 1e-3)
+        XCTAssertEqual(out[64], 10.0, accuracy: 1e-3)
+        XCTAssertEqual(out[65], 100.0, accuracy: 1e-3)
+        XCTAssertEqual(out[65 + 64], 1000.0, accuracy: 1e-3)
     }
 
     // MARK: fp16 reader

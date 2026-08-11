@@ -1,24 +1,14 @@
 # STATUS — AnimaXS (keep short & current)
 
-- **Current milestone:** Phase 3 — Qwen encoder + LLM adapter validated; **DiT input (H001), timestep (H002), AdaLN modulation (H003), 3-D RoPE (H004) DONE and validated vs oracle**. Next: H005 DiT block 0 end-to-end.
-- **Current task:** H005 DiT block 0 end-to-end vs golden block_00_out (needs H001–H004 + Metal attention/MPS primitives).
-- **Last green commit:** b7823d4 (xcodeproj regen for H004). CI run 31433566279 — all 3 jobs GREEN (project-consistency, iphone-build, simulator-tests incl. new DitRoPETests).
-- **Current CI run:** GREEN (31433566279 on b7823d4) — H004 DitRoPE + DitRoPETests (8 tests) all green.
-- **What currently works:**
-  - **CI fully green**: Xcode 26.3 ARM device build (incl. Metal shaders + swift-transformers), simulator tests pass
-  - Swift ANMA parser (JSON-authoritative, CRC-32, alignment, ranges) — validated vs real packs
-  - CPU W4/W8 decoders — known vectors byte-exact vs HANDOFF.md
-  - **Tokenizer parity CI-verified**: Qwen (exact regex) + T5 (Unigram) byte-exact
-  - **Qwen encoder full-28 parity RESOLVED**: Swift W8 == pinned-Comfy oracle cosine 1.000000; vs golden 0.992164 (W8 quantization)
-  - **LLMAdapter (G001/G002) DONE + structurally validated**: cosine 1.000000 vs oracle
-  - **DiT input (H001) DONE**: `DiTInput.swift` patchify 2×2 → 1024×68 → x_embedder → [1024,2048] fp32. Cosine 1.000000 vs oracle.
-  - **Timestep (H002) DONE**: `TimestepEmbedder.swift` sigma→sinusoidal 2048 + RMSNorm/MLP (adaln 6144). Cosine 1.000000 vs oracle.
-  - **AdaLN modulation (H003) DONE**: `Modulation.swift` SiLU→Linear1→Linear2→chunk shift/scale/gate (fp32) + LayerNorm apply. Cosine 1.000000 vs oracle (SiLU-before-Linear1 per pinned source, D026).
-  - **DiT 3-D RoPE (H004) DONE**: `DitRoPE.swift` weightless [1024,64,2,2] (dim 42/42/44, thetas 42870.938/10000 computed exactly, freq order t,h,w, 2×2 `[cos,-sin,sin,cos]` blocks). Cosine 1.000000 vs oracle (`scripts/dit_rope_oracle.py`). CPU tests `DitRoPETests`.
-  - Oracle scripts: `scripts/qwen_comfy_oracle.py`, `anima_adapter_oracle.py`, `dit_input_timestep_oracle.py`, `dit_rope_oracle.py` + fixtures in `scripts/oracle_out/`
-- **What currently fails:** Nothing blocking. All validated components green. A12 device-only items pending (no physical device).
-- **Known device-only unknowns:** MPS fp16 accuracy on Apple5; A12 memory/jetsam/perf/watchdog/thermal. (PENDING — no physical device.)
+- **Current milestone:** Production Metal vertical slice. H001–H005 CPU/reference work is complete; H005 fixed and proved row-aware matrix quantization.
+- **Current task:** D007, then E001–E009. Build a zero-copy block/tensor locator and tested bounded-memory Metal/MPS block 0 before attempting H006’s 28-block loop.
+- **Last green main commit:** `6e72f4f` — main CI `31436850938` green. H005/audit remain local/uncommitted, but an exact non-invasive snapshot `510b3e1` passed CI run `31452206651`: deterministic XcodeGen 2.46.0, generic Xcode 26.3 iPhone build, and 56 simulator tests (3 expected pack skips, 0 failures).
+- **Hosted Metal fact:** Final snapshot run `31452206651` executed the permanent W4 Metal kernel test and fp16 `MPSMatrixMultiplication` on `Apple iOS simulator GPU`; both passed. Pack-free Metal/MPS parity belongs in normal CI.
+- **What works:** ANMA parser/CRC/ranges; tokenizer parity; CPU Qwen + final RMSNorm; CPU adapter; DiT input/timestep/AdaLN/RoPE; H005 CPU block 0. Swift-W4≈NumPy-W4 cosine `1.000000000`; Swift-W4≈source-BF16 golden `0.998712139`, with original BF16≈golden `0.999992303` (D035).
+- **Production boundary:** `DiTBlockCPU` and its dequantized Swift arrays are oracles only. Production must use mmap spans, a one-slot ~39 MB ring, one fp16 dequant scratch, fp32 residual/modulation/gates, Metal kernels, MPS linears, and query-tiled attention.
+- **Known incomplete scaffold:** Metal tanh-GELU and half gate-add are not reference-correct; D007, row-reset GPU regressions, norms/RoPE/matvec/linear/attention, streamed Qwen/adapter, and Metal block-0 parity are unfinished. Full inference test/release assets do not exist yet.
+- **Device-only unknowns:** A12 speed, memory/jetsam, Apple5 behavior, watchdog limits, page cache, and thermal stability. Hosted Metal functional success does not answer them.
 - **Next three tasks:**
-  1. Push H004 (DitRoPE + DitRoPETests + dit_rope_oracle); regenerate xcodeproj (bootstrap-project); verify CI green
-  2. H005 — DiT block 0 end-to-end vs golden block_00_out
-  3. H006 — Full 28-block loop with WeightStreamer ring
+  1. D007 — validated zero-copy block ranges and tensor-relative mmap/ring spans.
+  2. E001/E002/E003 — finish diagnostics/harness and row-aware dequant + exact fp32-sensitive kernels in hosted CI.
+  3. E004–E009 — RoPE/patch/sampler, direct matvec, MPS linear/precision/attention, then production Metal block 0 parity.

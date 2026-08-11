@@ -56,7 +56,8 @@ struct QwenEncoderCPU {
         } else {
             let scale = pack.scaleBytes(t).map { $0.data } ?? Data()
             let zero = pack.zeroBytes(t).map { $0.data } ?? Data()
-            flat = QuantDecoders.dequantW8(data: pack.dataBytes(t).data, scale: scale, zero: zero, k: rows * cols)
+            flat = QuantDecoders.dequantW8Matrix(data: pack.dataBytes(t).data, scale: scale, zero: zero,
+                                                 rows: rows, cols: cols)
         }
         return (0..<rows).map { r in Array(flat[(r * cols)..<((r + 1) * cols)]) }
     }

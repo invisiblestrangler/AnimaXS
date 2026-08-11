@@ -76,7 +76,7 @@ enum TestPackFactory {
     for spec in blobs {
         let blobLen = spec.data.count + spec.scale.count + spec.zero.count
         blobOffsets.append(UInt64(cursor))
-        cursor += blobLen
+        cursor = (cursor + blobLen + 16_383) / 16_384 * 16_384
     }
 
     // 5) Final JSON (offsets now known).

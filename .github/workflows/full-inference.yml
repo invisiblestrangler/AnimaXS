@@ -24,7 +24,7 @@ jobs:
   full-inference:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Select Xcode 26.3
         run: |
@@ -40,41 +40,75 @@ jobs:
             sudo xcode-select -s "$DEVELOPER_DIR"
           fi
 
-      - name: Probe Metal device availability
-        id: metal
-        run: |
-          xcrun simctl spawn booted metaldevice 2>/dev/null || true
-          # The definitive probe happens in the test itself via MTLCreateSystemDefaultDevice().
-          echo "metal_probe_done=true" >> "$GITHUB_OUTPUT"
-
       - name: Find an available iPhone simulator
         id: sim
         run: |
           DEST=$(xcrun simctl list devices available -j \
             | python3 -c "import sys,json;d=json.load(sys.stdin);[print(dv['udid']) for rt in d['devices'].values() for dv in rt if 'iPhone' in dv['name'] and dv['isAvailable']]" \
             | head -1)
+          [ -n "$DEST" ] || { echo "::error::No available iPhone simulator"; exit 1; }
           echo "sim=$DEST" >> "$GITHUB_OUTPUT"
 
-      - name: Run full-model integration inference
-        env:
-          ANIMAXS_RELEASE: ${{ inputs.release }}
-          ANIMAXS_CASE: ${{ inputs.case }}
+      - name: Boot simulator
         run: |
-          # The integration test probes Metal; if unavailable it records SKIPPED_NO_METAL
-          # and exits 0. Otherwise it downloads packs via ModelStore, injects golden noise,
-          # runs canonical inference, and asserts finite/no-NaN + reference comparison.
+          xcrun simctl boot "${{ steps.sim.outputs.sim }}" 2>/dev/null || true
+          xcrun simctl bootstatus "${{ steps.sim.outputs.sim }}" -b
+
+      - name: Execute Metal/MPS smoke tests
+        id: metal
+        run: |
+          set +e
           xcodebuild \
             -project AnimaXS.xcodeproj \
             -scheme AnimaXS \
             -configuration Debug \
             -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.sim }}" \
+            -derivedDataPath .derivedData \
+            -only-testing:AnimaXSTests/MetalExecutionTests \
+            CODE_SIGNING_ALLOWED=NO \
+            test 2>&1 | tee metal-smoke.log
+          RESULT=${PIPESTATUS[0]}
+          set -e
+          if [ "$RESULT" -ne 0 ]; then
+            echo "::error::Metal/MPS smoke test failed"
+            exit "$RESULT"
+          fi
+          if grep -q 'SKIPPED_NO_METAL' metal-smoke.log; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "result=SKIPPED_NO_METAL" >> "$GITHUB_OUTPUT"
+          else
+            grep -q 'METAL_KERNEL_SMOKE=PASS' metal-smoke.log
+            grep -q 'MPS_GEMM_SMOKE=PASS' metal-smoke.log
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "result=PASS" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run full-model integration inference
+        if: steps.metal.outputs.available == 'true'
+        env:
+          ANIMAXS_RELEASE: ${{ inputs.release }}
+          ANIMAXS_CASE: ${{ inputs.case }}
+        run: |
+          test -f AnimaXSTests/FullInferenceTests.swift || {
+            echo "::error::FullInferenceTests is not implemented yet; complete L001 before running this workflow."
+            exit 1
+          }
+          xcodebuild \
+            -project AnimaXS.xcodeproj \
+            -scheme AnimaXS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.sim }}" \
+            -derivedDataPath .derivedData \
             -only-testing:AnimaXSTests/FullInferenceTests \
             CODE_SIGNING_ALLOWED=NO \
             test
-        continue-on-error: true
+        timeout-minutes: 90
 
       - name: Report Metal availability and result
+        if: always()
         run: |
-          echo "Metal on runner: ${{ steps.metal.outputs.metal_probe_done }}"
-          echo "Result recorded by FullInferenceTests (PASS or SKIPPED_NO_METAL)."
+          echo "Metal smoke: ${{ steps.metal.outputs.result }}" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.metal.outputs.result }}" = "SKIPPED_NO_METAL" ]; then
+            echo "Full inference: SKIPPED_NO_METAL" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
           df -h

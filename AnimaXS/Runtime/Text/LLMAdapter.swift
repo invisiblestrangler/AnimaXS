@@ -68,7 +68,8 @@ struct LLMAdapter {
         // W4 storage (group 64, even K → low nibble)
         let scale = pack.scaleBytes(t).map { $0.data } ?? Data()
         let zero = pack.zeroBytes(t).map { $0.data } ?? Data()
-        let flat = QuantDecoders.dequantW4(data: pack.dataBytes(t).data, scale: scale, zero: zero, k: rows * cols)
+        let flat = QuantDecoders.dequantW4Matrix(data: pack.dataBytes(t).data, scale: scale, zero: zero,
+                                                 rows: rows, cols: cols)
         return (0..<rows).map { r in Array(flat[(r * cols)..<((r + 1) * cols)]) }
     }
 

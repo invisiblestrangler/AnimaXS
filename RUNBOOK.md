@@ -89,6 +89,25 @@ Never silently guess.
 
 For particularly subtle operations—Qwen masks, adapter attention/mask behavior, VAE upsampling, causal convolution, RoPE, modulation—also inspect the **pinned reference source identified by the handoff** before implementing it.
 
+Resolved discrepancies are recorded in `DECISIONS.md` and override stale handoff/runbook prose. In particular: Qwen output includes the final RMSNorm (D019), AdaLN applies SiLU before its first linear (D026), DiT RoPE uses the exact computed spatial theta (D029), and quantization groups reset at every matrix row (D034).
+
+## Current implementation checkpoint (2026-08-11)
+
+The parser, CPU quantized references, tokenizer parity, Qwen CPU reference, adapter CPU reference, DiT input/timestep/modulation/RoPE, and CPU DiT block 0 oracle are implemented and numerically validated through H005. These CPU implementations are correctness oracles, not the production inference architecture.
+
+The production Metal path is still a scaffold. Do **not** extend `DiTBlockCPU` into a 28-block production loop or retain fully dequantized weights in nested Swift arrays. Before H006, complete this vertical slice:
+
+```text
+D007 block/tensor range locator with mmap-backed spans
+→ E001 permanent Metal execution harness
+→ E002–E008 tested Metal/MPS primitives
+→ E009 one production Metal block 0 matching the H005 oracle
+→ D008/F007/G003 streamed Metal Qwen + adapter
+→ H006 streamed 28-block Metal loop
+```
+
+Normal GitHub Actions simulator CI has been verified to execute both a project Metal kernel and `MPSMatrixMultiplication` on the standard `macos-15` arm64 runner (final snapshot run `31452206651`). Put all pack-free functional Metal/MPS tests in the normal simulator test target. A physical XS Max remains mandatory only for A12-specific performance, memory, thermal, watchdog, and device-family acceptance.
+
 ---
 
 # 1. Persistent context/checklist system — DO THIS FIRST
@@ -289,7 +308,7 @@ Before project bootstrap, verify:
 2. Its path.
 3. Its bundled iOS SDK.
 4. current `swift-transformers` compatibility.
-5. current CircleStone model license.
+5. current CircleStone Anima license and every upstream license inherited by the derivative, including NVIDIA Cosmos.
 6. current GitHub Release size rules.
 
 As of this runbook, Apple says Xcode 26.3 ships iOS 26.2 SDK, supports deployment to iOS 15–26.2, and supports Swift 5 and Swift 6 language modes.
@@ -314,7 +333,15 @@ while Xcode 16.4 is the default, so CI must select Xcode 26.3 explicitly.
 
 If these facts have changed, adapt CI while preserving the requirement that **Xcode 26.3 remains a required build**.
 
-**STATUS: VERIFIED 2026-08-10 against actions/runner-images `images/macos/macos-15-Readme.md` (main branch): Xcode 26.3 (17C529) at `/Applications/Xcode_26.3.app`, default is 16.4 (16F6). SDK table: iOS 26.2 SDK ships with Xcode 26.2/26.3. XcodeGen NOT preinstalled on the runner — CI installs it via Homebrew. `swift-transformers` latest release: 1.3.3 (2026-05-16) — candidate pin.**
+**STATUS: RE-VERIFIED 2026-08-11.** Final snapshot run `31452206651` used the standard arm64 `macos-15` image, selected `/Applications/Xcode_26.3.app`, verified XcodeGen 2.46.0 by SHA-256, regenerated the project cleanly, built the generic iPhone target, and ran 56 simulator tests with 0 failures (3 expected real-pack skips). The permanent project Metal-kernel and MPS GEMM tests executed successfully on `Apple iOS simulator GPU`. Current action majors were checked before updating CI.
+
+Authoritative links used by this audit:
+
+- GitHub runner specifications: `https://docs.github.com/en/actions/reference/runners/github-hosted-runners`
+- current runner image inventory: `https://github.com/actions/runner-images/blob/main/images/macos/macos-15-arm64-Readme.md`
+- Apple Simulator Metal behavior: `https://developer.apple.com/documentation/metal/developing-metal-apps-that-run-in-simulator`
+- MPS matrix-multiplication semantics: `https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrixmultiplication`
+- GitHub Release limits: `https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases`
 
 ---
 
@@ -348,15 +375,15 @@ Set it on the project/targets.
 
 The `.animapk` files are modified/packed model weights and publishing them is model distribution.
 
-Before uploading them to the public GitHub repository's Releases:
+Anima is a derivative of NVIDIA Cosmos, so the release gate covers both the current CircleStone Anima license and the current NVIDIA Cosmos/Open Model terms. Before uploading packs to the public GitHub repository's Releases:
 
-1. Fetch the CURRENT official CircleStone Anima license.
-2. Read the entire distribution section.
-3. Confirm this project's use/distribution fits it.
-4. Copy the current model license into the distribution.
-5. Include the required current attribution notice.
-6. Clearly state that the `.animapk` files are modified/converted derivatives.
-7. Do not imply CircleStone endorses the project.
+1. Fetch and archive the CURRENT official CircleStone Anima license and NVIDIA upstream model license/terms from their authoritative model pages.
+2. Read every distribution, attribution, use-restriction, and derivative-work condition.
+3. Confirm this project's intended use/distribution fits **both** sets of terms.
+4. Distribute the required license copies and notices, including any required NVIDIA/Cosmos attribution wording.
+5. Clearly state that the `.animapk` files are modified/quantized/converted derivatives.
+6. Include any required website/UI/documentation acknowledgement.
+7. Do not imply CircleStone or NVIDIA endorses the project.
 
 The current license permits model/derivative distribution only subject to its terms and non-commercial restrictions, and its distribution section requires a license copy and attribution notice; derivatives also require disclosure that the model was modified.
 
@@ -364,7 +391,11 @@ If the current license no longer permits the intended public distribution, **do 
 
 Do not choose an open-source license for the app's own source code unless one has been supplied by the user. Model-license files and app-code licensing are separate issues.
 
-**STATUS: PENDING — license gate to run before model release (TODO M00x).**
+Do not treat this runbook as legal advice or mark A005 complete from a summary. Preserve the exact license texts/notices used by the release and record their source URLs and retrieval date in `DECISIONS.md`.
+
+The 2026-08-11 audit observed CircleStone Non-Commercial License v1.2 at `https://huggingface.co/circlestone-labs/Anima/blob/main/LICENSE.md` and the upstream NVIDIA Open Model License dated 2025-04-30 in `https://huggingface.co/nvidia/Cosmos-Predict2-2B-Text2Image/blob/main/README.md`. The latter currently requires its license/Notice attribution and “Built on NVIDIA Cosmos” acknowledgement. Re-fetch these exact sources at A005; do not rely on this observation if either revision changes.
+
+**STATUS: PENDING — both license chains must pass A005 before L002 uploads model packs.**
 
 ---
 
@@ -503,7 +534,7 @@ RMSNorm
 RoPE theta: 1,000,000
 ```
 
-The last layer's hidden state is used **without final norm**.
+The main Qwen output used as `cond_context` is the layer-27 hidden state **after final RMSNorm** (D019). Earlier handoff prose saying “without final norm” refers to a different intermediate capture path and is not authoritative for this golden.
 
 Text encoder pack:
 
@@ -686,6 +717,8 @@ The MacBook user must NOT need XcodeGen just to clone and open the app.
 
 CI should regenerate the project and fail if the committed project differs from `project.yml`.
 
+Use XcodeGen 2.46.0 for both local and CI generation. CI downloads the official release zip and verifies its pinned SHA-256 (D041). Keep `generateEmptyDirectories: false`: git does not preserve empty directories, so including them makes a populated local checkout generate a different project from a clean CI checkout (D040).
+
 **Implementation note: bootstrap job in `.github/workflows/bootstrap-project.yml` generates the xcodeproj on macos-15 and commits it back. `ci.yml` job 1 regenerates and `git diff --exit-code` to enforce consistency.**
 
 ---
@@ -792,9 +825,9 @@ Xcode 26.3's bundled simulator is from the iOS 26.2 SDK generation. Use whatever
 
 Build/test the iOS 18-targeted app on that simulator.
 
-### Job 4 — pure-reference tests
+### Pure-reference and pack-free Metal tests
 
-Run all tests that don't require GPU/device behavior:
+Run these in the same simulator XCTest target as Job 3; do not compile the large Swift dependency graph a second time merely to create a fourth job:
 
 ```text
 .animapk header parser
@@ -811,6 +844,8 @@ AdaLN CPU reference
 tokenization reference
 model manifest/hash parser
 checkpoint serialization
+Metal kernel smoke
+MPS matrix-multiplication smoke
 ```
 
 Do not download 2 GB of model weights on every push.
@@ -826,10 +861,11 @@ That is useful for:
 ```text
 building
 simulator testing
-Metal shader compilation
+Metal shader compilation and execution
+MPS execution
 CPU numerical tests
-possibly Metal execution
-possibly a full functional inference
+pack-free GPU/CPU parity tests
+possibly a full functional inference after release assets and L001 exist
 ```
 
 but it cannot prove:
@@ -845,7 +881,7 @@ A12 page-cache behavior
 
 Do not claim that an M1 CI inference proves those things.
 
-Apple supports Metal in Simulator in principle, but CI virtualization may still make device availability environment-dependent. Probe `MTLCreateSystemDefaultDevice()` at runtime and skip GPU integration tests explicitly if no usable Metal device exists.
+The standard hosted runner currently exposes an iOS Simulator Metal device, but every GPU test must still probe `MTLCreateSystemDefaultDevice()`. An unavailable device is an explicit `SKIPPED_NO_METAL`; a present device with a wrong result is a test failure. Never downgrade a real Metal/MPS failure to a skip.
 
 ---
 
@@ -867,17 +903,20 @@ This job should:
 
 1. select Xcode 26.3;
 2. ensure Metal compiler;
-3. build simulator tests;
-4. probe Metal availability;
+3. discover and boot a simulator;
+4. execute the permanent pack-free Metal/MPS smoke tests;
 5. if Metal is unavailable:
 
    * record `SKIPPED_NO_METAL`;
    * exit successfully;
 6. if Metal exists:
 
-   * run the app's full integration inference test.
+   * require `FullInferenceTests` to exist;
+   * run the app's full integration inference test;
+   * fail the workflow on build, download, execution, timeout, NaN/Inf, or parity failure.
 
 Do not silently label a skipped test PASS.
+Do not use `continue-on-error` on the inference step. Write `PASS`, `FAIL`, or `SKIPPED_NO_METAL` to the job summary. Until L001 and L002 are complete, the manual workflow is infrastructure only and must report “not implemented” as a failure if invoked on a Metal-capable runner.
 
 The manual integration test may download the three model packs from the GitHub Release because together they are only about 2.1 GB and the runner currently has 14 GB SSD. Monitor `df -h` during this job.
 
@@ -924,26 +963,26 @@ case1_danbooru_seed1337.npz
 
 Create small deterministic test fixtures.
 
-At minimum extract:
+Commit only a small, deterministic CPU fixture set:
 
 ```text
 canonical prompt text
 T5 token IDs
 attention mask
-Qwen final context
+Qwen final-context anchors or the full context if the size budget permits
 init_noise_randn
 sigma vector
 final latent
-decoded RGB
+small deterministic decoded-RGB anchors/slices
 ```
 
-Also extract if storage remains reasonable:
+Extract compact deterministic slices/anchors plus shape/hash metadata for:
 
 ```text
+step_latents
 block_00_out
 block_15_out
 block_27_out
-step_latents
 ```
 
 Store them as very simple:
@@ -956,7 +995,7 @@ JSON metadata with shape + SHA256
 
 Do not implement an NPZ reader in Swift just for tests.
 
-Small fixture files can live in the **test target only**.
+Small fixture files can live in the **test target only**. Keep the committed fixture set near the A006 budget (about 3 MB); do not commit the complete 8 MB block tensors or the approximately 118 MB NPZ. Full tensors remain local or are fetched only by the manual pack-backed integration workflow.
 
 Do not include tens of megabytes of debug goldens in the shipping app unless needed.
 
@@ -1108,6 +1147,15 @@ fp16 zero
 value = q*scale + zero
 ```
 
+For a rank-2 `[N,K]` matrix, group indexing resets for each row:
+
+```text
+groupsPerRow = ceil(K / 64)
+group = row * groupsPerRow + column / 64
+```
+
+Never use `flatIndex / 64` for matrices whose K is not divisible by 64. Required regression shapes are W4 `[2,68]` and W8 `[2,65]`, with row-1 values asserted. This is the H005 root-cause regression (D034).
+
 Use the real embedding-table vector documented in `HANDOFF.md`.
 
 Only after CPU tests are exact should Metal decoders be implemented.
@@ -1160,6 +1208,8 @@ Do not allocate all possible tensors simultaneously.
 
 Start with ring=1.
 
+The CPU oracle may use `Data` and flat Swift arrays for safe test-scoped decoding. The production path must operate on validated mmap-backed byte spans and `MTLBuffer` offsets; it must not copy entire tensors into `Data` or construct large `[[Float]]` matrices.
+
 Only implement ring=2 after a real XS Max measurement demonstrates that I/O overlap is worth the memory.
 
 ---
@@ -1179,6 +1229,8 @@ For logical DiT block N:
 3. memcpy its contiguous bytes into ring buffer;
 4. execute tensors using offsets relative to block start;
 5. reuse ring for next logical block.
+
+`D007` must expose both block ranges and tensor-relative spans. Validate every offset/length before creating a buffer view. Copy each block into the one-slot ring once, then address packed data/scales/zeros by offsets relative to that ring; do not make an additional `Data` copy per tensor. If a direct mmap upload or bytes-no-copy path is considered later, require A12 measurements first.
 
 Do not assume physical neighboring blocks correspond to logical neighbors.
 
@@ -1256,9 +1308,9 @@ rmsnorm_half_to_half
 layernorm_f32_modulated_to_half
 
 silu
-gelu
+gelu_exact
 
-gate_add_half_into_float
+gate_add_fp32_into_float
 add_half_into_float
 
 rope_qk
@@ -1298,6 +1350,8 @@ Float32
 
 Do not fuse kernels prematurely.
 
+Match the validated H005 equations, not convenient approximations: adapter/DiT GELU is exact `0.5*x*(1+erf(x/sqrt(2)))`, LayerNorm mean-centers, RMSNorm does not, and DiT modulation/gates/residual additions remain Float32. The current tanh GELU and half-precision gate scaffold are not parity implementations and must be replaced before E003 is complete.
+
 Correct separate Q/K norm + RoPE is preferable to a hard-to-debug fused kernel.
 
 Fuse only after correctness.
@@ -1333,6 +1387,8 @@ use the weight as the right matrix with right transpose:
 ```text
 [M,K] × [N,K]^T → [M,N]
 ```
+
+The dequant kernels must receive explicit row/column strides and use row-reset quantization groups. A synthetic non-aligned-K matrix test is required before any real-model linear is trusted.
 
 Use straightforward contiguous row strides first; MPS publishes recommended matrix row strides, but they are an optimization rather than a prerequisite for the first correct implementation.
 
@@ -1519,6 +1575,8 @@ Do not build both backends upfront.
 
 Implement Qwen first.
 
+`QwenEncoderCPU` is the validated oracle. Production F007 must use the same equations through E002–E008, gather only requested embedding rows, stream one D008 layer range at a time, and reuse bounded Metal buffers. Do not retain all dequantized layer matrices in Swift arrays.
+
 Pipeline:
 
 ```text
@@ -1528,7 +1586,7 @@ prompt
 → Float32 residual
 → 28 streamed Qwen layers
 → layer 27 output
-→ DO NOT apply final norm
+→ apply final RMSNorm
 ```
 
 Keeping the Qwen residual in Float32 is inexpensive because the sequence is small and reduces numerical risk.
@@ -1592,6 +1650,8 @@ Generate T5 token IDs using the second tokenizer.
 Gather adapter target embeddings directly from the W4 embedding tensor instead of dequantizing the entire `[32128,1024]` matrix.
 
 Execute the six adapter blocks.
+
+`LLMAdapter.swift` is the validated CPU oracle. Production G003 must execute these equations with the common Metal/MPS primitives and bounded buffers; it must not dequantize the full T5 embedding table or build large nested Swift matrices.
 
 Use the exact pinned source to resolve:
 
@@ -1724,7 +1784,7 @@ axis split:
   W 42
   T 44
 
-spatial theta ≈ 42871.1
+spatial theta = 10000 * 4^(42/40) = 42870.938501451725
 temporal theta = 10000
 ```
 
@@ -1736,7 +1796,7 @@ Cross-attention does not use that 3-D RoPE.
 
 Write a CPU implementation first.
 
-Have Metal output a tiny reference slice and compare.
+The CPU implementation has been validated against the pinned source (H004/D029). E004 must apply the same split-half mapping `(p, p+64)` in Metal and compare a tiny reference slice.
 
 Wrong RoPE can produce plausible but completely incorrect images, so this is a hard validation gate.
 
@@ -1748,12 +1808,12 @@ Do NOT write the full 28-block loop and debug the final image.
 
 Implement a single block and validate it.
 
-Use canonical:
+The completed CPU H005 gate uses canonical:
 
 ```text
 prompt
 golden input noise
-step 0 sigma
+the final block-hook invocation, sampler step 7, sigma 0.3050089478492737
 ```
 
 Run from input through block 0.
@@ -1778,13 +1838,15 @@ cosine >= 0.999
 
 but use measured/reference tolerances rather than blindly forcing a number.
 
-Do not proceed to 28 blocks if block 0 is materially wrong.
+CPU H005 is green: Swift-W4 matches the independent NumPy-W4 oracle at cosine `1.000000000`; the remaining W4-vs-source-golden difference is source-proven quantization error (D032–D035).
+
+Do not proceed directly from that CPU oracle to a CPU 28-block loop. First implement E009: one bounded-memory production Metal block 0 using the real range locator, ring/scratch buffers, Metal kernels, MPS linears, and tiled attention. It must reproduce the H005 W4 oracle within an experimentally recorded tolerance and keep residual/modulation/gates Float32.
 
 ---
 
 # 33. Full DiT loop
 
-Once block 0 is correct:
+Once the production Metal block 0 is correct:
 
 ```text
 for logical block in 0..<28
@@ -1809,7 +1871,7 @@ block 27
 
 if fixtures exist.
 
-In normal mode do not copy huge block outputs back to CPU.
+In normal mode do not copy huge block outputs back to CPU and do not retain dequantized matrices between linears.
 
 After block 27 execute final normalization/modulation/projection exactly as the reference specifies.
 
@@ -2404,7 +2466,7 @@ attention tile
 sampler kernel
 ```
 
-Compare with CPU reference.
+Compare with CPU reference. Pack-free synthetic Metal/MPS tests run on every push because hosted execution is verified. At minimum include non-aligned-K W4/W8 row reset, exact GELU, fp32 gate-add, norm semantics, split-half RoPE, transposed MPS linear, tiled attention, patchify/unpatchify, and Euler update.
 
 ## Model integration
 
@@ -2444,7 +2506,7 @@ Do NOT demand bit equality between A12 fp16/W4 runtime and the desktop bf16/fp32
 
 # 49. GitHub full-inference attempt
 
-After model release exists, trigger the manual `full-inference.yml`.
+After L001 and the licensed model release L002 exist, trigger the manual `full-inference.yml`.
 
 The simulator test should:
 
@@ -2461,13 +2523,13 @@ Do not upload the model files themselves as Actions artifacts.
 
 Do not cache all model packs.
 
-If Metal is unavailable on GitHub's VM:
+If Metal is unavailable on a future GitHub VM:
 
 ```text
 SKIP with explicit reason
 ```
 
-and leave actual inference as a device acceptance gate.
+and leave actual inference as a device acceptance gate. If Metal is available, every other error is a failure; never use `continue-on-error` to turn it green.
 
 ---
 
@@ -2548,25 +2610,24 @@ Do not jump around.
 1. repository + Xcode project + CI green
 2. animapk parser
 3. CPU W4/W8 tests
-4. Metal context
-5. Metal W4/W8 dequant
-6. MPS linear
-7. tokenizer parity
-8. Qwen final context
-9. LLM adapter
-10. DiT timestep + RoPE + modulation
-11. DiT block 0
-12. all 28 blocks / one DiT forward
-13. Euler sampler
-14. 8-step final latent
-15. validate VAE 3D→2D fold
-16. full-frame VAE
-17. first RGB image
-18. model download UX
-19. checkpoint/background/memory handling
-20. manual CI full-inference attempt
-21. documentation
-22. A12 diagnostics/self-test
+4. tokenizer/Qwen/adapter and DiT CPU references through block 0 (complete)
+5. DiT block/tensor range locator and one-slot ring semantics
+6. permanent Metal execution harness in normal CI
+7. row-aware Metal W4/W8 dequant + exact elementwise/norm/RoPE kernels
+8. direct W4 fp32 matvec + MPS linear + query-tiled attention
+9. one production Metal DiT block 0 vs H005 oracle
+10. streamed Metal Qwen + adapter vs their CPU oracles
+11. all 28 streamed Metal blocks / one DiT forward
+12. Euler sampler
+13. 8-step final latent
+14. validate VAE 3D→2D fold
+15. full-frame VAE
+16. first RGB image
+17. model download UX
+18. checkpoint/background/memory handling
+19. manual CI full-inference attempt
+20. documentation
+21. A12 diagnostics/self-test
 ```
 
 This order is deliberate.
@@ -2679,6 +2740,7 @@ The project is complete only when:
 [ ] deployment target iOS 18.0
 [ ] no signing required for CI build
 [ ] Metal shaders compile
+[ ] pack-free Metal kernel and MPS execution tests PASS in hosted simulator CI
 [ ] simulator unit tests PASS
 ```
 
@@ -2714,7 +2776,7 @@ The project is complete only when:
 ```text
 [ ] required CI workflow green
 [ ] manual full-inference workflow attempted
-[ ] if Metal available, full simulator inference attempted
+[ ] if Metal available and L001/L002 exist, full simulator inference attempted without masked failures
 [ ] if Metal unavailable, explicit SKIP recorded
 ```
 

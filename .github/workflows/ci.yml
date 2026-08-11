@@ -12,14 +12,15 @@ concurrency:
 
 env:
   DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
-  XCODEGEN_VERSION: 2.44.1
+  XCODEGEN_VERSION: 2.46.0
+  XCODEGEN_ZIP_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
 
 jobs:
   # Job 1 — project consistency: regenerate from project.yml, fail if committed project differs.
   project-consistency:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Select Xcode 26.3 (fail if wrong)
         run: |
           sudo xcode-select -s "$DEVELOPER_DIR"
@@ -38,9 +39,15 @@ jobs:
           else
             echo "Metal compiler present: $(xcrun --find metal)"
           fi
-      - name: Install XcodeGen
+      - name: Install pinned XcodeGen
         run: |
-          which xcodegen || brew install xcodegen
+          curl --fail --location --silent --show-error \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+            --output "$RUNNER_TEMP/xcodegen.zip"
+          echo "${XCODEGEN_ZIP_SHA256}  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
+          ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/xcodegen/bin:$PATH"
           xcodegen version
       - name: Require committed xcodeproj
         run: |
@@ -61,7 +68,7 @@ jobs:
     runs-on: macos-15
     needs: project-consistency
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Select Xcode 26.3 + Metal toolchain
         run: |
           sudo xcode-select -s "$DEVELOPER_DIR"
@@ -86,8 +93,8 @@ jobs:
     runs-on: macos-15
     needs: project-consistency
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
         with:
           # Cache only the SPM dependency *sources* (downloaded checkouts), not build products,
           # so restored artifacts are never stale vs the current Swift sources.
@@ -124,7 +131,5 @@ jobs:
             test
         timeout-minutes: 30
 
-  # Job 4 — folded into simulator-tests (runbook §11). The pure-reference tests
-  # (parser, W4/W8 CPU, sampler, numeric refs, manifest, checkpoint, tokenizer parity)
-  # run as part of the full simulator test target; there is no separate job to avoid
-  # compiling the large swift-transformers dependency graph a second time.
+  # Pure-reference and pack-free Metal/MPS tests are folded into simulator-tests.
+  # There is no duplicate test job because swift-transformers is expensive to build.

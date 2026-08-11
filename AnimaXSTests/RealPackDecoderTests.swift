@@ -71,4 +71,29 @@ final class RealPackDecoderTests: XCTestCase {
             XCTAssertEqual(out[i], ref[i], accuracy: 5e-5, "W8 real-pack index \(i)")
         }
     }
+
+    func testRealPackExecutionRanges() throws {
+        try requirePackEnv()
+        let dir = Self.packEnv!
+
+        let dit = try AnimapkFile(url: URL(
+            fileURLWithPath: dir + "/anima-turbo-v1.0-xsmax-w4.animapk"))
+        let ditLocator = try DiTBlockLocator(file: dit)
+        XCTAssertEqual(ditLocator.blocks.map(\.logicalIndex), Array(0..<28))
+        XCTAssertEqual(ditLocator.blocks.reduce(0) { $0 + $1.tensors.count }, 560)
+        XCTAssertLessThan(try ditLocator.block(10).fileOffset, try ditLocator.block(2).fileOffset)
+
+        let qwen = try AnimapkFile(url: URL(
+            fileURLWithPath: dir + "/qwen3-0.6b-xsmax-w8.animapk"))
+        let qwenLocator = try QwenLayerLocator(file: qwen)
+        XCTAssertEqual(qwenLocator.layers.map(\.logicalIndex), Array(0..<28))
+        XCTAssertEqual(qwenLocator.layers.reduce(0) { $0 + $1.tensors.count }, 308)
+        let first = try qwenLocator.embeddingRow(0)
+        let last = try qwenLocator.embeddingRow(151_935)
+        XCTAssertEqual(first.data.length, 1_024)
+        XCTAssertEqual(first.scale.length, 32)
+        XCTAssertEqual(last.data.range.upperBound, qwenLocator.embedding.data.range.upperBound)
+        XCTAssertEqual(last.scale.range.upperBound, qwenLocator.embedding.scale?.range.upperBound)
+        XCTAssertEqual(last.zero.range.upperBound, qwenLocator.embedding.zero?.range.upperBound)
+    }
 }

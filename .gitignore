@@ -28,3 +28,9 @@ GITHUB_PAT*
 
 # Oracle raw output (regenerable by harness); keep the .npz fixtures, drop .f32
 scripts/oracle_out/*.f32
+scripts/oracle_out/*/*.f32
+scripts/oracle_out/*/*.npz
+
+# Python bytecode from local oracle runs
+__pycache__/
+scripts/__pycache__/

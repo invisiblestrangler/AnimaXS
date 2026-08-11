@@ -23,17 +23,19 @@ kernel void dequant_w4_to_half(
     device half         *out       [[buffer(3)]],
     constant uint       &K         [[buffer(4)]],
     constant uint       &rowStride [[buffer(5)]],   // packed bytes per row = K/2 (may include pad)
+    constant uint       &rows      [[buffer(6)]],
     uint2 gid [[thread_position_in_grid]])          // gid.x = k, gid.y = row
 {
     uint k = gid.x;
     uint r = gid.y;
+    if (k >= K || r >= rows) return;
     uint byteIdx = r * rowStride + (k >> 1);
     uchar b = packed[byteIdx];
     uint q = (k & 1) == 0 ? uint(b & 0x0F) : uint(b >> 4);
     uint g = k / W4_GROUP;
     half sc = scale[r * (K + W4_GROUP - 1) / W4_GROUP + g];
     half ze = zero[r * (K + W4_GROUP - 1) / W4_GROUP + g];
-    out[r * K + k] = half(q) * sc + ze;
+    out[r * K + k] = half(float(q) * float(sc) + float(ze));
 }
 
 // ---------------------------------------------------------------------------
@@ -46,15 +48,17 @@ kernel void dequant_w8_to_half(
     device half         *out       [[buffer(3)]],
     constant uint       &K         [[buffer(4)]],
     constant uint       &rowStride [[buffer(5)]],
+    constant uint       &rows      [[buffer(6)]],
     uint2 gid [[thread_position_in_grid]])
 {
     uint k = gid.x;
     uint r = gid.y;
+    if (k >= K || r >= rows) return;
     uint q = uint(packed[r * rowStride + k]);
     uint g = k / W4_GROUP;
     half sc = scale[r * (K + W4_GROUP - 1) / W4_GROUP + g];
     half ze = zero[r * (K + W4_GROUP - 1) / W4_GROUP + g];
-    out[r * K + k] = half(q) * sc + ze;
+    out[r * K + k] = half(float(q) * float(sc) + float(ze));
 }
 
 // ---------------------------------------------------------------------------
@@ -86,7 +90,8 @@ kernel void rmsnorm_f32_to_f32(
 }
 
 // ---------------------------------------------------------------------------
-// GELU (tanh approximation used by the reference; confirm exact form via source).
+// SCAFFOLD ONLY: this tanh approximation is NOT the adapter/DiT reference GELU.
+// E003 must replace it with exact erf GELU and add hosted Metal parity tests.
 // ---------------------------------------------------------------------------
 kernel void gelu(
     device const half *in  [[buffer(0)]],
@@ -112,7 +117,8 @@ kernel void silu(
 }
 
 // ---------------------------------------------------------------------------
-// Gate-add half branch into fp32 residual: x += gate * branch.
+// SCAFFOLD ONLY: H005 requires a fp32 gate and fp32 residual update.
+// E003 must replace this half-gate signature and add hosted Metal parity tests.
 // ---------------------------------------------------------------------------
 kernel void gate_add_half_into_float(
     device float       *residual [[buffer(0)]],
