@@ -30,9 +30,8 @@ final class QwenEncoderMetal {
             length: Self.hidden * 2, options: .storageModeShared) else {
             throw AnimapkError.validation("failed to allocate Qwen final norm buffer")
         }
-        let normBytes = try file.bytes(in:
-            (tensor.blobOffset + tensor.dataOffset)..<
-            (tensor.blobOffset + tensor.dataOffset + tensor.dataSize))
+        let normStart = tensor.blobOffset + tensor.dataOffset
+        let normBytes = try file.bytes(in: normStart..<(normStart + tensor.dataSize))
         guard let source = normBytes.baseAddress else {
             throw AnimapkError.validation("Qwen final norm has no mapped bytes")
         }
