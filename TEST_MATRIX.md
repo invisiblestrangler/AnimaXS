@@ -15,6 +15,7 @@ Env: `CI-sim` = GitHub Actions standard `macos-15` arm64 iOS Simulator · `CI-de
 | D003 | W4 nibble order + row-aware matrix dequant reference | AnimaXSTests | RAN (`31452206651`) | CI-sim |
 | D004 | W8 dequant + row-aware matrix reference | AnimaXSTests | RAN (`31452206651`) | CI-sim |
 | D001 | fp16 tensor reader | AnimaXSTests | RAN (main CI `31436850938`) | CI-sim |
+| A006 | canonical small-fixture extraction, source/array hashes, shapes and ≤3 MiB budget | `scripts/extract_golden_fixtures.py` | PASS: 717,783-byte binary set from SHA-verified NPZ | local |
 | D007 | block-range lookup 0…27 | AnimaXSTests | RAN synthetic (`31455204105`) + real-pack audit | CI-sim/pack |
 | D008 | Qwen embedding/layer range lookup 0…27 | AnimaXSTests | RAN synthetic (`31455204105`) + real-pack audit | CI-sim/pack |
 | G003 | adapter block/final ranges + W4 embedding rows | AnimaXSTests | PASS synthetic + real-pack subset (`31492451065`) | CI-sim/pack |

@@ -19,8 +19,9 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
   - deps: none · output: RUNBOOK §4 + STATUS entries · validation: official docs/API and final live snapshot `31452206651`
 - [ ] **A005** — Archive and evaluate the current CircleStone Anima license **and inherited NVIDIA Cosmos/Open Model terms** before distributing packs.
   - deps: none · output: exact license copies + required notices in `docs/`; source URLs/retrieval date/verdict in DECISIONS · validation: both distribution/attribution/use-restriction chains read and recorded (runbook §6)
-- [ ] **A006** — Extract the small committed fixture set from `case1_danbooru_seed1337.npz`: prompt, token IDs/masks, context anchors/full context if budget permits, noise, sigmas, final latent, step/block/RGB slices, and shape/hash metadata.
+- [x] **A006** — Extract the small committed fixture set from `case1_danbooru_seed1337.npz`: prompt, token IDs/masks, context anchors/full context if budget permits, noise, sigmas, final latent, step/block/RGB slices, and shape/hash metadata.
   - deps: A002 · output: test-only fixtures + `fixtures.json` · validation: SHA-256 and shapes recorded, deterministic anchors checked, committed total about 3 MB; full 8 MB block arrays/118 MB NPZ stay local or manual-CI-only
+  - **DONE 2026-08-11.** `scripts/extract_golden_fixtures.py` verifies canonical NPZ SHA-256 `44d35d…a8dc` and emits 717,783 bytes under `AnimaXSTests/Fixtures/Case1Binary`: full raw noise, final latent and Qwen context, T5 IDs, exact sigmas/prompt/mask hash, plus first-16 anchors and full hashes/shapes for legacy step callbacks, blocks 0/15/27 and RGB. The metadata explicitly carries D055's warning; no contradictory legacy callback array is used as an intermediate sampler gate. Total committed test fixtures remain about 2.0 MB.
 
 ## B — Repository / project bootstrap
 
