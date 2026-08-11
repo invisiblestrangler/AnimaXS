@@ -132,6 +132,53 @@ final class QwenEncoderMetalTests: XCTestCase {
         print("I002_PREPARE_SECONDS=\(Date().timeIntervalSince(start))")
     }
 
+    func testRealW4EightStepDiffusionLoop() async throws {
+        guard let packPath = ProcessInfo.processInfo.environment["ANIMAXS_DIFFUSION_PACK"],
+              let oraclePath = ProcessInfo.processInfo.environment["ANIMAXS_DIFFUSION_ORACLE_DIR"] else {
+            throw XCTSkip("full diffusion pack/oracle fixture not available")
+        }
+        guard let context = MetalContext() else {
+            throw XCTSkip("SKIPPED_NO_METAL: default Metal device/library unavailable")
+        }
+        let directory = URL(fileURLWithPath: oraclePath)
+        let initialValues = try floats("diffusion_initial.f32", in: directory)
+        let contextValues = try floats("diffusion_context.f32", in: directory)
+        XCTAssertEqual(initialValues.count, DiffusionSampler.latentElements)
+        XCTAssertEqual(contextValues.count, 512 * 1_024)
+        let initial = makeBuffer(initialValues, context: context)
+        let crossContext = makeBuffer(contextValues, context: context)
+        let output = try XCTUnwrap(context.device.makeBuffer(
+            length: DiffusionSampler.latentElements * 4, options: .storageModeShared))
+        let start = Date()
+        var completedSteps = 0
+        try await DiffusionSampler(
+            context: context,
+            file: AnimapkFile(url: URL(fileURLWithPath: packPath))).execute(
+                initialLatent: initial, crossContext: crossContext, outputLatent: output,
+                blockProgress: { step, block in
+                    if block == 27 { print("I002_DIFFUSION_BLOCKS step=\(step) completed=28") }
+                },
+                stepCompleted: { step, _, _, denoised, latent in
+                    let denoisedMetric = self.metrics(
+                        denoised, try self.floats("diffusion_callback_\(step).f32", in: directory))
+                    print("I002_DIFFUSION_CALLBACK step=\(step) maxAbs=\(denoisedMetric.maxAbs) "
+                        + "rmse=\(denoisedMetric.rmse) cosine=\(denoisedMetric.cosine)")
+                    XCTAssertTrue(denoisedMetric.finite)
+                    let pointer = latent.contents().bindMemory(
+                        to: Float.self, capacity: DiffusionSampler.latentElements)
+                    XCTAssertTrue((0..<DiffusionSampler.latentElements).allSatisfy {
+                        pointer[$0].isFinite
+                    })
+                    completedSteps += 1
+                })
+        XCTAssertEqual(completedSteps, 8)
+        let finalMetric = metrics(output, try floats("diffusion_final.f32", in: directory))
+        print("I002_DIFFUSION_FINAL maxAbs=\(finalMetric.maxAbs) rmse=\(finalMetric.rmse) "
+            + "cosine=\(finalMetric.cosine) seconds=\(Date().timeIntervalSince(start))")
+        XCTAssertTrue(finalMetric.finite)
+        XCTAssertGreaterThan(finalMetric.cosine, 0.8)
+    }
+
     private func metrics(
         _ buffer: MTLBuffer, _ expected: [Float]
     ) -> (maxAbs: Double, rmse: Double, cosine: Double, finite: Bool) {
