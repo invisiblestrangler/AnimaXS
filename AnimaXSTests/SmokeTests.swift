@@ -43,4 +43,58 @@ final class SmokeTests: XCTestCase {
         XCTAssertThrowsError(try DiffusionSampler.cpuDenoised(
             latent: [1], velocity: [], sigma: 1))
     }
+
+    func testSeededRNGIsDeterministicAndStatisticallySane() throws {
+        var first = SeededRNG(seed: 1_337)
+        var repeatSeed = SeededRNG(seed: 1_337)
+        var other = SeededRNG(seed: 1_338)
+        let a = try first.normal(count: 100_000)
+        XCTAssertEqual(a, try repeatSeed.normal(count: 100_000))
+        XCTAssertNotEqual(Array(a.prefix(16)), try other.normal(count: 16))
+        let mean = a.reduce(0.0) { $0 + Double($1) } / Double(a.count)
+        let variance = a.reduce(0.0) { $0 + pow(Double($1) - mean, 2) } / Double(a.count)
+        XCTAssertLessThan(abs(mean), 0.02)
+        XCTAssertEqual(sqrt(variance), 1.0, accuracy: 0.02)
+        XCTAssertTrue(a.allSatisfy(\.isFinite))
+        XCTAssertThrowsError(try first.normal(count: -1))
+    }
+
+    func testCheckpointRoundTripIsBitExactAndAtomic() throws {
+        let count = 16 * 64 * 64
+        let latent = (0..<count).map { Float($0 % 257) / 19 - 3 }
+        let checkpoint = try GenerationCheckpoint(
+            latent: latent, step: 4, prompt: "checkpoint test", seed: 1_337,
+            width: 512, height: 512,
+            modelHashes: ModelHashes(dit: "dit-hash", textEncoder: "te-hash", vae: "vae-hash"))
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-checkpoint-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("generation.json")
+        try checkpoint.writeAtomically(to: url)
+        let loaded = try GenerationCheckpoint.load(from: url)
+        XCTAssertEqual(loaded, checkpoint)
+        let restored = try loaded.latentValues()
+        XCTAssertEqual(restored.map(\.bitPattern), latent.map(\.bitPattern))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path),
+                       ["generation.json"])
+    }
+
+    func testIncrementalModelManifestSHA256() throws {
+        XCTAssertEqual(ModelManifest.entries.map(\.component), [.dit, .textEncoder, .vae])
+        XCTAssertEqual(Set(ModelManifest.entries.map(\.filename)).count, 3)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-sha-\(UUID().uuidString)")
+        try Data("abc".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertEqual(
+            try ModelManifest.sha256(of: url, chunkBytes: 1),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+        let synthetic = ModelManifestEntry(
+            filename: url.lastPathComponent, size: 3,
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            url: url, component: .dit)
+        XCTAssertNoThrow(try ModelManifest.verify(url, against: synthetic))
+        XCTAssertThrowsError(try ModelManifest.sha256(of: url, chunkBytes: 0))
+    }
 }
