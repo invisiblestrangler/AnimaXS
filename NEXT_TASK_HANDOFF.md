@@ -4,7 +4,7 @@ Updated 2026-08-11 after completing H005, D007/D008, and E001–E005. The next t
 
 ## Current branch and proof
 
-Work in `/root/AnimaXS`. E003–E005 are on `codex/e003-exact-arithmetic` at `433d064`; GitHub Actions run `31478699877` passed:
+Work in `/root/AnimaXS` on `main`. E003–E005 landed at `5d4bf82`; main GitHub Actions run `31479627644` passed:
 
 - deterministic XcodeGen 2.46.0 project check;
 - generic iPhone build with Xcode 26.3;
