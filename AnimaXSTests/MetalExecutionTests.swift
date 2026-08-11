@@ -35,6 +35,7 @@ final class MetalExecutionTests: XCTestCase {
         var columns: UInt32 = 2
         var packedRowStride: UInt32 = 1
         var rows: UInt32 = 1
+        var outputStride = columns
 
         let commandBuffer = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
         let encoder = try XCTUnwrap(commandBuffer.makeComputeCommandEncoder())
@@ -46,6 +47,7 @@ final class MetalExecutionTests: XCTestCase {
         encoder.setBytes(&columns, length: MemoryLayout<UInt32>.size, index: 4)
         encoder.setBytes(&packedRowStride, length: MemoryLayout<UInt32>.size, index: 5)
         encoder.setBytes(&rows, length: MemoryLayout<UInt32>.size, index: 6)
+        encoder.setBytes(&outputStride, length: MemoryLayout<UInt32>.size, index: 7)
         encoder.dispatchThreads(
             MTLSize(width: 4, height: 2, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 2, height: 1, depth: 1)
@@ -126,6 +128,7 @@ final class MetalExecutionTests: XCTestCase {
         let outputCount = rows * columns + 32
         let outputBuffer = makeBuffer([UInt16](repeating: guardValue, count: outputCount), on: context.device)
         var k = UInt32(columns), stride = UInt32(rowStride), rowCount = UInt32(rows)
+        var outputStride = UInt32(columns)
         let commandBuffer = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
         let encoder = try XCTUnwrap(commandBuffer.makeComputeCommandEncoder())
         encoder.setComputePipelineState(pipeline)
@@ -136,6 +139,7 @@ final class MetalExecutionTests: XCTestCase {
         encoder.setBytes(&k, length: 4, index: 4)
         encoder.setBytes(&stride, length: 4, index: 5)
         encoder.setBytes(&rowCount, length: 4, index: 6)
+        encoder.setBytes(&outputStride, length: 4, index: 7)
         encoder.dispatchThreads(
             MTLSize(width: columns + 7, height: rows + 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: min(64, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))

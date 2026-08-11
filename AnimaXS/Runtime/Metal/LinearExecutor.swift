@@ -52,7 +52,8 @@ final class LinearExecutor {
 
         let n = weight.rows
         let k = weight.columns
-        let scratchBytes = try checkedProduct(n, k, MemoryLayout<Float16>.stride)
+        let rightRowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: k, dataType: .float16)
+        let scratchBytes = try checkedProduct(n, rightRowBytes)
         let scratch = buffers.buffer(key: "linear.weight.fp16", bytes: scratchBytes)
         let kernelName: String
         switch weight.storage {
@@ -68,6 +69,7 @@ final class LinearExecutor {
         var columns = UInt32(k)
         var rowStride = UInt32(weight.packedRowStride)
         var rows = UInt32(n)
+        var outputStride = UInt32(rightRowBytes / MemoryLayout<Float16>.stride)
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(weight.packed, offset: weight.packedOffset, index: 0)
         encoder.setBuffer(weight.scale, offset: weight.scaleOffset, index: 1)
@@ -76,6 +78,7 @@ final class LinearExecutor {
         encoder.setBytes(&columns, length: 4, index: 4)
         encoder.setBytes(&rowStride, length: 4, index: 5)
         encoder.setBytes(&rows, length: 4, index: 6)
+        encoder.setBytes(&outputStride, length: 4, index: 7)
         let width = min(16, pipeline.threadExecutionWidth)
         let height = max(1, min(16, pipeline.maxTotalThreadsPerThreadgroup / width))
         encoder.dispatchThreads(
@@ -85,24 +88,31 @@ final class LinearExecutor {
 
         let scalarBytes = MemoryLayout<Float16>.stride
         let rightDescriptor = MPSMatrixDescriptor(
-            rows: n, columns: k, rowBytes: k * scalarBytes, dataType: .float16)
+            rows: n, columns: k, rowBytes: rightRowBytes, dataType: .float16)
         let right = MPSMatrix(buffer: scratch, descriptor: rightDescriptor)
 
         var rowStart = 0
         while rowStart < inputRows {
             let rowsThisTile = min(tileRows, inputRows - rowStart)
+            let leftRowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: k, dataType: .float16)
+            let resultRowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: n, dataType: .float16)
+            let leftScratch = buffers.buffer(
+                key: "linear.left.fp16", bytes: try checkedProduct(rowsThisTile, leftRowBytes))
+            let resultScratch = buffers.buffer(
+                key: "linear.result.fp16", bytes: try checkedProduct(rowsThisTile, resultRowBytes))
+            try encodeCopy(commandBuffer: commandBuffer,
+                           source: input, sourceOffset: inputOffset + rowStart * k * scalarBytes,
+                           destination: leftScratch, destinationOffset: 0,
+                           columns: k, rows: rowsThisTile,
+                           sourceStride: k, destinationStride: leftRowBytes / scalarBytes)
             let leftDescriptor = MPSMatrixDescriptor(
-                rows: rowsThisTile, columns: k, rowBytes: k * scalarBytes, dataType: .float16)
+                rows: rowsThisTile, columns: k, rowBytes: leftRowBytes, dataType: .float16)
             let outputDescriptor = MPSMatrixDescriptor(
-                rows: rowsThisTile, columns: n, rowBytes: n * scalarBytes, dataType: .float16)
+                rows: rowsThisTile, columns: n, rowBytes: resultRowBytes, dataType: .float16)
             let left = MPSMatrix(
-                buffer: input,
-                offset: inputOffset + rowStart * k * scalarBytes,
-                descriptor: leftDescriptor)
+                buffer: leftScratch, descriptor: leftDescriptor)
             let result = MPSMatrix(
-                buffer: output,
-                offset: outputOffset + rowStart * n * scalarBytes,
-                descriptor: outputDescriptor)
+                buffer: resultScratch, descriptor: outputDescriptor)
             let multiplication = MPSMatrixMultiplication(
                 device: context.device,
                 transposeLeft: false,
@@ -117,8 +127,37 @@ final class LinearExecutor {
                 leftMatrix: left,
                 rightMatrix: right,
                 resultMatrix: result)
+            try encodeCopy(commandBuffer: commandBuffer,
+                           source: resultScratch, sourceOffset: 0,
+                           destination: output,
+                           destinationOffset: outputOffset + rowStart * n * scalarBytes,
+                           columns: n, rows: rowsThisTile,
+                           sourceStride: resultRowBytes / scalarBytes, destinationStride: n)
             rowStart += rowsThisTile
         }
+    }
+
+    private func encodeCopy(
+        commandBuffer: MTLCommandBuffer, source: MTLBuffer, sourceOffset: Int,
+        destination: MTLBuffer, destinationOffset: Int, columns: Int, rows: Int,
+        sourceStride: Int, destinationStride: Int
+    ) throws {
+        let pipeline = try context.pipeline(named: "copy_half_rows")
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create linear row-copy encoder")
+        }
+        var columnCount = UInt32(columns), rowCount = UInt32(rows)
+        var sourceRowStride = UInt32(sourceStride), destinationRowStride = UInt32(destinationStride)
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(source, offset: sourceOffset, index: 0)
+        encoder.setBuffer(destination, offset: destinationOffset, index: 1)
+        encoder.setBytes(&columnCount, length: 4, index: 2)
+        encoder.setBytes(&rowCount, length: 4, index: 3)
+        encoder.setBytes(&sourceRowStride, length: 4, index: 4)
+        encoder.setBytes(&destinationRowStride, length: 4, index: 5)
+        encoder.dispatchThreads(MTLSize(width: columns, height: rows, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: min(16, columns), height: 1, depth: 1))
+        encoder.endEncoding()
     }
 
     /// Convenience async submission. Completion resumes off the command-buffer callback.

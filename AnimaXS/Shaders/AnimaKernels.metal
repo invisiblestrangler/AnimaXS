@@ -24,6 +24,7 @@ kernel void dequant_w4_to_half(
     constant uint       &K         [[buffer(4)]],
     constant uint       &rowStride [[buffer(5)]],   // packed bytes per row = K/2 (may include pad)
     constant uint       &rows      [[buffer(6)]],
+    constant uint       &outStride [[buffer(7)]],   // fp16 elements per output row
     uint2 gid [[thread_position_in_grid]])          // gid.x = k, gid.y = row
 {
     uint k = gid.x;
@@ -35,7 +36,7 @@ kernel void dequant_w4_to_half(
     uint g = k / W4_GROUP;
     half sc = scale[r * (K + W4_GROUP - 1) / W4_GROUP + g];
     half ze = zero[r * (K + W4_GROUP - 1) / W4_GROUP + g];
-    out[r * K + k] = half(float(q) * float(sc) + float(ze));
+    out[r * outStride + k] = half(float(q) * float(sc) + float(ze));
 }
 
 // ---------------------------------------------------------------------------
@@ -49,6 +50,7 @@ kernel void dequant_w8_to_half(
     constant uint       &K         [[buffer(4)]],
     constant uint       &rowStride [[buffer(5)]],
     constant uint       &rows      [[buffer(6)]],
+    constant uint       &outStride [[buffer(7)]],
     uint2 gid [[thread_position_in_grid]])
 {
     uint k = gid.x;
@@ -58,7 +60,20 @@ kernel void dequant_w8_to_half(
     uint g = k / W4_GROUP;
     half sc = scale[r * (K + W4_GROUP - 1) / W4_GROUP + g];
     half ze = zero[r * (K + W4_GROUP - 1) / W4_GROUP + g];
-    out[r * K + k] = half(float(q) * float(sc) + float(ze));
+    out[r * outStride + k] = half(float(q) * float(sc) + float(ze));
+}
+
+kernel void copy_half_rows(
+    device const half *source      [[buffer(0)]],
+    device half       *destination [[buffer(1)]],
+    constant uint     &columns     [[buffer(2)]],
+    constant uint     &rows        [[buffer(3)]],
+    constant uint     &sourceStride [[buffer(4)]],
+    constant uint     &destinationStride [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= columns || gid.y >= rows) return;
+    destination[gid.y * destinationStride + gid.x] = source[gid.y * sourceStride + gid.x];
 }
 
 // ---------------------------------------------------------------------------

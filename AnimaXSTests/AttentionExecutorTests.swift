@@ -26,7 +26,7 @@ final class AttentionExecutorTests: XCTestCase {
 
     func testRepresentativeSelfAttentionIsQueryTiled() async throws {
         let context = try requireContext()
-        let count = 1_024, dim = 16
+        let count = 1_024, dim = 64
         let query = (0..<(count * dim)).map {
             Float16(sin(Float($0 * 13 % 997) * 0.017) * 0.25)
         }
@@ -62,7 +62,7 @@ final class AttentionExecutorTests: XCTestCase {
 
     func testCrossAttentionRetainsAll512RowsAndTailTile() async throws {
         let context = try requireContext()
-        let queryCount = 129, keyCount = 512, dim = 16
+        let queryCount = 129, keyCount = 512, dim = 64
         let query = [Float16](repeating: 0, count: queryCount * dim)
         let key = [Float16](repeating: 0, count: keyCount * dim)
         var value = [Float16](repeating: 0, count: keyCount * dim)
