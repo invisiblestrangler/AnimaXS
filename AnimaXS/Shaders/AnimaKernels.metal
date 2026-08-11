@@ -271,6 +271,46 @@ kernel void rms_rope_split_half(
 }
 
 // ---------------------------------------------------------------------------
+// Direct packed W4 matrix-vector product for precision-sensitive M=1 linears.
+// Weight is [rows,K], input [K], output [rows]. Quant groups reset per row.
+// Dispatch one power-of-two threadgroup (up to 256 threads) per output row.
+// ---------------------------------------------------------------------------
+kernel void w4_matvec_f32(
+    device const uchar *packed     [[buffer(0)]],
+    device const half  *scale      [[buffer(1)]],
+    device const half  *zero       [[buffer(2)]],
+    device const float *input      [[buffer(3)]],
+    device float       *out        [[buffer(4)]],
+    constant uint      &K          [[buffer(5)]],
+    constant uint      &rows       [[buffer(6)]],
+    constant uint      &rowStride  [[buffer(7)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint3 threads [[threads_per_threadgroup]])
+{
+    uint row = group.x;
+    if (row >= rows) return;
+    uint threadCount = threads.x;
+    uint groupsPerRow = (K + W4_GROUP - 1) / W4_GROUP;
+    float sum = 0.0f;
+    for (uint k = tid; k < K; k += threadCount) {
+        uchar byte = packed[row * rowStride + (k >> 1)];
+        uint q = (k & 1) == 0 ? uint(byte & 0x0F) : uint(byte >> 4);
+        uint quantGroup = row * groupsPerRow + k / W4_GROUP;
+        float value = float(q) * float(scale[quantGroup]) + float(zero[quantGroup]);
+        sum = fma(input[k], value, sum);
+    }
+    threadgroup float partial[256];
+    partial[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) out[row] = partial[0];
+}
+
+// ---------------------------------------------------------------------------
 // Euler flow step (fp32): x_next = x + dSigma * (x - denoised) / sigma
 // ---------------------------------------------------------------------------
 kernel void euler_step_f32(

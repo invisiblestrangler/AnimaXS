@@ -552,6 +552,87 @@ final class MetalExecutionTests: XCTestCase {
         XCTAssertTrue(values[x.count...].allSatisfy { $0 == 1_234_567 })
     }
 
+    func testDirectW4MatvecNonAlignedK() throws {
+        let context = try requireContext()
+        let rows = 4, columns = 68, rowStride = (columns + 1) / 2
+        var packed = [UInt8](repeating: 0, count: rows * rowStride)
+        for row in 0..<rows {
+            for column in 0..<columns {
+                let q = UInt8((row * 11 + column * 3 + 5) & 15)
+                let index = row * rowStride + column / 2
+                packed[index] |= column.isMultiple(of: 2) ? q : q << 4
+            }
+        }
+        let scale: [Float16] = [
+            0.0625, 0.25,
+            0.125, 0.5,
+            0.03125, 0.75,
+            0.2, 0.4,
+        ]
+        let zero: [Float16] = [
+            -0.5, 1.25,
+            0.75, -2,
+            -1.5, 0.25,
+            2, -0.75,
+        ]
+        let input: [Float] = (0..<columns).map {
+            sin(Float($0) * 0.37) * 1.5 + Float(($0 % 5) - 2) * 0.1
+        }
+        let pipeline = try context.pipeline(named: "w4_matvec_f32")
+        let packedBuffer = makeBuffer(packed, on: context.device)
+        let scaleBuffer = makeBuffer(scale.map(\.bitPattern), on: context.device)
+        let zeroBuffer = makeBuffer(zero.map(\.bitPattern), on: context.device)
+        let inputBuffer = makeBuffer(input, on: context.device)
+        let outputBuffer = makeBuffer([Float](repeating: 1_234_567, count: rows + 2), on: context.device)
+        var k = UInt32(columns), rowCount = UInt32(rows), stride = UInt32(rowStride)
+        let commandBuffer = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let encoder = try XCTUnwrap(commandBuffer.makeComputeCommandEncoder())
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(packedBuffer, offset: 0, index: 0)
+        encoder.setBuffer(scaleBuffer, offset: 0, index: 1)
+        encoder.setBuffer(zeroBuffer, offset: 0, index: 2)
+        encoder.setBuffer(inputBuffer, offset: 0, index: 3)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 4)
+        encoder.setBytes(&k, length: 4, index: 5)
+        encoder.setBytes(&rowCount, length: 4, index: 6)
+        encoder.setBytes(&stride, length: 4, index: 7)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: rows + 2, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        XCTAssertNil(commandBuffer.error)
+        let pointer = outputBuffer.contents().bindMemory(to: Float.self, capacity: rows + 2)
+        let gpu = Array(UnsafeBufferPointer(start: pointer, count: rows + 2))
+        XCTAssertEqual(gpu[rows], 1_234_567)
+        XCTAssertEqual(gpu[rows + 1], 1_234_567)
+
+        var reference = [Double](repeating: 0, count: rows)
+        for row in 0..<rows {
+            for column in 0..<columns {
+                let byte = packed[row * rowStride + column / 2]
+                let q = column.isMultiple(of: 2) ? byte & 15 : byte >> 4
+                let group = row * 2 + column / 64
+                let weight = Double(q) * Double(Float(scale[group])) + Double(Float(zero[group]))
+                reference[row] += Double(input[column]) * weight
+            }
+        }
+        var maxAbs = 0.0
+        var dot = 0.0, gpuNorm = 0.0, referenceNorm = 0.0
+        for row in 0..<rows {
+            let error = abs(Double(gpu[row]) - reference[row])
+            maxAbs = max(maxAbs, error)
+            dot += Double(gpu[row]) * reference[row]
+            gpuNorm += Double(gpu[row]) * Double(gpu[row])
+            referenceNorm += reference[row] * reference[row]
+        }
+        let cosine = dot / sqrt(gpuNorm * referenceNorm)
+        print("E005_W4_MATVEC maxAbs=\(maxAbs) cosine=\(cosine)")
+        XCTAssertLessThan(maxAbs, 2e-4)
+        XCTAssertGreaterThan(cosine, 0.9999999)
+    }
+
     func testMPSMatrixMultiplicationExecutes() throws {
         let context = try requireContext()
         let input: [Float16] = [1, 2, 3, 4]
