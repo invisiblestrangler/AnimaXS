@@ -76,7 +76,6 @@ enum ModelConstants {
     // VAE
     static let vaeSigmaData: Float = 0.5
     static let vaeLatentChannels = 16
-    static let vaeGroupNormGroups = 32
 
     // Resolution
     static let latentSize = 64

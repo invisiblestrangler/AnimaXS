@@ -1,6 +1,6 @@
 # AnimaXS — Next Execution Agent Handoff
 
-Updated 2026-08-11 after F007/G003. The next dependency work is **I001/I002 sampler integration**, with **J001 VAE fold validation** safe to do in parallel.
+Updated 2026-08-11 after F007/G003/J001. The next dependency work is **I001/I002 sampler integration**, with **J002/J003 VAE decoding** safe to do in parallel.
 
 ## Proven baseline
 
@@ -37,9 +37,11 @@ Implement an eight-step non-reentrant coordinator around the existing production
 
 Before coding the loop, inspect the production availability of DiT input, timestep embedding, AdaLN and RoPE. Some of H001–H004 remain CPU oracles; any missing production-Metal bridge must use existing kernels/common linears and metadata ranges, never nested Swift matrices or full dequantized weights. This audit may reveal a small prerequisite that TODO currently compresses into I002; document it explicitly rather than hiding a CPU fallback.
 
-## Parallel J001 work
+## Parallel J002/J003 work
 
-Implement `scripts/validate_vae_fold.py` against the real VAE pack and pinned decoder source. Enumerate every decoder causal-convolution variant used at T=1, including initial cache/padding behavior and temporal kernel slices. Numerically compare the true 3-D operation with the proposed 2-D folded kernel on deterministic tensors. Record per-variant maxAbs/RMSE and either prove the fold or choose a true T=1 3-D path. Do not begin a full decoder on an assumed fold, and do not implement tiling without A12 evidence.
+J001 is complete and corrected a dangerous stale assumption. The model uses pinned Wan `comfy/ldm/wan/vae.py`, not Cosmos tokenizer replication semantics. For uncached T=1, causal zero padding makes every executed rank-5 convolution fold to its **final temporal slice**. All 34 decoder/post-quant tensors pass; temporal sums are wrong for all 32 kt=3 weights. The two decoder `time_conv` tensors are not executed at T=1 because no feature cache exists. Read `docs/VAE_FOLD_REPORT.md` and D052 before implementing.
+
+Build the straightforward full-frame decoder from the real VAE inventory and pinned Wan source. Apply Wan21 decode normalization first (`z / 0.5 * std + mean`, chunk-0 values for T=1), then `conv2`, decoder conv/residual/attention/resample/head in exact order. Native rank-4 resample/attention projections remain 2-D; executed rank-5 weights use final-slice folds. Preserve RMS norm vs GroupNorm semantics from the actual source—the current pack names (`*.gamma`, attention `to_qkv/proj`) reveal this is the Wan decoder and older prose claiming “no attention” is wrong. Validate layer shapes and final RGB against the golden before considering tiling.
 
 ## Verification and hygiene
 

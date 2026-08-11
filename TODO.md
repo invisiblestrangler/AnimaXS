@@ -157,15 +157,16 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
 
 ## J — VAE
 
-- [ ] **J001** — scripts/validate_vae_fold.py: numerical 3D→2D fold validation for every decoder causal conv variant (T=1).
+- [x] **J001** — scripts/validate_vae_fold.py: numerical 3D→2D fold validation for every decoder causal conv variant (T=1).
   - deps: A002 · output: script + report · validation: fold exact (or decision to implement true T=1 3-D)
+  - **DONE 2026-08-11.** The pinned implementation is `comfy/ldm/wan/vae.py`, whose uncached T=1 fast path uses causal **zero** padding—not the Cosmos tokenizer's replication padding. All 34 decoder/post-quant rank-5 weights validate to the final temporal slice within `1.11e-16`; temporal-sum folding is contradicted by all 32 kt=3 tensors. The two decoder `time_conv` tensors are not executed at T=1 because no feature cache is created. See `docs/VAE_FOLD_REPORT.md` and D052.
 - [ ] **J002** — Wan21 latent norm (chunk-0 mean/std exact) + full-frame decoder, 2-D conv path (fold validated) or true T=1 3-D.
   - deps: J001, E006 · output: VAEDecoder.swift · validation: decoded_rgb vs golden: max abs ≤ 0.05, PSNR ≥ 30 dB
-- [ ] **J003** — GroupNorm 32 groups fp32 stats + exact eps; exact activations/upsampling from pinned source.
-  - deps: J002 · output: GroupNorm.swift + tests · validation: CPU reference match
+- [ ] **J003** — Wan decoder channel-wise RMS normalization (`F.normalize` over C × sqrt(C) × gamma), exact SiLU, attention, and nearest-exact spatial upsampling.
+  - deps: J002 · output: VAE normalization/activation/upsampling primitives + tests · validation: pinned-source CPU reference match
 - [ ] **J004** — RGB: (rgb+1)/2 clamp → CGImage/UIImage; release fp32 buffer.
   - deps: J002 · output: RGBConverter.swift · validation: image displayed, memory released
-- [ ] **J005** — Tiled VAE ONLY if device diagnostics demand it (global GroupNorm stats, 2-pass). NOT in first implementation.
+- [ ] **J005** — Tiled VAE ONLY if device diagnostics demand it; preserve convolution halos and global spatial-attention behavior. NOT in first implementation.
   - deps: J002 + device evidence · output: decision in DECISIONS.md · validation: decision recorded, not speculative code
 
 ## K — UI / resilience

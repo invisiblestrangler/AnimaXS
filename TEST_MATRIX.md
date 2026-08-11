@@ -30,7 +30,8 @@ Env: `CI-sim` = GitHub Actions standard `macos-15` arm64 iOS Simulator · `CI-de
 | H003 | CPU modulation reference (LayerNorm, SiLU) | AnimaXSTests (ModulationTests) | RAN (main CI `31436850938`) | CI-sim |
 | H004 | CPU RoPE reference (config, thetas, t/h/w order, 2×2 layout) | AnimaXSTests (DitRoPETests) | RAN (main CI `31436850938`) | CI-sim |
 | H005 | DiT block primitives (split-half RoPE, LayerNorm/AdaLN, RMSNorm, attention, concat, GELU) | AnimaXSTests (DiTBlockTests) | RAN: 9/9 PASS (`31452206651`) | CI-sim |
-| J003 | GroupNorm CPU reference | AnimaXSTests | pending | CI-sim |
+| J003 | Wan channel-wise RMS norm/SiLU/upsampling reference | AnimaXSTests | pending | CI-sim |
+| J001 | VAE T=1 causal-conv fold across 34 real decoder/post-quant tensors | `scripts/validate_vae_fold.py` | PASS maxAbs ≤ `1.11e-16`; sum fold rejected for 32/32 kt=3 tensors | local real pack |
 | H001 | DiT input patchify ordering + token count (1024×68) + inChannels 17 | AnimaXSTests (DiTInputTests) | RAN (main CI `31436850938`) | CI-sim |
 | H002 | Timestep sinusoidal vs torch reference + SiLU | AnimaXSTests (TimestepEmbedderTests) | RAN (main CI `31436850938`) | CI-sim |
 

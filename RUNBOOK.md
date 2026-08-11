@@ -602,13 +602,15 @@ Sampler arithmetic is Float32.
 latent: [1,16,1,64,64]
 output: [1,3,1,512,512]
 3-D causal convolutions
-GroupNorm: 32 groups
+Wan channel-wise RMS normalization (`F.normalize` over C, then ×sqrt(C)×gamma)
 decoder channels include 384 → 192 → 96
 ```
 
-Single-frame T=1 3D→2D folding is mathematically suggested by the reference behavior but **has NOT been numerically validated**.
-
-You must validate it before relying on it.
+Single-frame T=1 3D→2D folding is validated in J001. The actual model uses pinned
+`comfy/ldm/wan/vae.py`: uncached T=1 `CausalConv3d` uses causal zero padding, so
+the effective 2-D kernel is the **final temporal slice**, not a temporal sum.
+The decoder's two `time_conv` tensors are skipped at T=1 because no feature cache exists.
+See `docs/VAE_FOLD_REPORT.md`; do not substitute the Cosmos tokenizer's replication semantics.
 
 Tiled VAE decode has also NOT been validated.
 
@@ -1961,7 +1963,7 @@ scripts/validate_vae_fold.py
 
 using existing VAE weights and exact source padding behavior.
 
-For representative causal 3-D convs at T=1:
+For every decoder/post-quant causal 3-D conv at T=1:
 
 1. compute direct reference 3-D output;
 2. construct proposed folded 2-D kernel;
@@ -1972,13 +1974,14 @@ Verify all temporal kernel/padding variants used by decoder.
 
 Do not assume every layer folds identically.
 
-Only mark:
+J001 marked:
 
 ```text
-VAE_2D_FOLD_VALIDATED
+VAE_2D_FOLD_VALIDATED=LAST_TEMPORAL_SLICE_CAUSAL_ZERO
 ```
 
-when numerical comparison passes.
+after all 34 relevant rank-5 tensors passed within Float64 reduction ulps and all
+32 kt=3 tensors disproved replication-sum folding.
 
 If folding cannot exactly reproduce T=1 behavior, implement the actual T=1 3-D semantics instead.
 
@@ -1988,7 +1991,8 @@ If folding cannot exactly reproduce T=1 behavior, implement the actual T=1 3-D s
 
 Do not start with 64×64 tile blending.
 
-Independent tile GroupNorm changes the math.
+The decoder contains spatial attention and wide convolutional receptive fields, so
+independent tiles change the math even though its normalization is channel-local.
 
 Instead:
 
@@ -2011,19 +2015,19 @@ Process one layer at a time.
 
 Do not keep all VAE weights resident.
 
-### GroupNorm
+### Wan RMS normalization
 
-Implement custom GroupNorm:
+Match pinned `wan/vae.py::RMS_norm`:
 
 ```text
-32 groups
-Float32 sum
-Float32 sum of squares
-Float32 mean/variance
+normalize across channel dimension only at each (T,H,W)
+PyTorch F.normalize epsilon behavior
+multiply by sqrt(channel count)
+multiply by learned gamma
 fp16 output
 ```
 
-using the exact epsilon from model metadata.
+Do not port the Cosmos tokenizer GroupNorm path; it is a different VAE implementation.
 
 ### Activations
 
@@ -2041,16 +2045,9 @@ If actual device diagnostics show unacceptable peak memory/jetsam:
 
 THEN implement tiled decode.
 
-At that point preserve global GroupNorm statistics.
-
-Do not normalize each tile independently.
-
-A correct tiled approach may require:
-
-```text
-pass 1: accumulate global group sum/sum-of-squares
-pass 2: normalize/decode using global stats
-```
+At that point preserve exact convolution halos and the middle block's global spatial
+attention. Channel-wise RMS normalization itself is local to each pixel and does not
+require a global two-pass statistic.
 
 The old candidate:
 
