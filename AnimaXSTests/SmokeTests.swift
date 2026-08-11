@@ -97,4 +97,33 @@ final class SmokeTests: XCTestCase {
         XCTAssertNoThrow(try ModelManifest.verify(url, against: synthetic))
         XCTAssertThrowsError(try ModelManifest.sha256(of: url, chunkBytes: 0))
     }
+
+    func testModelStoreSyntheticDownloadVerifyAndReadyState() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
+        let source = root.appendingPathComponent("source", isDirectory: true)
+        let models = root.appendingPathComponent("models", isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let downloaded = source.appendingPathComponent("tiny.animapk")
+        try Data("abc".utf8).write(to: downloaded)
+        let entry = ModelManifestEntry(
+            filename: "tiny.animapk", size: 3,
+            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            url: URL(string: "https://example.invalid/tiny.animapk")!, component: .dit)
+        let store = try ModelStore(
+            directory: models,
+            downloader: { _ in downloaded },
+            availableCapacity: { _ in Int64.max })
+        let initialState = await store.state(for: .dit)
+        XCTAssertEqual(initialState, .missing)
+        let installed = try await store.prepare(entry)
+        XCTAssertEqual(try Data(contentsOf: installed), Data("abc".utf8))
+        let readyState = await store.state(for: .dit)
+        XCTAssertEqual(readyState, .ready(installed))
+        let repeated = try await store.prepare(entry)
+        XCTAssertEqual(repeated, installed)
+        XCTAssertTrue(try installed.resourceValues(
+            forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup ?? false)
+    }
 }
