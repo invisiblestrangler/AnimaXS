@@ -145,6 +145,57 @@ final class DiTBlockExecutorTests: XCTestCase {
         XCTAssertLessThan(rmse, 0.1)
     }
 
+    func testRealPackAllBlocksAreFinite() async throws {
+        guard ProcessInfo.processInfo.environment["ANIMAXS_RUN_ALL_DIT_BLOCKS"] == "1" else {
+            throw XCTSkip("ANIMAXS_RUN_ALL_DIT_BLOCKS not set")
+        }
+        let (packs, oracle) = try realFixtureDirectories()
+        let context = try requireContext()
+        let file = try AnimapkFile(url: packs.appendingPathComponent(
+            "anima-turbo-v1.0-xsmax-w4.animapk"))
+        let inputValues = try fixtureFloats("block0_input_x.f32", in: oracle)
+        let residual = buffer(inputValues, context: context)
+        let emb = buffer(try fixtureFloats("block0_emb.f32", in: oracle), context: context)
+        let adaln = buffer(try fixtureFloats("block0_adaln_lora.f32", in: oracle), context: context)
+        let contextHalf = try fixtureFloats("block0_cross_ctx.f32", in: oracle).map(Float16.init)
+        let cross = buffer(contextHalf.map(\.bitPattern), context: context)
+        let rope = buffer(try fixtureFloats("block0_rope.f32", in: oracle), context: context)
+        var completed: [Int] = []
+        try await DitForward(context: context, file: file).execute(
+            residual: residual, emb: emb, adalnLora: adaln,
+            crossContext: cross, rope: rope
+        ) { logicalIndex, current in
+            completed.append(logicalIndex)
+            let values = current.contents().bindMemory(to: Float.self, capacity: inputValues.count)
+            XCTAssertTrue((0..<inputValues.count).allSatisfy { values[$0].isFinite },
+                          "non-finite residual after block \(logicalIndex)")
+        }
+        XCTAssertEqual(completed, Array(0..<28))
+        let values = residual.contents().bindMemory(to: Float.self, capacity: inputValues.count)
+        var minimum = Float.infinity, maximum = -Float.infinity
+        for i in 0..<inputValues.count { minimum = min(minimum, values[i]); maximum = max(maximum, values[i]) }
+        print("H006_ALL_BLOCKS=PASS min=\(minimum) max=\(maximum)")
+    }
+
+    private func realFixtureDirectories() throws -> (packs: URL, oracle: URL) {
+        let environment = ProcessInfo.processInfo.environment
+        let bundledPack = bundledFixture(named: "anima-turbo-v1.0-xsmax-w4.animapk")
+        let bundledOracle = bundledFixture(named: "block0_input_x.f32")
+        guard let packs = environment["ANIMAXS_PACKS_DIR"]
+                .map(URL.init(fileURLWithPath:)) ?? bundledPack?.deletingLastPathComponent(),
+              let oracle = environment["ANIMAXS_BLOCK0_ORACLE_DIR"]
+                .map(URL.init(fileURLWithPath:)) ?? bundledOracle?.deletingLastPathComponent() else {
+            throw XCTSkip("real DiT pack/oracle fixture not available")
+        }
+        return (packs, oracle)
+    }
+
+    private func fixtureFloats(_ name: String, in directory: URL) throws -> [Float] {
+        let data = try Data(contentsOf: directory.appendingPathComponent(name))
+        guard data.count.isMultiple(of: 4) else { throw AnimapkError.validation("invalid oracle file") }
+        return data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+    }
+
     private func bundledFixture(named name: String) -> URL? {
         guard let root = Bundle(for: Self.self).resourceURL,
               let enumerator = FileManager.default.enumerator(

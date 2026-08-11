@@ -7,6 +7,15 @@ on:
         description: Release tag containing e009-block0-fixture.tar.zst
         required: true
         default: e009-fixture-temp
+      asset:
+        description: Fixture archive asset name
+        required: true
+        default: e009-block0-fixture.tar.zst
+      all_blocks:
+        description: Run H006 all-block finiteness instead of E009 block parity
+        type: boolean
+        required: true
+        default: false
 
 permissions:
   contents: read
@@ -46,9 +55,9 @@ jobs:
           mkdir -p "$RUNNER_TEMP/e009"
           gh release download "${{ inputs.release }}" \
             --repo "${{ github.repository }}" \
-            --pattern e009-block0-fixture.tar.zst \
+            --pattern "${{ inputs.asset }}" \
             --dir "$RUNNER_TEMP/e009"
-          tar --zstd -xf "$RUNNER_TEMP/e009/e009-block0-fixture.tar.zst" \
+          tar --zstd -xf "$RUNNER_TEMP/e009/${{ inputs.asset }}" \
             -C "$RUNNER_TEMP/e009"
           mkdir -p AnimaXSTests/Fixtures/E009
           cp -R "$RUNNER_TEMP/e009/packs" "$RUNNER_TEMP/e009/oracle" \
@@ -65,16 +74,24 @@ jobs:
         env:
           ANIMAXS_PACKS_DIR: ${{ runner.temp }}/e009/packs
           ANIMAXS_BLOCK0_ORACLE_DIR: ${{ runner.temp }}/e009/oracle
+          ANIMAXS_RUN_ALL_DIT_BLOCKS: ${{ inputs.all_blocks && '1' || '0' }}
         run: |
           set -o pipefail
+          if [ "${{ inputs.all_blocks }}" = "true" ]; then
+            TEST=AnimaXSTests/DiTBlockExecutorTests/testRealPackAllBlocksAreFinite
+            METRIC=H006_ALL_BLOCKS
+          else
+            TEST=AnimaXSTests/DiTBlockExecutorTests/testRealPackBlock0AgainstSameW4Oracle
+            METRIC=E009_BLOCK0
+          fi
           xcodebuild \
             -project AnimaXS.xcodeproj \
             -scheme AnimaXS \
             -configuration Debug \
             -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.sim }}" \
             -derivedDataPath .derivedData \
-            -only-testing:AnimaXSTests/DiTBlockExecutorTests/testRealPackBlock0AgainstSameW4Oracle \
+            -only-testing:"$TEST" \
             CODE_SIGNING_ALLOWED=NO \
             test 2>&1 | tee e009-parity.log
-          grep 'E009_BLOCK0' e009-parity.log | tee -a "$GITHUB_STEP_SUMMARY"
+          grep "$METRIC" e009-parity.log | tee -a "$GITHUB_STEP_SUMMARY"
         timeout-minutes: 30
