@@ -310,6 +310,59 @@ kernel void w4_matvec_f32(
     if (tid == 0) out[row] = partial[0];
 }
 
+// Stable row softmax. Scores/probabilities are fp16 at MPS boundaries, while
+// max, exp, and sum are evaluated and reduced in fp32.
+kernel void attention_softmax_rows(
+    device half       *scores    [[buffer(0)]],
+    constant uint     &rows      [[buffer(1)]],
+    constant uint     &columns   [[buffer(2)]],
+    constant uint     &queryBase [[buffer(3)]],
+    constant uint     &causal    [[buffer(4)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint3 threads [[threads_per_threadgroup]])
+{
+    uint row = group.x;
+    if (row >= rows) return;
+    uint threadCount = threads.x;
+    threadgroup float partial[256];
+    float localMax = -INFINITY;
+    for (uint column = tid; column < columns; column += threadCount) {
+        if (causal == 0 || column <= queryBase + row) {
+            localMax = max(localMax, float(scores[row * columns + column]));
+        }
+    }
+    partial[tid] = localMax;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] = max(partial[tid], partial[tid + stride]);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float rowMax = partial[0];
+    float localSum = 0.0f;
+    for (uint column = tid; column < columns; column += threadCount) {
+        float probability = 0.0f;
+        if (causal == 0 || column <= queryBase + row) {
+            probability = exp(float(scores[row * columns + column]) - rowMax);
+        }
+        localSum += probability;
+    }
+    partial[tid] = localSum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inverseSum = 1.0f / partial[0];
+    for (uint column = tid; column < columns; column += threadCount) {
+        float probability = 0.0f;
+        if (causal == 0 || column <= queryBase + row) {
+            probability = exp(float(scores[row * columns + column]) - rowMax) * inverseSum;
+        }
+        scores[row * columns + column] = half(probability);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Euler flow step (fp32): x_next = x + dSigma * (x - denoised) / sigma
 // ---------------------------------------------------------------------------
