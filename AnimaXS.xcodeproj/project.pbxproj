@@ -33,6 +33,7 @@
 		5D62EA8796701F40539F86DA /* SmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD10CAEE3E25726CE527243D /* SmokeTests.swift */; };
 		5EE94D1820B6B114D1B66907 /* DiTBlockExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8CFF9A853F1AA6ED02BB86D8 /* DiTBlockExecutor.swift */; };
 		6047DFE4E9621A2084E5679B /* AnimapkHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F9C4BE87CB32EE0326FB3E4 /* AnimapkHeader.swift */; };
+		616ED86BCC3FCAA28CC25561 /* QwenEncoderMetal.swift in Sources */ = {isa = PBXBuildFile; fileRef = A109D17B6E3524E405A9B85B /* QwenEncoderMetal.swift */; };
 		6534C4B5076F415D14D07AA2 /* TimestepEmbedderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D08BB48D952EAD6537D49B5E /* TimestepEmbedderTests.swift */; };
 		71B669F9AF60FB45E4842F57 /* t5_special_tokens_map.json in Resources */ = {isa = PBXBuildFile; fileRef = 67B56E4FB7D12CC1F63A52F9 /* t5_special_tokens_map.json */; };
 		7387F6A165EC6A2781B76716 /* ModulationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14DA44DE36980DC498AB4B99 /* ModulationTests.swift */; };
@@ -119,6 +120,7 @@
 		94BC4122B33299CE60424C44 /* LLMAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMAdapter.swift; sourceTree = "<group>"; };
 		9D7829F4398EB3A23033ECD8 /* DiTFinalLayerExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTFinalLayerExecutorTests.swift; sourceTree = "<group>"; };
 		9DA452A409BF52C73769318E /* MappedFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MappedFile.swift; sourceTree = "<group>"; };
+		A109D17B6E3524E405A9B85B /* QwenEncoderMetal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenEncoderMetal.swift; sourceTree = "<group>"; };
 		A9346A85EC2056315DFCE66D /* LinearExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinearExecutor.swift; sourceTree = "<group>"; };
 		C416E0528D650EED48130A92 /* AnimapkTensor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkTensor.swift; sourceTree = "<group>"; };
 		C509546307CB21BE0D1A9146 /* LLMAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMAdapterTests.swift; sourceTree = "<group>"; };
@@ -296,6 +298,7 @@
 				E29ABBFCD1EDD87F59CA9008 /* DitForward.swift */,
 				A9346A85EC2056315DFCE66D /* LinearExecutor.swift */,
 				3F6A1853CF522E32A3743ACB /* MetalContext.swift */,
+				A109D17B6E3524E405A9B85B /* QwenEncoderMetal.swift */,
 				0B8E57358726DCBA4B39C22A /* WeightStreamer.swift */,
 			);
 			path = Metal;
@@ -493,6 +496,7 @@
 				CC5F144445E89AD37FF24021 /* Modulation.swift in Sources */,
 				5506617DD3116BF72E8154BD /* QuantDecoders.swift in Sources */,
 				E8B287C14227EAB23ED6D5DB /* QwenEncoderCPU.swift in Sources */,
+				616ED86BCC3FCAA28CC25561 /* QwenEncoderMetal.swift in Sources */,
 				914187C1B6254DDCA7ED3C32 /* QwenNumerics.swift in Sources */,
 				D49309A80BBD9F702F9E71A8 /* TimestepEmbedder.swift in Sources */,
 				027A9C7FE57956074F77229D /* TokenizerLoader.swift in Sources */,
