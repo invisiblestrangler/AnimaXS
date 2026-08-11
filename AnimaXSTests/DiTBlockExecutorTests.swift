@@ -146,7 +146,10 @@ final class DiTBlockExecutorTests: XCTestCase {
     }
 
     func testRealPackAllBlocksAreFinite() async throws {
-        guard ProcessInfo.processInfo.environment["ANIMAXS_RUN_ALL_DIT_BLOCKS"] == "1" else {
+        let bundledPack = bundledFixture(named: "anima-turbo-v1.0-xsmax-w4.animapk")
+        let bundledSize = try bundledPack?.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        guard ProcessInfo.processInfo.environment["ANIMAXS_RUN_ALL_DIT_BLOCKS"] == "1"
+                || bundledSize > 1_000_000_000 else {
             throw XCTSkip("ANIMAXS_RUN_ALL_DIT_BLOCKS not set")
         }
         let (packs, oracle) = try realFixtureDirectories()
