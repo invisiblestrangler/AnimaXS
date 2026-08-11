@@ -62,16 +62,16 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
   - deps: B002 · output: ModelManifest.swift · validation: unit tests on synthetic file + known hash
 - [ ] **D006** — ModelStore download/verify/ready states; Application Support storage; backup exclusion + file protection; disk-space check.
   - deps: D005 · output: `ModelStore.swift` with testable state machine · validation: synthetic download/verify/storage tests plus real-pack download on manual CI/device; K001 binds these states to UI
-- [ ] **D007** — Zero-copy DiT locator: logical block 0…27 → validated physical range and tensor-relative data/scale/zero spans via `model.diffusion_model.blocks.N.` prefix (never `block_index`).
+- [x] **D007** — Zero-copy DiT locator: logical block 0…27 → validated physical range and tensor-relative data/scale/zero spans via `model.diffusion_model.blocks.N.` prefix (never `block_index`).
   - deps: D001 · output: `DiTBlockLocator` span API suitable for mmap→one-slot ring copies · validation: exactly 28 disjoint logical ranges; every tensor span is in-range/aligned; synthetic order test + real-pack audit pass; no full-tensor `Data` copies
-- [ ] **D008** — Zero-copy Qwen locator: embedding tensor rows plus logical layer 0…27 contiguous ranges and tensor-relative spans.
+- [x] **D008** — Zero-copy Qwen locator: embedding tensor rows plus logical layer 0…27 contiguous ranges and tensor-relative spans.
   - deps: D001, D007 shared span primitives · output: `QwenLayerLocator`/shared locator API · validation: exactly 28 logical layers in numerical order, embedding row spans checked, real-pack ranges match metadata, no full embedding/table copy
 
 ## E — Metal / MPS primitives
 
-- [~] **E001** — Finish `MetalContext`: device/queue/library/pipeline cache plus apple5 support, buffer/threadgroup/working-set/memory/thermal diagnostics; keep permanent pack-free execution tests in normal CI.
+- [x] **E001** — Finish `MetalContext`: device/queue/library/pipeline cache plus apple5 support, buffer/threadgroup/working-set/memory/thermal diagnostics; keep permanent pack-free execution tests in normal CI.
   - deps: B002 · output: completed `MetalContext.swift` + `MetalExecutionTests` · validation: hosted kernel+MPS execution passes (permanent tests proven by `31452206651`); all probe values populate where API-supported; no newer-GPU API requirement
-- [~] **E002** — Row-aware `dequant_w4_to_half` and `dequant_w8_to_half` kernels.
+- [x] **E002** — Row-aware `dequant_w4_to_half` and `dequant_w8_to_half` kernels.
   - deps: E001 · output: kernels + synthetic GPU-vs-CPU tests · validation: exact after fp16 conversion for vectors and W4 `[2,68]` / W8 `[2,65]`; row-1 group reset and bounds asserted on hosted CI
 - [ ] **E003** — Exact arithmetic kernels: fp32-stat RMSNorm/LayerNorm, SiLU, **exact erf GELU**, fp32 modulation/gate residual add, and half→float residual add.
   - deps: E001 · output: kernels + CPU parity tests · validation: H005 equations match on hosted Metal; replace the scaffold tanh GELU and half gate before completion

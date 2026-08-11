@@ -36,9 +36,10 @@ Env: `CI-sim` = GitHub Actions standard `macos-15` arm64 iOS Simulator · `CI-de
 ## Metal (where a Metal device exists)
 | ID | Test | Status | Env |
 |----|------|--------|-----|
-| E001 | hosted Metal device + project-kernel execution | PASS: `Apple iOS simulator GPU`, permanent test run `31452206651` | CI-sim |
+| E001 | hosted Metal device + diagnostics + project-kernel execution | PASS: `Apple iOS simulator GPU`, probes populated, run `31455204105` | CI-sim |
 | E001/E006 | 2×2 fp16 `MPSMatrixMultiplication` execution | PASS, permanent test run `31452206651` | CI-sim |
-| E002 | W4 dequant GPU smoke | PASS for 2 values (`31452206651`); non-aligned-K row-reset parity pending | CI-sim |
+| E002 | row-aware W4/W8 dequant + padded bounds | PASS exact-after-fp16 for W4 `[2,68]`, W8 `[2,65]` (`31455204105`) | CI-sim |
+| D007/D008 | zero-copy DiT/Qwen logical ranges and embedding rows | PASS synthetic (`31455204105`); local real packs DiT 28/560, Qwen 28/308, embedding 151936 rows | CI-sim/pack |
 | E002 | W8 dequant GPU | pending | CI-sim/A12 |
 | E003 | rmsnorm/layernorm GPU | pending | CI-sim/A12 |
 | E003 | GELU/SiLU GPU | pending | CI-sim/A12 |
@@ -75,5 +76,5 @@ Env: `CI-sim` = GitHub Actions standard `macos-15` arm64 iOS Simulator · `CI-de
 | Xcode 26.3 generic iOS build PASS | RAN (final snapshot `31452206651`) | CI-dev |
 | deployment target 18.0 | RAN (static) | — |
 | Metal shaders compile | RAN (`31452206651`) | CI-dev/CI-sim |
-| simulator unit tests PASS | 56 tests, 3 expected real-pack skips, 0 failures (`31452206651`) | CI-sim |
+| simulator unit tests PASS | 61 tests, 4 expected real-pack skips, 0 failures (`31455204105`) | CI-sim |
 | xcodegen 2.46.0 checksum + clean regeneration | PASS (`31452206651`) | CI-sim |
