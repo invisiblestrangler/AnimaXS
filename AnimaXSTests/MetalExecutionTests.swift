@@ -735,4 +735,35 @@ final class MetalExecutionTests: XCTestCase {
         }
         print("MPS_GEMM_SMOKE=PASS")
     }
+
+    func testQwenGatedSiLUHalfExecutes() throws {
+        let context = try requireContext()
+        let gate: [Float16] = [-2, -0.5, 0, 1, 3]
+        let up: [Float16] = [0.5, -2, 4, 1.5, -0.25]
+        let gateBuffer = makeBuffer(gate, on: context.device)
+        let upBuffer = makeBuffer(up, on: context.device)
+        let output = try XCTUnwrap(context.device.makeBuffer(
+            length: gate.count * 2, options: .storageModeShared))
+        let pipeline = try context.pipeline(named: "gated_silu_half")
+        let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let encoder = try XCTUnwrap(command.makeComputeCommandEncoder())
+        var count = UInt32(gate.count)
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(gateBuffer, offset: 0, index: 0)
+        encoder.setBuffer(upBuffer, offset: 0, index: 1)
+        encoder.setBuffer(output, offset: 0, index: 2)
+        encoder.setBytes(&count, length: 4, index: 3)
+        encoder.dispatchThreads(MTLSize(width: gate.count, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: gate.count, height: 1, depth: 1))
+        encoder.endEncoding()
+        command.commit()
+        command.waitUntilCompleted()
+        XCTAssertNil(command.error)
+        let actual = output.contents().bindMemory(to: Float16.self, capacity: gate.count)
+        for index in gate.indices {
+            let x = Float(gate[index])
+            let expected = Float(Float16((x / (1 + exp(-x))) * Float(up[index])))
+            XCTAssertEqual(Float(actual[index]), expected, accuracy: 0)
+        }
+    }
 }

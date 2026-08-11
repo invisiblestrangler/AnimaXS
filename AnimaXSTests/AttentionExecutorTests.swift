@@ -86,6 +86,29 @@ final class AttentionExecutorTests: XCTestCase {
         print("ATTENTION_CROSS_512=PASS Q=129 K=512")
     }
 
+    func testGroupedQueryAttentionUsesContiguousKVHeads() async throws {
+        let context = try requireContext()
+        let heads = 4, kvHeads = 2, dim = 4
+        let query = [Float16](repeating: 0, count: heads * dim)
+        let key = [Float16](repeating: 0, count: kvHeads * dim)
+        let value = [Float16](repeating: 2, count: dim)
+            + [Float16](repeating: 9, count: dim)
+        let output = try XCTUnwrap(context.device.makeBuffer(
+            length: heads * dim * 2, options: .storageModeShared))
+
+        try await AttentionExecutor(context: context).execute(
+            query: makeHalfBuffer(query, context: context),
+            key: makeHalfBuffer(key, context: context),
+            value: makeHalfBuffer(value, context: context), output: output,
+            heads: heads, queryCount: 1, keyCount: 1, headDim: dim,
+            keyValueHeads: kvHeads)
+
+        let actual = readHalf(output, count: heads * dim)
+        XCTAssertEqual(actual, [Float](repeating: 2, count: dim * 2)
+            + [Float](repeating: 9, count: dim * 2))
+        print("ATTENTION_GQA_GROUPED=PASS mapping=0,0,1,1")
+    }
+
     private func attentionRow(
         row: Int, query: [Float16], key: [Float16], value: [Float16],
         keyCount: Int, dim: Int

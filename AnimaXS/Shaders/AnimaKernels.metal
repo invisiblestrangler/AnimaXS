@@ -247,6 +247,20 @@ kernel void silu(
     out[gid] = x / (1.0f + exp(-x));
 }
 
+// Qwen SwiGLU boundary: both MPS projections are fp16 and the down projection
+// consumes fp16. Evaluate SiLU and multiplication in fp32, then round once.
+kernel void gated_silu_half(
+    device const half *gate [[buffer(0)]],
+    device const half *up   [[buffer(1)]],
+    device half       *out  [[buffer(2)]],
+    constant uint &count    [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) return;
+    float x = float(gate[gid]);
+    out[gid] = half((x / (1.0f + exp(-x))) * float(up[gid]));
+}
+
 // AdaLN: normalized * (1 + scale) + shift, all fp32; vectors broadcast by N.
 kernel void modulate_f32(
     device const float *normalized [[buffer(0)]],

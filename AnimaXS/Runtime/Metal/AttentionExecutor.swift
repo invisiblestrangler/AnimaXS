@@ -31,12 +31,15 @@ final class AttentionExecutor {
         value: MTLBuffer, valueOffset: Int = 0,
         output: MTLBuffer, outputOffset: Int = 0,
         heads: Int, queryCount: Int, keyCount: Int, headDim: Int,
+        keyValueHeads: Int? = nil,
         causal: Bool = false
     ) throws {
+        let kvHeads = keyValueHeads ?? heads
         try validate(query: query, queryOffset: queryOffset, key: key, keyOffset: keyOffset,
                      value: value, valueOffset: valueOffset, output: output,
                      outputOffset: outputOffset, heads: heads, queryCount: queryCount,
-                     keyCount: keyCount, headDim: headDim, causal: causal)
+                     keyCount: keyCount, headDim: headDim, keyValueHeads: kvHeads,
+                     causal: causal)
         let halfBytes = MemoryLayout<Float16>.stride
         let scoreScratch = buffers.buffer(
             key: "attention.scores.fp16", bytes: try maximumScoreScratchBytes(keyCount: keyCount))
@@ -46,12 +49,13 @@ final class AttentionExecutor {
         let scale = 1 / sqrt(Double(headDim))
 
         for head in 0..<heads {
+            let kvHead = head / (heads / kvHeads)
             let keyMatrix = MPSMatrix(
-                buffer: key, offset: keyOffset + head * keyCount * headRowBytes,
+                buffer: key, offset: keyOffset + kvHead * keyCount * headRowBytes,
                 descriptor: MPSMatrixDescriptor(rows: keyCount, columns: headDim,
                                                 rowBytes: headRowBytes, dataType: .float16))
             let valueMatrix = MPSMatrix(
-                buffer: value, offset: valueOffset + head * keyCount * headRowBytes,
+                buffer: value, offset: valueOffset + kvHead * keyCount * headRowBytes,
                 descriptor: MPSMatrixDescriptor(rows: keyCount, columns: headDim,
                                                 rowBytes: headRowBytes, dataType: .float16))
             var queryBase = 0
@@ -111,6 +115,7 @@ final class AttentionExecutor {
         value: MTLBuffer, valueOffset: Int = 0,
         output: MTLBuffer, outputOffset: Int = 0,
         heads: Int, queryCount: Int, keyCount: Int, headDim: Int,
+        keyValueHeads: Int? = nil,
         causal: Bool = false
     ) async throws {
         guard let command = context.commandQueue.makeCommandBuffer() else {
@@ -119,7 +124,8 @@ final class AttentionExecutor {
         try encode(commandBuffer: command, query: query, queryOffset: queryOffset,
                    key: key, keyOffset: keyOffset, value: value, valueOffset: valueOffset,
                    output: output, outputOffset: outputOffset, heads: heads,
-                   queryCount: queryCount, keyCount: keyCount, headDim: headDim, causal: causal)
+                   queryCount: queryCount, keyCount: keyCount, headDim: headDim,
+                   keyValueHeads: keyValueHeads, causal: causal)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             command.addCompletedHandler { completed in
                 if let error = completed.error { continuation.resume(throwing: error) }
@@ -132,15 +138,17 @@ final class AttentionExecutor {
     private func validate(
         query: MTLBuffer, queryOffset: Int, key: MTLBuffer, keyOffset: Int,
         value: MTLBuffer, valueOffset: Int, output: MTLBuffer, outputOffset: Int,
-        heads: Int, queryCount: Int, keyCount: Int, headDim: Int, causal: Bool
+        heads: Int, queryCount: Int, keyCount: Int, headDim: Int,
+        keyValueHeads: Int, causal: Bool
     ) throws {
         guard heads > 0, queryCount > 0, keyCount > 0, headDim > 0,
+              keyValueHeads > 0, heads.isMultiple(of: keyValueHeads),
               queryOffset >= 0, keyOffset >= 0, valueOffset >= 0, outputOffset >= 0,
               !causal || queryCount == keyCount else {
             throw AnimapkError.validation("invalid attention shape, offset, or causal dimensions")
         }
         let queryBytes = try checkedProduct(heads, queryCount, headDim, 2)
-        let keyBytes = try checkedProduct(heads, keyCount, headDim, 2)
+        let keyBytes = try checkedProduct(keyValueHeads, keyCount, headDim, 2)
         guard try checkedEnd(queryOffset, queryBytes) <= query.length,
               try checkedEnd(keyOffset, keyBytes) <= key.length,
               try checkedEnd(valueOffset, keyBytes) <= value.length,
