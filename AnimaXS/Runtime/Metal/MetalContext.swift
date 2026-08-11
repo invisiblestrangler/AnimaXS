@@ -45,7 +45,7 @@ final class MetalContext {
 
     /// Refresh values that can change while a generation is running.
     func refreshDiagnostics() {
-        currentAllocatedSize = device.currentAllocatedSize
+        currentAllocatedSize = UInt64(device.currentAllocatedSize)
         physicalMemory = ProcessInfo.processInfo.physicalMemory
         thermalState = ProcessInfo.processInfo.thermalState
     }
