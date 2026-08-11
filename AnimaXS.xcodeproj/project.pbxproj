@@ -74,6 +74,7 @@
 		EEB3C16094E91013C9ABB9CA /* MappedFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DA452A409BF52C73769318E /* MappedFile.swift */; };
 		EED314EA6D67446AAFE181EC /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 220DB7AE4DC9E7B009A9C5DF /* README.md */; };
 		FC52DE8FE0010D498F008967 /* AnimapkFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = D576867ECC53CBF14CC30F79 /* AnimapkFile.swift */; };
+		FDCF7054E59D7EA8DBA41BBF /* ModelStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22A56ABD92C60AEA6C10526C /* ModelStore.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -102,6 +103,7 @@
 		2065AFCA0431940F828D9427 /* ModelManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelManifest.swift; sourceTree = "<group>"; };
 		21050D453899FA878AFF60FA /* DiffusionSampler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffusionSampler.swift; sourceTree = "<group>"; };
 		220DB7AE4DC9E7B009A9C5DF /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
+		22A56ABD92C60AEA6C10526C /* ModelStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelStore.swift; sourceTree = "<group>"; };
 		24AA7FDE4D5F416423C74125 /* RealPackDecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealPackDecoderTests.swift; sourceTree = "<group>"; };
 		28C2E8E80AFBE05DB0577977 /* DiTInputTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTInputTests.swift; sourceTree = "<group>"; };
 		2ED51EC9A960D08D2A6835BB /* QuantDecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuantDecoderTests.swift; sourceTree = "<group>"; };
@@ -339,6 +341,7 @@
 			isa = PBXGroup;
 			children = (
 				2065AFCA0431940F828D9427 /* ModelManifest.swift */,
+				22A56ABD92C60AEA6C10526C /* ModelStore.swift */,
 			);
 			path = ModelStore;
 			sourceTree = "<group>";
@@ -540,6 +543,7 @@
 				938A4049C06BE05E39F6BCC1 /* MetalContext.swift in Sources */,
 				869CE73742B23D7225305BC1 /* ModelConstants.swift in Sources */,
 				BD9A6D2D28B30592F306DBA2 /* ModelManifest.swift in Sources */,
+				FDCF7054E59D7EA8DBA41BBF /* ModelStore.swift in Sources */,
 				CC5F144445E89AD37FF24021 /* Modulation.swift in Sources */,
 				5506617DD3116BF72E8154BD /* QuantDecoders.swift in Sources */,
 				E8B287C14227EAB23ED6D5DB /* QwenEncoderCPU.swift in Sources */,
