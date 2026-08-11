@@ -15,6 +15,7 @@
 		1CE2D9C17323437A5B23EBF3 /* ReferenceTestsPlaceholder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 745BAB5E53065E6639F8BEA2 /* ReferenceTestsPlaceholder.swift */; };
 		1E52ED71A9AD8B33A91D049C /* Crc32.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43FB54A2EC11428E9AFC19A4 /* Crc32.swift */; };
 		21F05B3A1A0BB661716C0512 /* TokenizerParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1319CA9D168F08F49BA3EB /* TokenizerParityTests.swift */; };
+		22A697C29A4FE1F67A25D118 /* DitForward.swift in Sources */ = {isa = PBXBuildFile; fileRef = E29ABBFCD1EDD87F59CA9008 /* DitForward.swift */; };
 		24E784492B6C7FD49E64D227 /* LinearExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9346A85EC2056315DFCE66D /* LinearExecutor.swift */; };
 		263D4D4D7FB4D3766DF07296 /* LLMAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94BC4122B33299CE60424C44 /* LLMAdapter.swift */; };
 		2BB3F23123E300162C938052 /* Hub in Frameworks */ = {isa = PBXBuildFile; productRef = A3FB76126987D0B653947E56 /* Hub */; };
@@ -126,6 +127,7 @@
 		E00F7AC0D57A13E91CB5F434 /* LinearExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinearExecutorTests.swift; sourceTree = "<group>"; };
 		E0EFD572B87262AE5AAEB996 /* QwenNumerics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenNumerics.swift; sourceTree = "<group>"; };
 		E26E470D56048A5E382959A7 /* AnimaXSTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = AnimaXSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		E29ABBFCD1EDD87F59CA9008 /* DitForward.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DitForward.swift; sourceTree = "<group>"; };
 		EFA18C3237EA1D76A8C2CB94 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F28A65A79E0706DF0F0D5AB2 /* qwen_tokenizer.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = qwen_tokenizer.json; sourceTree = "<group>"; };
 		F3F286C454EBE7A92C592214 /* AttentionExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionExecutor.swift; sourceTree = "<group>"; };
@@ -286,6 +288,7 @@
 			children = (
 				F3F286C454EBE7A92C592214 /* AttentionExecutor.swift */,
 				8CFF9A853F1AA6ED02BB86D8 /* DiTBlockExecutor.swift */,
+				E29ABBFCD1EDD87F59CA9008 /* DitForward.swift */,
 				A9346A85EC2056315DFCE66D /* LinearExecutor.swift */,
 				3F6A1853CF522E32A3743ACB /* MetalContext.swift */,
 				0B8E57358726DCBA4B39C22A /* WeightStreamer.swift */,
@@ -472,6 +475,7 @@
 				5EE94D1820B6B114D1B66907 /* DiTBlockExecutor.swift in Sources */,
 				47ABE68F485121B325537344 /* DiTInput.swift in Sources */,
 				0CC965727D9BE3124B87BC36 /* DiTWeights.swift in Sources */,
+				22A697C29A4FE1F67A25D118 /* DitForward.swift in Sources */,
 				4CF42C1FB7991B03E9360B0D /* DitRoPE.swift in Sources */,
 				263D4D4D7FB4D3766DF07296 /* LLMAdapter.swift in Sources */,
 				24E784492B6C7FD49E64D227 /* LinearExecutor.swift in Sources */,
