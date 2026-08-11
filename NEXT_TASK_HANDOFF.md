@@ -1,25 +1,55 @@
 # AnimaXS — Next Execution Agent Handoff
 
-Updated 2026-08-11 after E009/H006. The next task is **H007: final DiT layer and unpatchify**.
+Updated 2026-08-11 after H007. The next dependency task is **F007: production streamed Metal Qwen encoder**.
 
 ## Proven baseline
 
-Work in `/root/AnimaXS`. Preserve and never commit untracked `scripts/oracle_out/block0/` (~347 MB). E009 real-W4 hosted run `31485374918` matched H005 at cosine `0.999999979842237`, RMSE `0.0003750332`, maxAbs `0.02190399`. H006 run `31486134420` streamed all 28 real block ranges through one slot; all checkpoints were finite, final residual min/max `-5063.061`/`39658.49`, GPU test time `19.456s`. Normal hosted CI also compiles/runs the pack-free Metal suite; A12 performance/memory acceptance remains outstanding.
+Work in `/root/AnimaXS`. Preserve and never commit untracked `scripts/oracle_out/block0/` (~347 MB). The complete DiT path is now production Metal: E009 block parity (`31485374918`), H006 all 28 real blocks finite in 19.456 s (`31486134420`), and H007 final velocity parity (`31488934459`: cosine `0.9999999645956833`, RMSE `0.0003068520`, maxAbs `0.001953125`). Normal CI `31488187793` passed project consistency, generic iOS build, and all pack-free Metal/MPS tests. A later push encountered a transient runner TLS certificate error before build; it was not a code failure.
 
-Production files are `WeightStreamer.swift`, `DiTBlockExecutor.swift`, `DitForward.swift`, `LinearExecutor.swift`, `AttentionExecutor.swift`, and `AnimaKernels.metal`. `DiTBlockCPU` remains an oracle only.
+H007 lives in `DiTFinalLayerExecutor.swift`, `DitForward.executeVelocity`, `DiTFinalLayerLocator`, `unpatchify_velocity16`, and `scripts/dit_final_oracle.py`. Its temporary release/workflow was removed; the gated real-fixture test remains. Preserve D048: FinalLayer has explicit residual and LayerNorm-output fp16 boundaries, and output unpatchify order is `(p1,p2,t,C)`, unlike input patchify.
 
-## H007 objective
+## F007 objective and fixed architecture
 
-After `DitForward.execute`, implement the pinned `predict2.py` `FinalLayer` exactly and produce fp32 `[1,16,1,64,64]` velocity via `unpatchify16`. The verified real-pack tensors are:
+Implement a non-reentrant `QwenEncoderMetal`/executor that accepts tokenizer IDs (1…512), gathers only those W8 embedding rows, streams each logical layer 0…27 through one reusable ring, applies final `model.norm.weight`, and returns finite fp32 `[sequence,1024]` context. Production must not call `QwenEncoderCPU`, materialize full weights, or copy the 165 MB embedding tensor.
+
+Use `QwenLayerLocator`; physical layers are string-sorted, so never derive offsets arithmetically. The real pack is `/root/anima-xsmax/results/packs/qwen3-0.6b-xsmax-w8.animapk`. Each layer has exactly 11 tensors and a ~16 MB contiguous range:
 
 ```text
-model.diffusion_model.final_layer.adaln_modulation.1.weight [256,2048] W4
-model.diffusion_model.final_layer.adaln_modulation.2.weight [4096,256] W4
-model.diffusion_model.final_layer.linear.weight             [64,2048] W4
+input_layernorm.weight             [1024]       fp16
+post_attention_layernorm.weight    [1024]       fp16
+self_attn.q_proj.weight            [2048,1024]  W8
+self_attn.k_proj.weight            [1024,1024]  W8
+self_attn.v_proj.weight            [1024,1024]  W8
+self_attn.o_proj.weight            [1024,2048]  W8
+self_attn.q_norm.weight            [128]        fp16
+self_attn.k_norm.weight            [128]        fp16
+mlp.gate_proj.weight               [3072,1024]  W8
+mlp.up_proj.weight                 [3072,1024]  W8
+mlp.down_proj.weight               [1024,3072]  W8
 ```
 
-Pinned source is `/root/comfy-ref` commit `cbbc9dab1f03d0d9a6caa8a8be7d77a7e37e1e44`, `comfy/ldm/cosmos/predict2.py` `FinalLayer` lines 338–395 and `unpatchify` lines 829–838. Semantics: `SiLU(emb) → 2048→256 → 256→4096`, add only `adaln_lora[0..<4096]`, chunk shift then scale, mean-centered LayerNorm residual, apply `norm*(1+scale)+shift`, project 2048→64, then rearrange 1024 spatial tokens to 16 channels ×64×64. No gate exists in the final layer.
+The embedding is `model.embed_tokens.weight [151936,1024] W8`; each selected row has 1024 packed bytes plus 16 fp16 scales and 16 fp16 zeros. `QwenLayerLocator.embeddingRow` already returns checked row-relative spans. Gather selected rows directly from mmap into small packed/scale/zero staging buffers, dequantize to activation storage, and retain no full embedding copy. Final norm is `model.norm.weight [1024] fp16`, outside layer ranges.
 
-Use metadata-derived spans and one small streamed final-layer range; do not guess offsets or materialize weights as Swift matrices/Data. Reuse direct fp32 W4 matvec for M=1 modulation and the common MPS linear for 1024 rows. The existing `unpatchify16` kernel consumes fp32, so make the fp16 projection boundary explicit before conversion/unpatchify. Add pack-free kernel/orchestration tests and a pack-backed finite/shape test. Compare block 15/27 or final output fixtures when available; record measured tolerances rather than inventing them.
+The authoritative readable implementation is `QwenEncoderCPU.swift` plus `QwenNumerics.swift`; pinned-source resolutions are D018–D020 and `docs/QWEN_ENCODER_DEBUG.md`. Per layer:
 
-After H007, proceed by dependency: F007 streamed Qwen, G003 streamed adapter, then I001/J001/L001 integration. Keep exact erf GELU, per-row quant groups, recommended MPS row strides, completion-before-commit, full 512-row cross attention, split-half RoPE, and fp32 residual/gates unchanged.
+```text
+fp32 residual
+RMSNorm(1024, eps 1e-6)
+Q 1024→2048, K/V 1024→1024
+per-head Q/K RMSNorm(128, shared weight)
+split-half GPT-NeoX RoPE, theta 1_000_000
+causal attention, 16 Q heads / 8 KV heads
+grouped GQA mapping kvHead = qHead / 2 (never modulo)
+O 2048→1024 + fp32 residual
+RMSNorm(1024)
+SiLU(gate 1024→3072) * up 1024→3072
+down 3072→1024 + fp32 residual
+```
+
+Reuse `LinearExecutor` and `AttentionExecutor`. The existing `rms_rope_split_half` kernel is shape-dynamic and matches the Qwen 128-d split-half operation when supplied a theta-1e6 sequence rope; explicit token↔head-major transposes are still required around attention. Either expand 8-head K/V to 16 heads with grouped repeat or extend attention with an explicit grouped KV-head mapping; lock it with a nonzero pack-free test. Keep causal masking (`queryCount == keyCount`) and dynamic sequence length. Add only the small fused kernels actually needed, likely W8 embedding-row gather/dequant, gated SiLU multiply, grouped GQA copy/mapping, and fp32 residual conversion/add.
+
+## Validation and continuation
+
+First add pack-free tests for exact embedding row/group indexing, grouped GQA head mapping, causal row behavior, dynamic short/tail sequence, buffer guards, and a synthetic one-layer orchestration path. Then run a compact or full real-pack hosted test against the existing F005 same-W8 oracle, preferably layer 0 plus final checkpoints from `scripts/oracle_out/qwen_oracle_layers.npz`. Record maxAbs/RMSE/cosine and bounded ring/scratch sizes. Normal push CI must remain pack-free; temporary fixture releases/workflows must be removed after proof.
+
+After F007, implement G003 streamed adapter, then I001/I002 sampler integration and J001 VAE fold validation. Do not start UI polish or pack release first. Preserve exact erf GELU, group-64 reset per matrix row, recommended MPS row strides, command completion before ring overwrite, and fp32 residual arithmetic. A12 performance/memory/thermal/watchdog acceptance remains pending and must not be inferred from hosted simulator success.

@@ -5,8 +5,8 @@ import Foundation
 ///
 /// This is the REFERENCE for the Metal/MPS implementation (runbook §27) and is used to
 /// validate the encoder against the golden `cond_context` on any platform (including CI
-/// via the bundled fixtures and the real-pack path). Produces the last-layer hidden state
-/// WITHOUT the final norm (layer_norm_hidden_state=False).
+/// via the bundled fixtures and the real-pack path). Produces the post-final-RMSNorm
+/// hidden state captured as `cond_context` (D019).
 struct QwenEncoderCPU {
 
     let pack: AnimapkFile

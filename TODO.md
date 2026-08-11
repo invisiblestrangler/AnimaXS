@@ -3,7 +3,7 @@
 Check a task ONLY when its validation criterion passes (not when code is merely written).
 Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` blocked/cancelled.
 
-**Current execution priority:** H007, then F007/G003 and the sampler/integration dependency path. Do not simply choose the first unchecked item in file order. A005 gates only model-pack release; A006/D005/D006 and UI/release work can proceed when their dependency path becomes relevant.
+**Current execution priority:** F007, then G003 and the sampler/integration dependency path. Do not simply choose the first unchecked item in file order. A005 gates only model-pack release; A006/D005/D006 and UI/release work can proceed when their dependency path becomes relevant.
 
 ---
 
@@ -138,8 +138,9 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
   - **Final validation:** canonical last hook invocation = sampler step 7, sigma `0.3050089478492737`. Swift-W4 vs independent NumPy-W4: cosine `1.000000000`, RMSE `6.18e-6`, maxAbs `1.91e-4`, finite. NumPy/Swift W4 vs original BF16 golden: cosine `0.998712106`/`0.998712139`, RMSE `9.43e-2`, maxAbs `1.79`, relative L2 `5.074e-2`. Independent original-BF16 source weights vs golden reach cosine `0.999992303`; corrected W4 `x_embedder` output vs source is `0.998998606`. This is the source-proven W4 tolerance exception permitted by the H005 hard gate (D035), not an unresolved graph error.
 - [x] **H006** — Full 28-block **Metal** loop with one-slot WeightStreamer ring (~39 MB), logical-order execution, real per-block ranges, and reusable buffers.
   - deps: D007, E009 · output: `WeightStreamer.swift` + `DitForward.swift` · validation: no CPU/nested-array production fallback; all blocks finite; block 0 remains at E009 parity and block 15/27 match compact/full fixtures where available
-- [ ] **H007** — Post-loop final norm/modulation/projection + unpatchify16 → [1,16,1,64,64] velocity.
+- [x] **H007** — Post-loop final norm/modulation/projection + unpatchify → [1,16,1,64,64] velocity.
   - deps: H006 · output: final projection · validation: finite, shape exact
+  - **DONE 2026-08-11.** `DiTFinalLayerExecutor` streams the exact three-tensor final range, applies SiLU→W4 2048→256→4096 modulation plus `adaln_lora[0..<4096]`, preserves the source's residual-fp16 and LayerNorm-output-fp16 boundaries with fp32 statistics/AdaLN, projects 1024×2048→64 through `LinearExecutor`, and uses source-order `(p1,p2,t,C)` unpatchify. Hosted real-W4 run `31488934459`: cosine **0.9999999646**, RMSE `0.0003068520`, maxAbs `0.001953125`, finite, exact output shape. Normal CI `31488187793` passed the synthetic full-shape orchestration and nonzero 64-stride/order kernel tests plus generic iOS build.
 
 ## I — Sampler / full diffusion
 
