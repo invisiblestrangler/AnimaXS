@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		027A9C7FE57956074F77229D /* TokenizerLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DBF5298EC8B0B81AF89019C /* TokenizerLoader.swift */; };
 		02F04575BA38C8AAF591B6C2 /* t5_tokenizer.json in Resources */ = {isa = PBXBuildFile; fileRef = 12DDD5E1C624A51A586B866E /* t5_tokenizer.json */; };
+		0A5B012A2059A0FD9091D3CA /* SeededRNG.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF7F7DDF80FF8FC3729F608B /* SeededRNG.swift */; };
 		0A89B983F4DC0739BE8E3767 /* DiTFinalLayerExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01AD706F60155A8CFAA47C9F /* DiTFinalLayerExecutor.swift */; };
 		0CC965727D9BE3124B87BC36 /* DiTWeights.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4D8B417D7B9040B477BC8CA5 /* DiTWeights.swift */; };
 		10ECAB707F0D3BF55B5F9884 /* LLMAdapterMetal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F8E86593AEA3EED857C888F /* LLMAdapterMetal.swift */; };
@@ -57,12 +58,14 @@
 		B1F8396CD4627BF03101D935 /* case1_danbooru_seed1337_fixture.json in Resources */ = {isa = PBXBuildFile; fileRef = 929D59E59198EBA4F4C291AC /* case1_danbooru_seed1337_fixture.json */; };
 		B31B0A2D248ABF6D51FE0F55 /* AnimapkRangeLocatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EEF412C70729BC71E9544B8 /* AnimapkRangeLocatorTests.swift */; };
 		BD81C9C99347181C9AB1E4B2 /* DiTBlockCPU.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BA93420FE0BF5285E6DBB6D /* DiTBlockCPU.swift */; };
+		BD9A6D2D28B30592F306DBA2 /* ModelManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2065AFCA0431940F828D9427 /* ModelManifest.swift */; };
 		BF1511FA336984DB3696C3E4 /* t5_tokenizer_config.json in Resources */ = {isa = PBXBuildFile; fileRef = FA4C64A421E46C82C2311767 /* t5_tokenizer_config.json */; };
 		C11949003CD5B39806C65EA3 /* tokenizer_reference_ids.json in Resources */ = {isa = PBXBuildFile; fileRef = CCD024BBBC7CB75E037214B8 /* tokenizer_reference_ids.json */; };
 		C34BFD1164209CD709A5A9F8 /* AttentionExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 347EF3EF52DB8E567909B2D3 /* AttentionExecutorTests.swift */; };
 		C4484A695C46B97717819332 /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = 594D2C66F916CBD132EA5517 /* Tokenizers */; };
 		CC5F144445E89AD37FF24021 /* Modulation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52E7305B1912F5357ACCAEE5 /* Modulation.swift */; };
 		CFD7E41C92A70D6B5ED05B8A /* DiTBlockTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DC1D4D21EFBA6FA29D885A7 /* DiTBlockTests.swift */; };
+		D2CEA1830C6E17E0AB682B09 /* Checkpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFC5EBDAD72F3E1ECBEB3947 /* Checkpoint.swift */; };
 		D49309A80BBD9F702F9E71A8 /* TimestepEmbedder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D7DEF4C7D7998D60A743925 /* TimestepEmbedder.swift */; };
 		E03432114D1256677B254408 /* EulerSampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99DD442C7A3CCB6E47D0F488 /* EulerSampler.swift */; };
 		E4237CF411C2158613158D83 /* DiTBlockExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F14B5397CD1B2C4DE3D41CB /* DiTBlockExecutorTests.swift */; };
@@ -96,6 +99,7 @@
 		1506F4F789C146E6B646F18C /* AnimapkParsingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkParsingTests.swift; sourceTree = "<group>"; };
 		1A1319CA9D168F08F49BA3EB /* TokenizerParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenizerParityTests.swift; sourceTree = "<group>"; };
 		1BA93420FE0BF5285E6DBB6D /* DiTBlockCPU.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTBlockCPU.swift; sourceTree = "<group>"; };
+		2065AFCA0431940F828D9427 /* ModelManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelManifest.swift; sourceTree = "<group>"; };
 		21050D453899FA878AFF60FA /* DiffusionSampler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffusionSampler.swift; sourceTree = "<group>"; };
 		220DB7AE4DC9E7B009A9C5DF /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		24AA7FDE4D5F416423C74125 /* RealPackDecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealPackDecoderTests.swift; sourceTree = "<group>"; };
@@ -132,6 +136,7 @@
 		9DA452A409BF52C73769318E /* MappedFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MappedFile.swift; sourceTree = "<group>"; };
 		A109D17B6E3524E405A9B85B /* QwenEncoderMetal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenEncoderMetal.swift; sourceTree = "<group>"; };
 		A9346A85EC2056315DFCE66D /* LinearExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinearExecutor.swift; sourceTree = "<group>"; };
+		BF7F7DDF80FF8FC3729F608B /* SeededRNG.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeededRNG.swift; sourceTree = "<group>"; };
 		C416E0528D650EED48130A92 /* AnimapkTensor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkTensor.swift; sourceTree = "<group>"; };
 		C509546307CB21BE0D1A9146 /* LLMAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMAdapterTests.swift; sourceTree = "<group>"; };
 		CCD024BBBC7CB75E037214B8 /* tokenizer_reference_ids.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = tokenizer_reference_ids.json; sourceTree = "<group>"; };
@@ -140,6 +145,7 @@
 		D576867ECC53CBF14CC30F79 /* AnimapkFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkFile.swift; sourceTree = "<group>"; };
 		D8E235B12BDFBC6DCA8B439E /* AnimaXS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = AnimaXS.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		DD10CAEE3E25726CE527243D /* SmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmokeTests.swift; sourceTree = "<group>"; };
+		DFC5EBDAD72F3E1ECBEB3947 /* Checkpoint.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Checkpoint.swift; sourceTree = "<group>"; };
 		E00F7AC0D57A13E91CB5F434 /* LinearExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinearExecutorTests.swift; sourceTree = "<group>"; };
 		E0EFD572B87262AE5AAEB996 /* QwenNumerics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenNumerics.swift; sourceTree = "<group>"; };
 		E26E470D56048A5E382959A7 /* AnimaXSTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = AnimaXSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -192,6 +198,7 @@
 			children = (
 				21050D453899FA878AFF60FA /* DiffusionSampler.swift */,
 				99DD442C7A3CCB6E47D0F488 /* EulerSampler.swift */,
+				BF7F7DDF80FF8FC3729F608B /* SeededRNG.swift */,
 			);
 			path = Sampler;
 			sourceTree = "<group>";
@@ -223,6 +230,7 @@
 				050C4FD7742F731394068190 /* Animapk */,
 				9D03EB80B5F6548BFFD3456B /* Generation */,
 				C3A550BE880CA62DBCC3BFF4 /* Metal */,
+				C4A7D6C56FD9D6908DF30741 /* ModelStore */,
 				3245A69EDC5550E24C6F2BEA /* Sampler */,
 				8A48E27B74EE38F1C7DF8E71 /* Text */,
 			);
@@ -278,6 +286,7 @@
 		9D03EB80B5F6548BFFD3456B /* Generation */ = {
 			isa = PBXGroup;
 			children = (
+				DFC5EBDAD72F3E1ECBEB3947 /* Checkpoint.swift */,
 				684C63379028C718819607CA /* ModelConstants.swift */,
 			);
 			path = Generation;
@@ -324,6 +333,14 @@
 				0B8E57358726DCBA4B39C22A /* WeightStreamer.swift */,
 			);
 			path = Metal;
+			sourceTree = "<group>";
+		};
+		C4A7D6C56FD9D6908DF30741 /* ModelStore */ = {
+			isa = PBXGroup;
+			children = (
+				2065AFCA0431940F828D9427 /* ModelManifest.swift */,
+			);
+			path = ModelStore;
 			sourceTree = "<group>";
 		};
 		FF9E33DBE1A99A3FEA662C7A /* AnimaXSTests */ = {
@@ -503,6 +520,7 @@
 				8F07F57A8F85D199B51B2F3C /* AnimapkRangeLocator.swift in Sources */,
 				7E991650CBABF20B20E112AE /* AnimapkTensor.swift in Sources */,
 				473AE0F68178293C9A58882C /* AttentionExecutor.swift in Sources */,
+				D2CEA1830C6E17E0AB682B09 /* Checkpoint.swift in Sources */,
 				30116E9CBC6BF3DBEA66C41E /* ContentView.swift in Sources */,
 				1E52ED71A9AD8B33A91D049C /* Crc32.swift in Sources */,
 				BD81C9C99347181C9AB1E4B2 /* DiTBlockCPU.swift in Sources */,
@@ -521,11 +539,13 @@
 				EEB3C16094E91013C9ABB9CA /* MappedFile.swift in Sources */,
 				938A4049C06BE05E39F6BCC1 /* MetalContext.swift in Sources */,
 				869CE73742B23D7225305BC1 /* ModelConstants.swift in Sources */,
+				BD9A6D2D28B30592F306DBA2 /* ModelManifest.swift in Sources */,
 				CC5F144445E89AD37FF24021 /* Modulation.swift in Sources */,
 				5506617DD3116BF72E8154BD /* QuantDecoders.swift in Sources */,
 				E8B287C14227EAB23ED6D5DB /* QwenEncoderCPU.swift in Sources */,
 				616ED86BCC3FCAA28CC25561 /* QwenEncoderMetal.swift in Sources */,
 				914187C1B6254DDCA7ED3C32 /* QwenNumerics.swift in Sources */,
+				0A5B012A2059A0FD9091D3CA /* SeededRNG.swift in Sources */,
 				D49309A80BBD9F702F9E71A8 /* TimestepEmbedder.swift in Sources */,
 				027A9C7FE57956074F77229D /* TokenizerLoader.swift in Sources */,
 				AD481E2836797AA5BE0359AA /* WeightStreamer.swift in Sources */,
