@@ -78,6 +78,47 @@ kernel void copy_half_rows(
     destination[gid.y * destinationStride + gid.x] = source[gid.y * sourceStride + gid.x];
 }
 
+kernel void float_to_half(
+    device const float *source [[buffer(0)]],
+    device half *destination [[buffer(1)]],
+    constant uint &count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid < count) destination[gid] = half(source[gid]);
+}
+
+kernel void half_to_float(
+    device const half *source [[buffer(0)]],
+    device float *destination [[buffer(1)]],
+    constant uint &count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid < count) destination[gid] = float(source[gid]);
+}
+
+// Convert between projection layout [tokens,heads,headDim] and the head-major
+// [heads,tokens,headDim] layout consumed by AttentionExecutor. The same kernel
+// handles both directions so the layouts cannot drift independently.
+kernel void transpose_token_head_half(
+    device const half *source [[buffer(0)]],
+    device half *destination [[buffer(1)]],
+    constant uint &tokens [[buffer(2)]],
+    constant uint &heads [[buffer(3)]],
+    constant uint &headDim [[buffer(4)]],
+    constant uint &toHeadMajor [[buffer(5)]],
+    uint gid [[thread_position_in_grid]])
+{
+    uint count = tokens * heads * headDim;
+    if (gid >= count) return;
+    uint dim = gid % headDim;
+    uint row = gid / headDim;
+    uint head = row % heads;
+    uint token = row / heads;
+    uint headMajor = (head * tokens + token) * headDim + dim;
+    if (toHeadMajor != 0) destination[headMajor] = source[gid];
+    else destination[gid] = source[headMajor];
+}
+
 // ---------------------------------------------------------------------------
 // RMSNorm (fp32 input/output and statistics; fp16 packed weight).
 // Dispatch exactly one threadgroup per row, with at most 256 threads.
@@ -245,6 +286,48 @@ kernel void add_half_into_float(
 {
     if (gid >= count) return;
     residual[gid] += float(branch[gid]);
+}
+
+kernel void add_f32(
+    device float *destination [[buffer(0)]],
+    device const float *source [[buffer(1)]],
+    constant uint &count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid < count) destination[gid] += source[gid];
+}
+
+// Per-token/per-head RMSNorm at an fp16 MPS boundary, without RoPE (cross attention).
+// Input/output layout is [tokens,heads,128], and the [128] fp16 weight is shared.
+kernel void rmsnorm_heads_half(
+    device const half *in [[buffer(0)]],
+    device const half *weight [[buffer(1)]],
+    device half *out [[buffer(2)]],
+    constant uint &rows [[buffer(3)]],
+    constant float &eps [[buffer(4)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint3 threads [[threads_per_threadgroup]])
+{
+    uint row = group.x;
+    if (row >= rows) return;
+    uint threadCount = threads.x;
+    threadgroup float partial[256];
+    float sum = 0.0f;
+    for (uint d = tid; d < 128; d += threadCount) {
+        float value = float(in[row * 128 + d]);
+        sum = fma(value, value, sum);
+    }
+    partial[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inv = rsqrt(partial[0] / 128.0f + eps);
+    for (uint d = tid; d < 128; d += threadCount) {
+        out[row * 128 + d] = half(float(in[row * 128 + d]) * inv * float(weight[d]));
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,180 @@
+import XCTest
+import Metal
+@testable import AnimaXS
+
+final class DiTBlockExecutorTests: XCTestCase {
+    private func requireContext() throws -> MetalContext {
+        guard let context = MetalContext() else {
+            throw XCTSkip("SKIPPED_NO_METAL: default Metal device/library unavailable")
+        }
+        return context
+    }
+
+    private func buffer<T>(_ values: [T], context: MetalContext) -> MTLBuffer {
+        values.withUnsafeBytes {
+            context.device.makeBuffer(bytes: $0.baseAddress!, length: $0.count,
+                                      options: .storageModeShared)!
+        }
+    }
+
+    func testHalfBoundaryConversionsAndHeadLayoutRoundTrip() throws {
+        let context = try requireContext()
+        let tokens = 3, heads = 2, headDim = 4
+        let values = (0..<(tokens * heads * headDim)).map { Float($0) / 7 - 1 }
+        let source = buffer(values, context: context)
+        let tokenHalf = try XCTUnwrap(context.device.makeBuffer(length: values.count * 2))
+        let headHalf = try XCTUnwrap(context.device.makeBuffer(length: values.count * 2))
+        let roundTripHalf = try XCTUnwrap(context.device.makeBuffer(length: values.count * 2))
+        let output = try XCTUnwrap(context.device.makeBuffer(length: values.count * 4))
+        let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+
+        try encodeUnary(context, command, "float_to_half", source, tokenHalf, values.count)
+        try encodeTranspose(context, command, tokenHalf, headHalf,
+                            tokens: tokens, heads: heads, headDim: headDim, toHeadMajor: true)
+        try encodeTranspose(context, command, headHalf, roundTripHalf,
+                            tokens: tokens, heads: heads, headDim: headDim, toHeadMajor: false)
+        try encodeUnary(context, command, "half_to_float", roundTripHalf, output, values.count)
+        command.commit()
+        command.waitUntilCompleted()
+        XCTAssertNil(command.error)
+
+        let head = headHalf.contents().bindMemory(to: Float16.self, capacity: values.count)
+        for h in 0..<heads {
+            for t in 0..<tokens {
+                for d in 0..<headDim {
+                    let expected = Float16(values[(t * heads + h) * headDim + d])
+                    XCTAssertEqual(head[(h * tokens + t) * headDim + d].bitPattern,
+                                   expected.bitPattern)
+                }
+            }
+        }
+        let result = output.contents().bindMemory(to: Float.self, capacity: values.count)
+        for index in values.indices {
+            XCTAssertEqual(result[index], Float(Float16(values[index])), accuracy: 0)
+        }
+    }
+
+    func testCrossAttentionHeadRMSNormUsesSharedWeight() throws {
+        let context = try requireContext()
+        let rows = 3, dim = 128
+        let inputValues = (0..<(rows * dim)).map { Float16(Float(($0 * 17) % 29 - 14) / 8) }
+        let weightValues = (0..<dim).map { Float16(Float(($0 % 9) + 1) / 8) }
+        let input = buffer(inputValues.map(\.bitPattern), context: context)
+        let weight = buffer(weightValues.map(\.bitPattern), context: context)
+        let output = try XCTUnwrap(context.device.makeBuffer(length: rows * dim * 2))
+        let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let pipeline = try context.pipeline(named: "rmsnorm_heads_half")
+        let encoder = try XCTUnwrap(command.makeComputeCommandEncoder())
+        var rowCount = UInt32(rows), epsilon: Float = 1e-6
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(input, offset: 0, index: 0)
+        encoder.setBuffer(weight, offset: 0, index: 1)
+        encoder.setBuffer(output, offset: 0, index: 2)
+        encoder.setBytes(&rowCount, length: 4, index: 3)
+        encoder.setBytes(&epsilon, length: 4, index: 4)
+        encoder.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+        encoder.endEncoding()
+        command.commit()
+        command.waitUntilCompleted()
+        XCTAssertNil(command.error)
+        let actual = output.contents().bindMemory(to: Float16.self, capacity: rows * dim)
+        for row in 0..<rows {
+            var squareSum: Float = 0
+            for d in 0..<dim {
+                let value = Float(inputValues[row * dim + d])
+                squareSum += value * value
+            }
+            let inverse = 1 / sqrt(squareSum / Float(dim) + epsilon)
+            for d in 0..<dim {
+                let expected = Float16(Float(inputValues[row * dim + d]) * inverse * Float(weightValues[d]))
+                XCTAssertEqual(actual[row * dim + d].bitPattern, expected.bitPattern)
+            }
+        }
+    }
+
+    /// Definitive E009 gate. It is manual because neither the 1.18 GB pack nor the
+    /// 347 MB diagnostic directory belongs in git. Both paths are available on the
+    /// project workstation and may also be injected into a dedicated macOS runner.
+    func testRealPackBlock0AgainstSameW4Oracle() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        guard let packs = environment["ANIMAXS_PACKS_DIR"],
+              let oracle = environment["ANIMAXS_BLOCK0_ORACLE_DIR"] else {
+            throw XCTSkip("ANIMAXS_PACKS_DIR/ANIMAXS_BLOCK0_ORACLE_DIR not set")
+        }
+        let context = try requireContext()
+        let file = try AnimapkFile(url: URL(fileURLWithPath: packs)
+            .appendingPathComponent("anima-turbo-v1.0-xsmax-w4.animapk"))
+        func floats(_ name: String) throws -> [Float] {
+            let data = try Data(contentsOf: URL(fileURLWithPath: oracle).appendingPathComponent(name))
+            guard data.count.isMultiple(of: 4) else { throw AnimapkError.validation("invalid oracle file") }
+            return data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        }
+        let inputValues = try floats("block0_input_x.f32")
+        let contextHalf = try floats("block0_cross_ctx.f32").map(Float16.init)
+        let expected = try floats("block0_swift_output.f32")
+        let residual = buffer(inputValues, context: context)
+        let emb = buffer(try floats("block0_emb.f32"), context: context)
+        let adaln = buffer(try floats("block0_adaln_lora.f32"), context: context)
+        let cross = buffer(contextHalf.map(\.bitPattern), context: context)
+        let rope = buffer(try floats("block0_rope.f32"), context: context)
+        try await DiTBlockExecutor(context: context, file: file).execute(
+            blockIndex: 0, residual: residual, emb: emb, adalnLora: adaln,
+            crossContext: cross, rope: rope)
+        let pointer = residual.contents().bindMemory(to: Float.self, capacity: expected.count)
+        var squareError = 0.0, dot = 0.0, actualNorm = 0.0, expectedNorm = 0.0
+        var maxAbsolute = 0.0
+        for i in expected.indices {
+            let actual = Double(pointer[i]), reference = Double(expected[i])
+            XCTAssertTrue(actual.isFinite)
+            let error = abs(actual - reference)
+            maxAbsolute = max(maxAbsolute, error)
+            squareError += error * error
+            dot += actual * reference
+            actualNorm += actual * actual
+            expectedNorm += reference * reference
+        }
+        let rmse = sqrt(squareError / Double(expected.count))
+        let cosine = dot / sqrt(actualNorm * expectedNorm)
+        print("E009_BLOCK0 maxAbs=\(maxAbsolute) rmse=\(rmse) cosine=\(cosine)")
+        XCTAssertGreaterThanOrEqual(cosine, 0.999)
+        XCTAssertLessThan(rmse, 0.1)
+    }
+
+    private func encodeUnary(
+        _ context: MetalContext, _ command: MTLCommandBuffer, _ name: String,
+        _ input: MTLBuffer, _ output: MTLBuffer, _ count: Int
+    ) throws {
+        let pipeline = try context.pipeline(named: name)
+        let encoder = try XCTUnwrap(command.makeComputeCommandEncoder())
+        var n = UInt32(count)
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(input, offset: 0, index: 0)
+        encoder.setBuffer(output, offset: 0, index: 1)
+        encoder.setBytes(&n, length: 4, index: 2)
+        encoder.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: min(32, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    private func encodeTranspose(
+        _ context: MetalContext, _ command: MTLCommandBuffer,
+        _ input: MTLBuffer, _ output: MTLBuffer,
+        tokens: Int, heads: Int, headDim: Int, toHeadMajor: Bool
+    ) throws {
+        let pipeline = try context.pipeline(named: "transpose_token_head_half")
+        let encoder = try XCTUnwrap(command.makeComputeCommandEncoder())
+        var t = UInt32(tokens), h = UInt32(heads), d = UInt32(headDim)
+        var direction: UInt32 = toHeadMajor ? 1 : 0
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(input, offset: 0, index: 0)
+        encoder.setBuffer(output, offset: 0, index: 1)
+        encoder.setBytes(&t, length: 4, index: 2)
+        encoder.setBytes(&h, length: 4, index: 3)
+        encoder.setBytes(&d, length: 4, index: 4)
+        encoder.setBytes(&direction, length: 4, index: 5)
+        encoder.dispatchThreads(MTLSize(width: tokens * heads * headDim, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+}

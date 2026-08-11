@@ -7,6 +7,7 @@ options:
   # Empty directories are not tracked by git. Omitting them makes XcodeGen output
   # identical in a populated local checkout and a clean GitHub Actions checkout.
   generateEmptyDirectories: false
+  # Source groups are regenerated whenever production executors/tests are added.
 settings:
   base:
     SWIFT_VERSION: "5.0"
