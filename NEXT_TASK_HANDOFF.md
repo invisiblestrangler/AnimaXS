@@ -1,15 +1,15 @@
 # AnimaXS — Next Execution Agent Handoff
 
-Updated 2026-08-11 after completing H005, D007, D008, E001, and E002. The next task is **E003: exact fp32-sensitive Metal arithmetic**. Do not start H006’s 28-block loop before E009 passes.
+Updated 2026-08-11 after completing H005, D007/D008, and E001–E005. The next task is **E006: the common transposed MPS linear executor**. Do not start H006’s 28-block loop before E009 passes.
 
 ## Current branch and proof
 
-Work in `/root/AnimaXS` on `main`. The completed implementation landed at `0c41ecf` and passed main GitHub Actions run `31455561792`:
+Work in `/root/AnimaXS`. E003–E005 are on `codex/e003-exact-arithmetic` at `433d064`; GitHub Actions run `31478699877` passed:
 
 - deterministic XcodeGen 2.46.0 project check;
 - generic iPhone build with Xcode 26.3;
-- 61 simulator tests, 4 expected no-pack skips, 0 failures;
-- real execution on `Apple iOS simulator GPU`, including W4/W8 row-reset and padded-bounds tests plus MPS GEMM.
+- 64 simulator tests, 4 expected no-pack skips, 0 failures;
+- hosted execution of exact arithmetic, split-half RoPE, patch/unpatch, Euler and direct W4 matvec on `Apple iOS simulator GPU`.
 
 Local `scripts/oracle_out/block0/` contains ~347 MB of ignored/regenerable H005 output and must not be committed.
 
@@ -43,15 +43,11 @@ Qwen: 28 logical layers, 308 layer tensors, 151,936 checked embedding rows
 
 Ranges use exact prefixes and logical numerical order even though physical order is lexicographic. `AnimapkFile.bytes(in:)` is zero-copy and valid while the file owns its mmap. Production should copy each execution range once into one ring; do not create per-tensor `Data` copies.
 
-`MetalContext` now probes Apple5, buffer/threadgroup/working-set/allocation/physical-memory/thermal values. W4/W8 kernels take an explicit row count, guard both dimensions, reset groups per row, and passed exact-after-fp16 tests for `[2,68]` and `[2,65]` with oversized dispatches.
+`MetalContext` now probes Apple5, buffer/threadgroup/working-set/allocation/physical-memory/thermal values. E002–E005 now provide bounded row-aware dequant, fp32-stat norms, erf-form exact GELU, fp32 modulation/gates/residuals, fused split-half RoPE, patch/unpatch, Euler, and direct packed W4 matvec. The E005 K=68 result versus fp64 is maxAbs `2.09e-6`, cosine `0.9999999999999986`.
 
 ## Next implementation order
 
 ```text
-E003  fp32-stat RMSNorm/LayerNorm, SiLU, exact erf GELU,
-      fp32 modulation/gates and residual updates
-E004  Q/K RMSNorm + split-half (p,p+64) RoPE, patch/unpatch, Euler
-E005  direct packed W4 fp32 matvec for M=1 precision-critical linears
 E006  transposed MPS linear with one reusable fp16 dequant scratch
 E007  K=2048/8192 precision characterization and recorded decision
 E008  bounded query-tiled self/cross attention with fp32 softmax
@@ -60,7 +56,7 @@ F007/G003  streamed Metal Qwen and adapter using D008
 H006  streamed 28-block Metal loop
 ```
 
-For E003, replace the existing tanh `gelu` scaffold and half gate signature; do not merely add parallel kernels while leaving production-facing wrong semantics ambiguous. Preserve mean-centered LayerNorm, exact `erf(x / sqrt(2))`, fp32 norm statistics, and Float32 residual/modulation/gates. Add small pack-free CPU parity tests to `MetalExecutionTests`; wrong GPU output must fail and only a genuinely unavailable device/library may skip.
+For E006, implement `LinearExecutor.swift` around the existing row-aware dequant kernels and `MPSMatrixMultiplication`. Reuse one fp16 weight scratch, interpret weights as `[N,K]`, and multiply `[M,K] × [N,K]ᵀ`. Start with an M tile of 128, support a smaller final tile, preserve asynchronous command-buffer completion, and do not retain dequantized matrices. Add pack-free transpose/stride tests and a representative tiled shape; keep giant pack-backed shapes out of normal CI unless measured safe.
 
 H005 semantics that must survive E003–E009: split-half `(p,p+64)` DiT RoPE, shared `[128]` Q/K RMSNorm weights, all 512 padded cross rows, no DiT mask/GQA/extra position embedding, SiLU before modulation linears, and exact erf GELU. `DiTBlockCPU` is an oracle only and must not become a production fallback.
 

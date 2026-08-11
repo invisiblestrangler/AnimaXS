@@ -39,6 +39,9 @@ Env: `CI-sim` = GitHub Actions standard `macos-15` arm64 iOS Simulator · `CI-de
 | E001 | hosted Metal device + diagnostics + project-kernel execution | PASS: `Apple iOS simulator GPU`, probes populated, run `31455204105` | CI-sim |
 | E001/E006 | 2×2 fp16 `MPSMatrixMultiplication` execution | PASS, permanent test run `31452206651` | CI-sim |
 | E002 | row-aware W4/W8 dequant + padded bounds | PASS exact-after-fp16 for W4 `[2,68]`, W8 `[2,65]` (`31455204105`) | CI-sim |
+| E003 | fp32 norms/activations/modulation/gate/residual kernels | PASS CPU parity and padded bounds (`31478699877`) | CI-sim |
+| E004 | split-half RoPE + patchify/unpatchify + Euler | PASS CPU parity, round-trip and padded bounds (`31478699877`) | CI-sim |
+| E005 | direct packed W4 fp32 matvec, K=68 | PASS maxAbs `2.09e-6`, cosine `0.9999999999999986` vs fp64 (`31478699877`) | CI-sim |
 | D007/D008 | zero-copy DiT/Qwen logical ranges and embedding rows | PASS synthetic (`31455204105`); local real packs DiT 28/560, Qwen 28/308, embedding 151936 rows | CI-sim/pack |
 | E002 | W8 dequant GPU | pending | CI-sim/A12 |
 | E003 | rmsnorm/layernorm GPU | pending | CI-sim/A12 |

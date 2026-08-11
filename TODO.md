@@ -73,11 +73,11 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
   - deps: B002 · output: completed `MetalContext.swift` + `MetalExecutionTests` · validation: hosted kernel+MPS execution passes (permanent tests proven by `31452206651`); all probe values populate where API-supported; no newer-GPU API requirement
 - [x] **E002** — Row-aware `dequant_w4_to_half` and `dequant_w8_to_half` kernels.
   - deps: E001 · output: kernels + synthetic GPU-vs-CPU tests · validation: exact after fp16 conversion for vectors and W4 `[2,68]` / W8 `[2,65]`; row-1 group reset and bounds asserted on hosted CI
-- [ ] **E003** — Exact arithmetic kernels: fp32-stat RMSNorm/LayerNorm, SiLU, **exact erf GELU**, fp32 modulation/gate residual add, and half→float residual add.
+- [x] **E003** — Exact arithmetic kernels: fp32-stat RMSNorm/LayerNorm, SiLU, **exact erf GELU**, fp32 modulation/gate residual add, and half→float residual add.
   - deps: E001 · output: kernels + CPU parity tests · validation: H005 equations match on hosted Metal; replace the scaffold tanh GELU and half gate before completion
-- [ ] **E004** — Q/K RMSNorm + split-half `(p,p+64)` DiT RoPE, patchify17/unpatchify16, and fp32 Euler update.
+- [x] **E004** — Q/K RMSNorm + split-half `(p,p+64)` DiT RoPE, patchify17/unpatchify16, and fp32 Euler update.
   - deps: E003 · output: kernels + pack-free tests · validation: small slices match H001/H004/I001 CPU references on hosted Metal
-- [ ] **E005** — Direct packed `w4_matvec_f32` for M=1 precision-critical timestep/AdaLN linears.
+- [x] **E005** — Direct packed `w4_matvec_f32` for M=1 precision-critical timestep/AdaLN linears.
   - deps: E002 · output: kernel + non-aligned-K test · validation: row-aware dequant, fp32 accumulation, error/cosine recorded against fp64 reference
 - [ ] **E006** — Common MPS linear: row-aware dequant→one reusable fp16 scratch→`MPSMatrixMultiplication` `[M,K]×[N,K]ᵀ`; M-tiling (start at 128); async completion.
   - deps: E001, E002 · output: `LinearExecutor.swift` · validation: transpose/stride tests vs CPU; representative tiled shape on hosted CI; giant real shape only in pack-backed/manual test if CI time/memory permits
