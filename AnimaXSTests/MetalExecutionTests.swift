@@ -368,6 +368,190 @@ final class MetalExecutionTests: XCTestCase {
         return Array(values.prefix(residual.count))
     }
 
+    func testRoPEPatchAndEulerKernels() throws {
+        let context = try requireContext()
+        try checkSplitHalfRoPE(context)
+        try checkPatchRoundTrip(context)
+        try checkEuler(context)
+    }
+
+    private func checkSplitHalfRoPE(_ context: MetalContext) throws {
+        let tokens = 2, heads = 2, headDimension = 128
+        let input: [Float16] = (0..<(tokens * heads * headDimension)).map {
+            Float16(Float(($0 % 19) - 9) / 4)
+        }
+        let weight: [Float16] = (0..<headDimension).map {
+            Float16(Float(($0 % 7) + 1) / 7)
+        }
+        let rope = DitRoPE.generate(T: 1, H: 1, W: 2)
+        let pipeline = try context.pipeline(named: "rms_rope_split_half")
+        let inputBuffer = makeBuffer(input.map(\.bitPattern), on: context.device)
+        let weightBuffer = makeBuffer(weight.map(\.bitPattern), on: context.device)
+        let ropeBuffer = makeBuffer(rope, on: context.device)
+        let logicalCount = input.count
+        let sentinel = Float16.nan.bitPattern
+        let outputBuffer = makeBuffer(
+            [UInt16](repeating: sentinel, count: logicalCount + headDimension), on: context.device)
+        var tokenCount = UInt32(tokens), headCount = UInt32(heads), eps: Float = 1e-6
+        let commandBuffer = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let encoder = try XCTUnwrap(commandBuffer.makeComputeCommandEncoder())
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(inputBuffer, offset: 0, index: 0)
+        encoder.setBuffer(weightBuffer, offset: 0, index: 1)
+        encoder.setBuffer(ropeBuffer, offset: 0, index: 2)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 3)
+        encoder.setBytes(&tokenCount, length: 4, index: 4)
+        encoder.setBytes(&headCount, length: 4, index: 5)
+        encoder.setBytes(&eps, length: 4, index: 6)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: tokens * heads + 1, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        XCTAssertNil(commandBuffer.error)
+        let pointer = outputBuffer.contents().bindMemory(to: UInt16.self, capacity: logicalCount + headDimension)
+        let result = Array(UnsafeBufferPointer(start: pointer, count: logicalCount + headDimension))
+        XCTAssertTrue(result[logicalCount...].allSatisfy { $0 == sentinel })
+
+        for row in 0..<(tokens * heads) {
+            let base = row * headDimension
+            var sum: Float = 0
+            for d in 0..<headDimension {
+                let value = Float(input[base + d])
+                sum += value * value
+            }
+            let inv = 1 / sqrt(sum / Float(headDimension) + eps)
+            let token = row / heads
+            for p in 0..<64 {
+                let a = Float(input[base + p]) * inv * Float(weight[p])
+                let b = Float(input[base + p + 64]) * inv * Float(weight[p + 64])
+                let ropeBase = (token * 64 + p) * 4
+                let expectedFirst = Float16(rope[ropeBase] * a + rope[ropeBase + 1] * b)
+                let expectedSecond = Float16(rope[ropeBase + 2] * a + rope[ropeBase + 3] * b)
+                XCTAssertEqual(Float(Float16(bitPattern: result[base + p])), Float(expectedFirst), accuracy: 0.002)
+                XCTAssertEqual(Float(Float16(bitPattern: result[base + p + 64])), Float(expectedSecond), accuracy: 0.002)
+            }
+        }
+        // Token 1 has a non-identity width rotation and distinguishes split-half
+        // (p,p+64) from the common but incorrect adjacent pairing.
+        XCTAssertNotEqual(result[2 * headDimension + 43], input[2 * headDimension + 43].bitPattern)
+    }
+
+    private func checkPatchRoundTrip(_ context: MetalContext) throws {
+        let height = 4, width = 6, channels = 17
+        let input: [Float] = (0..<(channels * height * width)).map {
+            Float(($0 * 17) % 101) / 10 - 5
+        }
+        let tokenCount = height / 2 * width / 2
+        let tokenValues = try runPatchify(
+            context, input: input, height: height, width: width, tokenCount: tokenCount)
+        for token in 0..<tokenCount {
+            let patchRow = token / (width / 2)
+            let patchColumn = token % (width / 2)
+            for channel in 0..<channels {
+                for di in 0..<2 {
+                    for dj in 0..<2 {
+                        let source = channel * height * width
+                            + (patchRow * 2 + di) * width + patchColumn * 2 + dj
+                        let target = token * 68 + channel * 4 + di * 2 + dj
+                        XCTAssertEqual(tokenValues[target], input[source])
+                    }
+                }
+            }
+        }
+        let restored = try runUnpatchify(
+            context, tokens: tokenValues, height: height, width: width, tokenCount: tokenCount)
+        XCTAssertEqual(restored, Array(input.prefix(16 * height * width)))
+    }
+
+    private func runPatchify(
+        _ context: MetalContext, input: [Float], height: Int, width: Int, tokenCount: Int
+    ) throws -> [Float] {
+        let pipeline = try context.pipeline(named: "patchify17")
+        let inputBuffer = makeBuffer(input, on: context.device)
+        let logicalCount = tokenCount * 68
+        let outputBuffer = makeBuffer([Float](repeating: 1_234_567, count: logicalCount + 68), on: context.device)
+        var h = UInt32(height), w = UInt32(width)
+        let commandBuffer = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let encoder = try XCTUnwrap(commandBuffer.makeComputeCommandEncoder())
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(inputBuffer, offset: 0, index: 0)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 1)
+        encoder.setBytes(&h, length: 4, index: 2)
+        encoder.setBytes(&w, length: 4, index: 3)
+        encoder.dispatchThreads(MTLSize(width: tokenCount + 2, height: 19, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 8, height: 2, depth: 1))
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        XCTAssertNil(commandBuffer.error)
+        let pointer = outputBuffer.contents().bindMemory(to: Float.self, capacity: logicalCount + 68)
+        let values = Array(UnsafeBufferPointer(start: pointer, count: logicalCount + 68))
+        XCTAssertTrue(values[logicalCount...].allSatisfy { $0 == 1_234_567 })
+        return Array(values.prefix(logicalCount))
+    }
+
+    private func runUnpatchify(
+        _ context: MetalContext, tokens: [Float], height: Int, width: Int, tokenCount: Int
+    ) throws -> [Float] {
+        let pipeline = try context.pipeline(named: "unpatchify16")
+        let tokenBuffer = makeBuffer(tokens, on: context.device)
+        let logicalCount = 16 * height * width
+        let outputBuffer = makeBuffer([Float](repeating: 1_234_567, count: logicalCount + height * width), on: context.device)
+        var h = UInt32(height), w = UInt32(width)
+        let commandBuffer = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let encoder = try XCTUnwrap(commandBuffer.makeComputeCommandEncoder())
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(tokenBuffer, offset: 0, index: 0)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 1)
+        encoder.setBytes(&h, length: 4, index: 2)
+        encoder.setBytes(&w, length: 4, index: 3)
+        encoder.dispatchThreads(MTLSize(width: tokenCount + 2, height: 18, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 8, height: 2, depth: 1))
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        XCTAssertNil(commandBuffer.error)
+        let pointer = outputBuffer.contents().bindMemory(to: Float.self, capacity: logicalCount + height * width)
+        let values = Array(UnsafeBufferPointer(start: pointer, count: logicalCount + height * width))
+        XCTAssertTrue(values[logicalCount...].allSatisfy { $0 == 1_234_567 })
+        return Array(values.prefix(logicalCount))
+    }
+
+    private func checkEuler(_ context: MetalContext) throws {
+        let x: [Float] = [-2, -0.5, 0, 1, 3]
+        let denoised: [Float] = [1, -1, 2, 0.25, -4]
+        let pipeline = try context.pipeline(named: "euler_step_f32")
+        let xBuffer = makeBuffer(x, on: context.device)
+        let denoisedBuffer = makeBuffer(denoised, on: context.device)
+        let outputBuffer = makeBuffer([Float](repeating: 1_234_567, count: x.count + 8), on: context.device)
+        var sigma: Float = 0.75, deltaSigma: Float = -0.125
+        var count = UInt32(x.count)
+        let commandBuffer = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let encoder = try XCTUnwrap(commandBuffer.makeComputeCommandEncoder())
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(xBuffer, offset: 0, index: 0)
+        encoder.setBuffer(denoisedBuffer, offset: 0, index: 1)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 2)
+        encoder.setBytes(&sigma, length: 4, index: 3)
+        encoder.setBytes(&deltaSigma, length: 4, index: 4)
+        encoder.setBytes(&count, length: 4, index: 5)
+        encoder.dispatchThreads(MTLSize(width: x.count + 8, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 16, height: 1, depth: 1))
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        XCTAssertNil(commandBuffer.error)
+        let pointer = outputBuffer.contents().bindMemory(to: Float.self, capacity: x.count + 8)
+        let values = Array(UnsafeBufferPointer(start: pointer, count: x.count + 8))
+        for i in x.indices {
+            let expected = x[i] + deltaSigma * (x[i] - denoised[i]) / sigma
+            XCTAssertEqual(values[i], expected, accuracy: 1e-6)
+        }
+        XCTAssertTrue(values[x.count...].allSatisfy { $0 == 1_234_567 })
+    }
+
     func testMPSMatrixMultiplicationExecutes() throws {
         let context = try requireContext()
         let input: [Float16] = [1, 2, 3, 4]

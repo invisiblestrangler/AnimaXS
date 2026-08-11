@@ -231,6 +231,46 @@ kernel void add_half_into_float(
 }
 
 // ---------------------------------------------------------------------------
+// DiT Q/K fused RMSNorm + split-half RoPE. Input/output [tokens,heads,128]
+// fp16; statistics and rotation arithmetic fp32. One 64-thread group per
+// token/head. The shared [128] weight is reused across every head.
+// ---------------------------------------------------------------------------
+kernel void rms_rope_split_half(
+    device const half  *in         [[buffer(0)]],
+    device const half  *weight     [[buffer(1)]],
+    device const float *rope       [[buffer(2)]], // [tokens,64,2,2]
+    device half        *out        [[buffer(3)]],
+    constant uint      &tokens     [[buffer(4)]],
+    constant uint      &heads      [[buffer(5)]],
+    constant float     &eps        [[buffer(6)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint p [[thread_index_in_threadgroup]])
+{
+    uint row = group.x;
+    if (row >= tokens * heads || p >= 64) return;
+    uint token = row / heads;
+    uint base = row * 128;
+    float first = float(in[base + p]);
+    float second = float(in[base + p + 64]);
+    threadgroup float partial[64];
+    partial[p] = fma(first, first, second * second);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 32; stride > 0; stride >>= 1) {
+        if (p < stride) partial[p] += partial[p + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inv = rsqrt(partial[0] / 128.0f + eps);
+    float a = first * inv * float(weight[p]);
+    float b = second * inv * float(weight[p + 64]);
+    uint ropeBase = (token * 64 + p) * 4;
+    float c = rope[ropeBase];
+    float negativeSine = rope[ropeBase + 1];
+    float sine = rope[ropeBase + 2];
+    out[base + p] = half(c * a + negativeSine * b);
+    out[base + p + 64] = half(sine * a + c * b);
+}
+
+// ---------------------------------------------------------------------------
 // Euler flow step (fp32): x_next = x + dSigma * (x - denoised) / sigma
 // ---------------------------------------------------------------------------
 kernel void euler_step_f32(
@@ -239,8 +279,10 @@ kernel void euler_step_f32(
     device float       *xNext    [[buffer(2)]],
     constant float     &sigma    [[buffer(3)]],
     constant float     &dSigma   [[buffer(4)]],
+    constant uint      &count    [[buffer(5)]],
     uint gid [[thread_position_in_grid]])
 {
+    if (gid >= count) return;
     float inv = 1.0f / sigma;
     xNext[gid] = x[gid] + dSigma * (x[gid] - denoised[gid]) * inv;
 }
@@ -260,6 +302,8 @@ kernel void patchify17(
     uint t = gid.x;
     uint c = gid.y;
     uint patchW = W >> 1;
+    uint patchH = H >> 1;
+    if (t >= patchH * patchW || c >= 17) return;
     uint i = t / patchW;         // patch row
     uint j = t % patchW;         // patch col
     // gather 4 pixels for channel c
@@ -268,6 +312,30 @@ kernel void patchify17(
             float v = input[c * H * W + (i * 2 + di) * W + (j * 2 + dj)];
             uint outIdx = t * 68 + c * 4 + di * 2 + dj;
             tokens[outIdx] = v;
+        }
+    }
+}
+
+
+// Reverse the first 16 channels of patchify output [tokens,68] to [16,H,W].
+kernel void unpatchify16(
+    device const float *tokens [[buffer(0)]],
+    device float       *output [[buffer(1)]],
+    constant uint      &H      [[buffer(2)]],
+    constant uint      &W      [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint t = gid.x;
+    uint c = gid.y;
+    uint patchW = W >> 1;
+    uint patchH = H >> 1;
+    if (t >= patchH * patchW || c >= 16) return;
+    uint i = t / patchW;
+    uint j = t % patchW;
+    for (uint di = 0; di < 2; ++di) {
+        for (uint dj = 0; dj < 2; ++dj) {
+            uint tokenIndex = t * 68 + c * 4 + di * 2 + dj;
+            output[c * H * W + (i * 2 + di) * W + (j * 2 + dj)] = tokens[tokenIndex];
         }
     }
 }
