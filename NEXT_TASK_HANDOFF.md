@@ -4,14 +4,14 @@ Updated 2026-08-11 after completing H005, D007, D008, E001, and E002. The next t
 
 ## Current branch and proof
 
-Work in `/root/AnimaXS`. The completed work is on branch `codex/h005-production-continue`; main is still `6e72f4f`. Branch commit `287106b` plus generated-project commit `9404b02` passed GitHub Actions run `31455204105`:
+Work in `/root/AnimaXS` on `main`. The completed implementation landed at `0c41ecf` and passed main GitHub Actions run `31455561792`:
 
 - deterministic XcodeGen 2.46.0 project check;
 - generic iPhone build with Xcode 26.3;
 - 61 simulator tests, 4 expected no-pack skips, 0 failures;
 - real execution on `Apple iOS simulator GPU`, including W4/W8 row-reset and padded-bounds tests plus MPS GEMM.
 
-Merge the branch deliberately and require the resulting main CI to pass; do not describe main as current before that. Local `scripts/oracle_out/block0/` contains ~347 MB of ignored/regenerable H005 output and must not be committed.
+Local `scripts/oracle_out/block0/` contains ~347 MB of ignored/regenerable H005 output and must not be committed.
 
 ## Reload context
 

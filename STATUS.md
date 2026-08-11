@@ -2,7 +2,7 @@
 
 - **Current milestone:** Production Metal vertical slice. H001–H005 CPU/reference work is complete; H005 fixed and proved row-aware matrix quantization.
 - **Current task:** E003, then E004–E009. Exact fp32-sensitive kernels are the next gate before the bounded-memory production Metal block 0.
-- **Last green branch snapshot:** `287106b` on `codex/h005-production-continue`, CI `31455204105`: deterministic XcodeGen 2.46.0, generic Xcode 26.3 iPhone build, and 61 simulator tests (4 expected pack skips, 0 failures). Main is still `6e72f4f`; merge this branch and require main CI before calling main current.
+- **Last green main commit:** `0c41ecf`, CI `31455561792`: deterministic XcodeGen 2.46.0, generic Xcode 26.3 iPhone build, and 61 simulator tests (4 expected pack skips, 0 failures).
 - **Hosted Metal fact:** Final snapshot run `31452206651` executed the permanent W4 Metal kernel test and fp16 `MPSMatrixMultiplication` on `Apple iOS simulator GPU`; both passed. Pack-free Metal/MPS parity belongs in normal CI.
 - **What works:** ANMA parser/CRC plus D007/D008 zero-copy DiT/Qwen locators; tokenizer parity; CPU Qwen + final RMSNorm; CPU adapter; DiT input/timestep/AdaLN/RoPE; H005 CPU block 0; E001 diagnostics and E002 bounded row-aware W4/W8 Metal dequant. Swift-W4≈NumPy-W4 cosine `1.000000000`; Swift-W4≈source-BF16 golden `0.998712139`, with original BF16≈golden `0.999992303` (D035).
 - **Production boundary:** `DiTBlockCPU` and its dequantized Swift arrays are oracles only. Production must use mmap spans, a one-slot ~39 MB ring, one fp16 dequant scratch, fp32 residual/modulation/gates, Metal kernels, MPS linears, and query-tiled attention.
