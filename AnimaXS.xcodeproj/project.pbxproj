@@ -21,6 +21,7 @@
 		2F02983AD55700559562DA54 /* qwen_tokenizer.json in Resources */ = {isa = PBXBuildFile; fileRef = F28A65A79E0706DF0F0D5AB2 /* qwen_tokenizer.json */; };
 		30116E9CBC6BF3DBEA66C41E /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C8E968875980A2C9ACC94E5 /* ContentView.swift */; };
 		36DCBB069B8AE8C6D90A5115 /* LinearExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00F7AC0D57A13E91CB5F434 /* LinearExecutorTests.swift */; };
+		473AE0F68178293C9A58882C /* AttentionExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3F286C454EBE7A92C592214 /* AttentionExecutor.swift */; };
 		47ABE68F485121B325537344 /* DiTInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EBD5ADCDE21EF89090D0058 /* DiTInput.swift */; };
 		4CF42C1FB7991B03E9360B0D /* DitRoPE.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63D78F224C62E12AE65A076F /* DitRoPE.swift */; };
 		5506617DD3116BF72E8154BD /* QuantDecoders.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A12B10FC621499B2CA281B3 /* QuantDecoders.swift */; };
@@ -48,6 +49,7 @@
 		BD81C9C99347181C9AB1E4B2 /* DiTBlockCPU.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BA93420FE0BF5285E6DBB6D /* DiTBlockCPU.swift */; };
 		BF1511FA336984DB3696C3E4 /* t5_tokenizer_config.json in Resources */ = {isa = PBXBuildFile; fileRef = FA4C64A421E46C82C2311767 /* t5_tokenizer_config.json */; };
 		C11949003CD5B39806C65EA3 /* tokenizer_reference_ids.json in Resources */ = {isa = PBXBuildFile; fileRef = CCD024BBBC7CB75E037214B8 /* tokenizer_reference_ids.json */; };
+		C34BFD1164209CD709A5A9F8 /* AttentionExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 347EF3EF52DB8E567909B2D3 /* AttentionExecutorTests.swift */; };
 		C4484A695C46B97717819332 /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = 594D2C66F916CBD132EA5517 /* Tokenizers */; };
 		CC5F144445E89AD37FF24021 /* Modulation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 52E7305B1912F5357ACCAEE5 /* Modulation.swift */; };
 		CFD7E41C92A70D6B5ED05B8A /* DiTBlockTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8DC1D4D21EFBA6FA29D885A7 /* DiTBlockTests.swift */; };
@@ -83,6 +85,7 @@
 		24AA7FDE4D5F416423C74125 /* RealPackDecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealPackDecoderTests.swift; sourceTree = "<group>"; };
 		28C2E8E80AFBE05DB0577977 /* DiTInputTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTInputTests.swift; sourceTree = "<group>"; };
 		2ED51EC9A960D08D2A6835BB /* QuantDecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuantDecoderTests.swift; sourceTree = "<group>"; };
+		347EF3EF52DB8E567909B2D3 /* AttentionExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionExecutorTests.swift; sourceTree = "<group>"; };
 		38E139072D28862327122F48 /* DitRoPETests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DitRoPETests.swift; sourceTree = "<group>"; };
 		3DE378A333F7F589CD183A9A /* MetalExecutionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalExecutionTests.swift; sourceTree = "<group>"; };
 		3F6A1853CF522E32A3743ACB /* MetalContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalContext.swift; sourceTree = "<group>"; };
@@ -119,6 +122,7 @@
 		E26E470D56048A5E382959A7 /* AnimaXSTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = AnimaXSTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		EFA18C3237EA1D76A8C2CB94 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		F28A65A79E0706DF0F0D5AB2 /* qwen_tokenizer.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = qwen_tokenizer.json; sourceTree = "<group>"; };
+		F3F286C454EBE7A92C592214 /* AttentionExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionExecutor.swift; sourceTree = "<group>"; };
 		FA4C64A421E46C82C2311767 /* t5_tokenizer_config.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = t5_tokenizer_config.json; sourceTree = "<group>"; };
 		FC3BA5B832C616E518D657FC /* TestExtensions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestExtensions.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -274,6 +278,7 @@
 		C3A550BE880CA62DBCC3BFF4 /* Metal */ = {
 			isa = PBXGroup;
 			children = (
+				F3F286C454EBE7A92C592214 /* AttentionExecutor.swift */,
 				A9346A85EC2056315DFCE66D /* LinearExecutor.swift */,
 				3F6A1853CF522E32A3743ACB /* MetalContext.swift */,
 			);
@@ -285,6 +290,7 @@
 			children = (
 				1506F4F789C146E6B646F18C /* AnimapkParsingTests.swift */,
 				7EEF412C70729BC71E9544B8 /* AnimapkRangeLocatorTests.swift */,
+				347EF3EF52DB8E567909B2D3 /* AttentionExecutorTests.swift */,
 				8DC1D4D21EFBA6FA29D885A7 /* DiTBlockTests.swift */,
 				28C2E8E80AFBE05DB0577977 /* DiTInputTests.swift */,
 				38E139072D28862327122F48 /* DitRoPETests.swift */,
@@ -419,6 +425,7 @@
 			files = (
 				5A84CFBB6B28FE55EBE82D86 /* AnimapkParsingTests.swift in Sources */,
 				B31B0A2D248ABF6D51FE0F55 /* AnimapkRangeLocatorTests.swift in Sources */,
+				C34BFD1164209CD709A5A9F8 /* AttentionExecutorTests.swift in Sources */,
 				CFD7E41C92A70D6B5ED05B8A /* DiTBlockTests.swift in Sources */,
 				774F60C7B433299EA6C55C9B /* DiTInputTests.swift in Sources */,
 				AF5BAAFDACD2451A4B01C9E4 /* DitRoPETests.swift in Sources */,
@@ -448,6 +455,7 @@
 				6047DFE4E9621A2084E5679B /* AnimapkHeader.swift in Sources */,
 				8F07F57A8F85D199B51B2F3C /* AnimapkRangeLocator.swift in Sources */,
 				7E991650CBABF20B20E112AE /* AnimapkTensor.swift in Sources */,
+				473AE0F68178293C9A58882C /* AttentionExecutor.swift in Sources */,
 				30116E9CBC6BF3DBEA66C41E /* ContentView.swift in Sources */,
 				1E52ED71A9AD8B33A91D049C /* Crc32.swift in Sources */,
 				BD81C9C99347181C9AB1E4B2 /* DiTBlockCPU.swift in Sources */,
