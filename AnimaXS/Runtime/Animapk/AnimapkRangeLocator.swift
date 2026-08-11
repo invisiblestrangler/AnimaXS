@@ -187,6 +187,26 @@ struct DiTFinalLayerLocator {
     }
 }
 
+/// Contiguous input/timestep tensors immediately following the adapter/final ranges.
+struct DiTPreparationLocator {
+    let range: AnimapkExecutionRange
+
+    init(file: AnimapkFile) throws {
+        let names = Set([
+            "model.diffusion_model.t_embedder.1.linear_1.weight",
+            "model.diffusion_model.t_embedder.1.linear_2.weight",
+            "model.diffusion_model.t_embedding_norm.weight",
+            "model.diffusion_model.x_embedder.proj.1.weight"
+        ])
+        range = try AnimapkRangeBuilder.executionRange(
+            tensors: file.tensors.filter { names.contains($0.name) },
+            exactPrefix: "model.diffusion_model.", logicalIndex: -2)
+        guard Set(range.tensors.map(\.tensor.name)) == names else {
+            throw AnimapkError.validation("DiT preparation range is incomplete")
+        }
+    }
+}
+
 struct QwenLayerLocator {
     static let layerCount = 28
     let embedding: AnimapkTensorSpans

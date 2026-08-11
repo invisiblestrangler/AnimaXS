@@ -91,6 +91,47 @@ final class QwenEncoderMetalTests: XCTestCase {
         XCTAssertTrue((ids.count * 1_024..<(512 * 1_024)).allSatisfy { pointer[$0] == 0 })
     }
 
+    func testRealW4DiTPreparationAgainstStructuralOracle() async throws {
+        let bundledPack = bundledFixture(named: "i002-preparation-w4.animapk")
+        let bundledLatent = bundledFixture(named: "dit_prepare_latent.f32")
+        guard let packURL = ProcessInfo.processInfo.environment["ANIMAXS_PREPARATION_PACK"]
+                .map(URL.init(fileURLWithPath:)) ?? bundledPack,
+              let fixtureDirectory = ProcessInfo.processInfo.environment["ANIMAXS_PREPARATION_ORACLE_DIR"]
+                .map(URL.init(fileURLWithPath:)) ?? bundledLatent?.deletingLastPathComponent() else {
+            throw XCTSkip("real DiT preparation W4 pack/oracle fixture not available")
+        }
+        guard let context = MetalContext() else {
+            throw XCTSkip("SKIPPED_NO_METAL: default Metal device/library unavailable")
+        }
+        let latentValues = try floats("dit_prepare_latent.f32", in: fixtureDirectory)
+        XCTAssertEqual(latentValues.count, DiTPreparationExecutor.latentElements)
+        let latent = makeBuffer(latentValues, context: context)
+        let residual = try XCTUnwrap(context.device.makeBuffer(
+            length: DiTPreparationExecutor.tokens * DiTPreparationExecutor.hidden * 4,
+            options: .storageModeShared))
+        let embedding = try XCTUnwrap(context.device.makeBuffer(
+            length: DiTPreparationExecutor.hidden * 4, options: .storageModeShared))
+        let adaln = try XCTUnwrap(context.device.makeBuffer(
+            length: DiTPreparationExecutor.adaln * 4, options: .storageModeShared))
+        let start = Date()
+        try await DiTPreparationExecutor(
+            context: context, file: AnimapkFile(url: packURL)).execute(
+                latent: latent, sigma: 1, residual: residual,
+                embedding: embedding, adalnLora: adaln)
+        for (label, buffer, fixture) in [
+            ("RESIDUAL", residual, "dit_prepare_residual.f32"),
+            ("EMBEDDING", embedding, "dit_prepare_embedding.f32"),
+            ("ADALN", adaln, "dit_prepare_adaln.f32")
+        ] {
+            let metric = metrics(buffer, try floats(fixture, in: fixtureDirectory))
+            print("I002_PREPARE_\(label) maxAbs=\(metric.maxAbs) rmse=\(metric.rmse) "
+                + "cosine=\(metric.cosine)")
+            XCTAssertGreaterThanOrEqual(metric.cosine, 0.999)
+            XCTAssertTrue(metric.finite)
+        }
+        print("I002_PREPARE_SECONDS=\(Date().timeIntervalSince(start))")
+    }
+
     private func metrics(
         _ buffer: MTLBuffer, _ expected: [Float]
     ) -> (maxAbs: Double, rmse: Double, cosine: Double, finite: Bool) {
