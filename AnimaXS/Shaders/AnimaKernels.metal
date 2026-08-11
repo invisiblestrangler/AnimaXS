@@ -73,10 +73,11 @@ kernel void rmsnorm_f32_to_f32(
     constant float     &eps     [[buffer(4)]],
     constant uint      &useWt   [[buffer(5)]],
     constant uint      &rows    [[buffer(6)]],
-    uint row [[threadgroup_position_in_grid]],
+    uint3 group [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]],
     uint3 threads [[threads_per_threadgroup]])
 {
+    uint row = group.x;
     if (row >= rows) return;
     uint threadCount = threads.x;
     threadgroup float partial[256];
@@ -107,10 +108,11 @@ kernel void layernorm_f32_to_f32(
     constant uint      &N    [[buffer(2)]],
     constant float     &eps  [[buffer(3)]],
     constant uint      &rows [[buffer(4)]],
-    uint row [[threadgroup_position_in_grid]],
+    uint3 group [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]],
     uint3 threads [[threads_per_threadgroup]])
 {
+    uint row = group.x;
     if (row >= rows) return;
     uint threadCount = threads.x;
     threadgroup float partial[256];
@@ -143,6 +145,28 @@ kernel void layernorm_f32_to_f32(
 // ---------------------------------------------------------------------------
 // Exact reference activations, fp32 input/output with explicit bounds.
 // ---------------------------------------------------------------------------
+inline float erf_f32(float x)
+{
+    // Numerical Recipes complementary-error-function form. This follows the
+    // source's erf GELU equation (not the tanh GELU approximation) and stays
+    // within a few float32 ulps where Metal's Apple5 library lacks erf().
+    float absolute = abs(x);
+    float t = 1.0f / (1.0f + 0.5f * absolute);
+    float polynomial = t * exp(
+        -absolute * absolute - 1.26551223f +
+        t * (1.00002368f +
+        t * (0.37409196f +
+        t * (0.09678418f +
+        t * (-0.18628806f +
+        t * (0.27886807f +
+        t * (-1.13520398f +
+        t * (1.48851587f +
+        t * (-0.82215223f +
+        t * 0.17087277f)))))))));
+    float value = 1.0f - polynomial;
+    return x < 0.0f ? -value : value;
+}
+
 kernel void gelu(
     device const float *in  [[buffer(0)]],
     device float       *out [[buffer(1)]],
@@ -151,7 +175,7 @@ kernel void gelu(
 {
     if (gid >= count) return;
     float x = in[gid];
-    out[gid] = 0.5f * x * (1.0f + erf(x * 0.7071067811865475f));
+    out[gid] = 0.5f * x * (1.0f + erf_f32(x * 0.7071067811865475f));
 }
 
 kernel void silu(
