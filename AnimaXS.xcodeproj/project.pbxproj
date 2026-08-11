@@ -39,6 +39,7 @@
 		71B669F9AF60FB45E4842F57 /* t5_special_tokens_map.json in Resources */ = {isa = PBXBuildFile; fileRef = 67B56E4FB7D12CC1F63A52F9 /* t5_special_tokens_map.json */; };
 		7387F6A165EC6A2781B76716 /* ModulationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14DA44DE36980DC498AB4B99 /* ModulationTests.swift */; };
 		774F60C7B433299EA6C55C9B /* DiTInputTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28C2E8E80AFBE05DB0577977 /* DiTInputTests.swift */; };
+		783DCD7D892DE4BFC079C74D /* DiffusionSampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21050D453899FA878AFF60FA /* DiffusionSampler.swift */; };
 		79538031C513FDA03EF8F9AF /* DiTPreparationExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11F46883652E38191A3A29BC /* DiTPreparationExecutor.swift */; };
 		79E4DFD6600B4D04E8C93CD6 /* TestExtensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC3BA5B832C616E518D657FC /* TestExtensions.swift */; };
 		7CD76E6444C119FE1BDBC89F /* AnimaXSApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D9CD1A114D528F42F21C527 /* AnimaXSApp.swift */; };
@@ -95,6 +96,7 @@
 		1506F4F789C146E6B646F18C /* AnimapkParsingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkParsingTests.swift; sourceTree = "<group>"; };
 		1A1319CA9D168F08F49BA3EB /* TokenizerParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenizerParityTests.swift; sourceTree = "<group>"; };
 		1BA93420FE0BF5285E6DBB6D /* DiTBlockCPU.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTBlockCPU.swift; sourceTree = "<group>"; };
+		21050D453899FA878AFF60FA /* DiffusionSampler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffusionSampler.swift; sourceTree = "<group>"; };
 		220DB7AE4DC9E7B009A9C5DF /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
 		24AA7FDE4D5F416423C74125 /* RealPackDecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealPackDecoderTests.swift; sourceTree = "<group>"; };
 		28C2E8E80AFBE05DB0577977 /* DiTInputTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTInputTests.swift; sourceTree = "<group>"; };
@@ -188,6 +190,7 @@
 		3245A69EDC5550E24C6F2BEA /* Sampler */ = {
 			isa = PBXGroup;
 			children = (
+				21050D453899FA878AFF60FA /* DiffusionSampler.swift */,
 				99DD442C7A3CCB6E47D0F488 /* EulerSampler.swift */,
 			);
 			path = Sampler;
@@ -508,6 +511,7 @@
 				47ABE68F485121B325537344 /* DiTInput.swift in Sources */,
 				79538031C513FDA03EF8F9AF /* DiTPreparationExecutor.swift in Sources */,
 				0CC965727D9BE3124B87BC36 /* DiTWeights.swift in Sources */,
+				783DCD7D892DE4BFC079C74D /* DiffusionSampler.swift in Sources */,
 				22A697C29A4FE1F67A25D118 /* DitForward.swift in Sources */,
 				4CF42C1FB7991B03E9360B0D /* DitRoPE.swift in Sources */,
 				E03432114D1256677B254408 /* EulerSampler.swift in Sources */,
