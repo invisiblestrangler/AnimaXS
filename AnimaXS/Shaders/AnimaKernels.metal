@@ -532,3 +532,29 @@ kernel void unpatchify16(
         }
     }
 }
+
+// FinalLayer projects each 2x2 patch to exactly 16 * 2 * 2 = 64 values.
+// Keep this separate from unpatchify16, whose 68-wide input includes four
+// patchified mask channels.
+kernel void unpatchify_velocity16(
+    device const float *tokens [[buffer(0)]],
+    device float       *output [[buffer(1)]],
+    constant uint      &H      [[buffer(2)]],
+    constant uint      &W      [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint t = gid.x;
+    uint c = gid.y;
+    uint patchW = W >> 1;
+    uint patchH = H >> 1;
+    if (t >= patchH * patchW || c >= 16) return;
+    uint i = t / patchW;
+    uint j = t % patchW;
+    for (uint di = 0; di < 2; ++di) {
+        for (uint dj = 0; dj < 2; ++dj) {
+            // einops: (p1 p2 t C), with temporal patch size one and C fastest.
+            uint tokenIndex = t * 64 + (di * 2 + dj) * 16 + c;
+            output[c * H * W + (i * 2 + di) * W + (j * 2 + dj)] = tokens[tokenIndex];
+        }
+    }
+}

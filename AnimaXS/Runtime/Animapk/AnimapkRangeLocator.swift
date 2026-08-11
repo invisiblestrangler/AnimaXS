@@ -46,41 +46,8 @@ private enum AnimapkRangeBuilder {
 
         for logicalIndex in 0..<count {
             let exactPrefix = "\(prefix)\(logicalIndex)."
-            let members = tensors.filter { $0.name.hasPrefix(exactPrefix) }
-            guard !members.isEmpty else {
-                throw AnimapkError.validation("no tensors found for \(exactPrefix)")
-            }
-
-            let start = members.map(\.blobOffset).min()!
-            var end = start
-            for tensor in members {
-                let blobEnd = try checkedAdd(tensor.blobOffset, tensor.blobSize, label: tensor.name)
-                end = max(end, blobEnd)
-            }
-            let length = end - start
-            var spans: [AnimapkTensorSpans] = []
-            spans.reserveCapacity(members.count)
-            for tensor in members.sorted(by: { $0.blobOffset < $1.blobOffset }) {
-                guard tensor.blobOffset % 16_384 == 0 else {
-                    throw AnimapkError.validation("blob \(tensor.name) is not 16 KB aligned")
-                }
-                let blob = try relativeSpan(
-                    absoluteOffset: tensor.blobOffset, length: tensor.blobSize,
-                    rangeStart: start, rangeEnd: end, label: "\(tensor.name) blob")
-                let dataAbsolute = try checkedAdd(tensor.blobOffset, tensor.dataOffset, label: "\(tensor.name) data")
-                let data = try relativeSpan(
-                    absoluteOffset: dataAbsolute, length: tensor.dataSize,
-                    rangeStart: start, rangeEnd: end, label: "\(tensor.name) data")
-                let scale = try optionalSpan(
-                    offset: tensor.scaleOffset, length: tensor.scaleSize, tensor: tensor,
-                    rangeStart: start, rangeEnd: end, label: "scale")
-                let zero = try optionalSpan(
-                    offset: tensor.zeroOffset, length: tensor.zeroSize, tensor: tensor,
-                    rangeStart: start, rangeEnd: end, label: "zero")
-                spans.append(AnimapkTensorSpans(tensor: tensor, blob: blob, data: data, scale: scale, zero: zero))
-            }
-            result.append(AnimapkExecutionRange(
-                logicalIndex: logicalIndex, fileOffset: start, length: length, tensors: spans))
+            result.append(try executionRange(
+                tensors: tensors, exactPrefix: exactPrefix, logicalIndex: logicalIndex))
         }
 
         let physical = result.sorted { $0.fileOffset < $1.fileOffset }
@@ -91,6 +58,44 @@ private enum AnimapkRangeBuilder {
             }
         }
         return result
+    }
+
+    static func executionRange(
+        tensors: [AnimapkTensor], exactPrefix: String, logicalIndex: Int
+    ) throws -> AnimapkExecutionRange {
+        let members = tensors.filter { $0.name.hasPrefix(exactPrefix) }
+        guard !members.isEmpty else {
+            throw AnimapkError.validation("no tensors found for \(exactPrefix)")
+        }
+        let start = members.map(\.blobOffset).min()!
+        var end = start
+        for tensor in members {
+            end = max(end, try checkedAdd(tensor.blobOffset, tensor.blobSize, label: tensor.name))
+        }
+        var spans: [AnimapkTensorSpans] = []
+        for tensor in members.sorted(by: { $0.blobOffset < $1.blobOffset }) {
+            guard tensor.blobOffset % 16_384 == 0 else {
+                throw AnimapkError.validation("blob \(tensor.name) is not 16 KB aligned")
+            }
+            let blob = try relativeSpan(
+                absoluteOffset: tensor.blobOffset, length: tensor.blobSize,
+                rangeStart: start, rangeEnd: end, label: "\(tensor.name) blob")
+            let dataAbsolute = try checkedAdd(
+                tensor.blobOffset, tensor.dataOffset, label: "\(tensor.name) data")
+            let data = try relativeSpan(
+                absoluteOffset: dataAbsolute, length: tensor.dataSize,
+                rangeStart: start, rangeEnd: end, label: "\(tensor.name) data")
+            let scale = try optionalSpan(
+                offset: tensor.scaleOffset, length: tensor.scaleSize, tensor: tensor,
+                rangeStart: start, rangeEnd: end, label: "scale")
+            let zero = try optionalSpan(
+                offset: tensor.zeroOffset, length: tensor.zeroSize, tensor: tensor,
+                rangeStart: start, rangeEnd: end, label: "zero")
+            spans.append(AnimapkTensorSpans(
+                tensor: tensor, blob: blob, data: data, scale: scale, zero: zero))
+        }
+        return AnimapkExecutionRange(
+            logicalIndex: logicalIndex, fileOffset: start, length: end - start, tensors: spans)
     }
 
     static func tensorSpans(_ tensor: AnimapkTensor) throws -> AnimapkTensorSpans {
@@ -165,6 +170,20 @@ struct DiTBlockLocator {
             throw AnimapkError.validation("DiT block index \(logicalIndex) is out of range")
         }
         return blocks[logicalIndex]
+    }
+}
+
+struct DiTFinalLayerLocator {
+    let range: AnimapkExecutionRange
+
+    init(file: AnimapkFile) throws {
+        range = try AnimapkRangeBuilder.executionRange(
+            tensors: file.tensors,
+            exactPrefix: "model.diffusion_model.final_layer.",
+            logicalIndex: -1)
+        guard range.tensors.count == 3 else {
+            throw AnimapkError.validation("DiT final layer must contain exactly 3 tensors")
+        }
     }
 }
 

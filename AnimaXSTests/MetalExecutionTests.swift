@@ -467,6 +467,26 @@ final class MetalExecutionTests: XCTestCase {
         let restored = try runUnpatchify(
             context, tokens: tokenValues, height: height, width: width, tokenCount: tokenCount)
         XCTAssertEqual(restored, Array(input.prefix(16 * height * width)))
+
+        // FinalLayer has no four-channel mask tail: its token stride is 64, not 68.
+        let velocityTokens = (0..<(tokenCount * 64)).map(Float.init)
+        let velocity = try runVelocityUnpatchify(
+            context, tokens: velocityTokens, height: height, width: width,
+            tokenCount: tokenCount)
+        for token in 0..<tokenCount {
+            let patchRow = token / (width / 2)
+            let patchColumn = token % (width / 2)
+            for channel in 0..<16 {
+                for di in 0..<2 {
+                    for dj in 0..<2 {
+                        let source = token * 64 + (di * 2 + dj) * 16 + channel
+                        let target = channel * height * width
+                            + (patchRow * 2 + di) * width + patchColumn * 2 + dj
+                        XCTAssertEqual(velocity[target], velocityTokens[source])
+                    }
+                }
+            }
+        }
     }
 
     private func runPatchify(
@@ -519,6 +539,37 @@ final class MetalExecutionTests: XCTestCase {
         XCTAssertNil(commandBuffer.error)
         let pointer = outputBuffer.contents().bindMemory(to: Float.self, capacity: logicalCount + height * width)
         let values = Array(UnsafeBufferPointer(start: pointer, count: logicalCount + height * width))
+        XCTAssertTrue(values[logicalCount...].allSatisfy { $0 == 1_234_567 })
+        return Array(values.prefix(logicalCount))
+    }
+
+    private func runVelocityUnpatchify(
+        _ context: MetalContext, tokens: [Float], height: Int, width: Int, tokenCount: Int
+    ) throws -> [Float] {
+        let pipeline = try context.pipeline(named: "unpatchify_velocity16")
+        let tokenBuffer = makeBuffer(tokens, on: context.device)
+        let logicalCount = 16 * height * width
+        let outputBuffer = makeBuffer(
+            [Float](repeating: 1_234_567, count: logicalCount + height * width),
+            on: context.device)
+        var h = UInt32(height), w = UInt32(width)
+        let commandBuffer = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let encoder = try XCTUnwrap(commandBuffer.makeComputeCommandEncoder())
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(tokenBuffer, offset: 0, index: 0)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 1)
+        encoder.setBytes(&h, length: 4, index: 2)
+        encoder.setBytes(&w, length: 4, index: 3)
+        encoder.dispatchThreads(MTLSize(width: tokenCount + 2, height: 18, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 8, height: 2, depth: 1))
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        XCTAssertNil(commandBuffer.error)
+        let pointer = outputBuffer.contents().bindMemory(
+            to: Float.self, capacity: logicalCount + height * width)
+        let values = Array(UnsafeBufferPointer(
+            start: pointer, count: logicalCount + height * width))
         XCTAssertTrue(values[logicalCount...].allSatisfy { $0 == 1_234_567 })
         return Array(values.prefix(logicalCount))
     }

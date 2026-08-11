@@ -5,9 +5,11 @@ import Metal
 /// the next locator-derived range replaces the one-slot weight ring.
 final class DitForward {
     private let block: DiTBlockExecutor
+    private let finalLayer: DiTFinalLayerExecutor
 
     init(context: MetalContext, file: AnimapkFile) throws {
         block = try DiTBlockExecutor(context: context, file: file)
+        finalLayer = try DiTFinalLayerExecutor(context: context, file: file)
     }
 
     /// Mutates the tightly packed fp32 `[1024,2048]` residual in place.
@@ -27,5 +29,15 @@ final class DitForward {
                 adalnLora: adalnLora, crossContext: crossContext, rope: rope)
             try blockCompleted?(logicalIndex, residual)
         }
+    }
+
+    func executeVelocity(
+        residual: MTLBuffer, emb: MTLBuffer, adalnLora: MTLBuffer,
+        crossContext: MTLBuffer, rope: MTLBuffer, velocity: MTLBuffer
+    ) async throws {
+        try await execute(residual: residual, emb: emb, adalnLora: adalnLora,
+                          crossContext: crossContext, rope: rope)
+        try await finalLayer.execute(
+            residual: residual, emb: emb, adalnLora: adalnLora, velocity: velocity)
     }
 }
