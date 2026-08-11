@@ -34,8 +34,9 @@ kernel void dequant_w4_to_half(
     uchar b = packed[byteIdx];
     uint q = (k & 1) == 0 ? uint(b & 0x0F) : uint(b >> 4);
     uint g = k / W4_GROUP;
-    half sc = scale[r * (K + W4_GROUP - 1) / W4_GROUP + g];
-    half ze = zero[r * (K + W4_GROUP - 1) / W4_GROUP + g];
+    uint groupsPerRow = (K + W4_GROUP - 1) / W4_GROUP;
+    half sc = scale[r * groupsPerRow + g];
+    half ze = zero[r * groupsPerRow + g];
     out[r * outStride + k] = half(float(q) * float(sc) + float(ze));
 }
 
@@ -58,8 +59,9 @@ kernel void dequant_w8_to_half(
     if (k >= K || r >= rows) return;
     uint q = uint(packed[r * rowStride + k]);
     uint g = k / W4_GROUP;
-    half sc = scale[r * (K + W4_GROUP - 1) / W4_GROUP + g];
-    half ze = zero[r * (K + W4_GROUP - 1) / W4_GROUP + g];
+    uint groupsPerRow = (K + W4_GROUP - 1) / W4_GROUP;
+    half sc = scale[r * groupsPerRow + g];
+    half ze = zero[r * groupsPerRow + g];
     out[r * outStride + k] = half(float(q) * float(sc) + float(ze));
 }
 
