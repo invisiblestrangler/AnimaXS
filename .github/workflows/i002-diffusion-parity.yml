@@ -8,6 +8,8 @@ permissions:
 
 env:
   DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+  XCODEGEN_VERSION: 2.46.0
+  XCODEGEN_ZIP_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
 
 jobs:
   diffusion:
@@ -34,16 +36,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p "$RUNNER_TEMP/i002"
+          mkdir -p "$RUNNER_TEMP/i002" AnimaXSTests/Fixtures/I002Full
           gh release download i002-diffusion-temp --dir "$RUNNER_TEMP/i002"
-          mkdir -p "$RUNNER_TEMP/i002/oracle"
           tar -xzf "$RUNNER_TEMP/i002/i002-diffusion-oracle.tar.gz" \
-            -C "$RUNNER_TEMP/i002/oracle"
+            -C AnimaXSTests/Fixtures/I002Full
+          cp "$RUNNER_TEMP/i002/anima-turbo-v1.0-xsmax-w4.animapk" \
+            AnimaXSTests/Fixtures/I002Full/
           shasum -a 256 "$RUNNER_TEMP/i002/anima-turbo-v1.0-xsmax-w4.animapk"
+      - name: Regenerate ephemeral project
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+            --output "$RUNNER_TEMP/xcodegen.zip"
+          echo "${XCODEGEN_ZIP_SHA256}  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
+          ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP"
+          "$RUNNER_TEMP/xcodegen/bin/xcodegen" generate
       - name: Run eight-step production loop
-        env:
-          ANIMAXS_DIFFUSION_PACK: ${{ runner.temp }}/i002/anima-turbo-v1.0-xsmax-w4.animapk
-          ANIMAXS_DIFFUSION_ORACLE_DIR: ${{ runner.temp }}/i002/oracle
         run: |
           set -o pipefail
           xcodebuild \

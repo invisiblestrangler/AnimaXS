@@ -133,14 +133,17 @@ final class QwenEncoderMetalTests: XCTestCase {
     }
 
     func testRealW4EightStepDiffusionLoop() async throws {
-        guard let packPath = ProcessInfo.processInfo.environment["ANIMAXS_DIFFUSION_PACK"],
-              let oraclePath = ProcessInfo.processInfo.environment["ANIMAXS_DIFFUSION_ORACLE_DIR"] else {
+        let bundledPack = bundledFixture(named: "anima-turbo-v1.0-xsmax-w4.animapk")
+        let bundledInitial = bundledFixture(named: "diffusion_initial.f32")
+        guard let packURL = ProcessInfo.processInfo.environment["ANIMAXS_DIFFUSION_PACK"]
+                .map(URL.init(fileURLWithPath:)) ?? bundledPack,
+              let directory = ProcessInfo.processInfo.environment["ANIMAXS_DIFFUSION_ORACLE_DIR"]
+                .map(URL.init(fileURLWithPath:)) ?? bundledInitial?.deletingLastPathComponent() else {
             throw XCTSkip("full diffusion pack/oracle fixture not available")
         }
         guard let context = MetalContext() else {
             throw XCTSkip("SKIPPED_NO_METAL: default Metal device/library unavailable")
         }
-        let directory = URL(fileURLWithPath: oraclePath)
         let initialValues = try floats("diffusion_initial.f32", in: directory)
         let contextValues = try floats("diffusion_context.f32", in: directory)
         XCTAssertEqual(initialValues.count, DiffusionSampler.latentElements)
@@ -153,7 +156,7 @@ final class QwenEncoderMetalTests: XCTestCase {
         var completedSteps = 0
         try await DiffusionSampler(
             context: context,
-            file: AnimapkFile(url: URL(fileURLWithPath: packPath))).execute(
+            file: AnimapkFile(url: packURL)).execute(
                 initialLatent: initial, crossContext: crossContext, outputLatent: output,
                 blockProgress: { step, block in
                     if block == 27 { print("I002_DIFFUSION_BLOCKS step=\(step) completed=28") }
