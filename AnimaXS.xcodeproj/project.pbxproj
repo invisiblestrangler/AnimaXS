@@ -37,10 +37,12 @@
 		869CE73742B23D7225305BC1 /* ModelConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 684C63379028C718819607CA /* ModelConstants.swift */; };
 		89975ACE65D7BB793965DA7B /* QuantDecoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2ED51EC9A960D08D2A6835BB /* QuantDecoderTests.swift */; };
 		8E5DA5D7D9950B728513D3E5 /* GqaHeadMappingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2D891A141A49EBC60BDB3DA /* GqaHeadMappingTests.swift */; };
+		8F07F57A8F85D199B51B2F3C /* AnimapkRangeLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C22C2203066EFC03BF7FB83 /* AnimapkRangeLocator.swift */; };
 		914187C1B6254DDCA7ED3C32 /* QwenNumerics.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0EFD572B87262AE5AAEB996 /* QwenNumerics.swift */; };
 		938A4049C06BE05E39F6BCC1 /* MetalContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F6A1853CF522E32A3743ACB /* MetalContext.swift */; };
 		AF5BAAFDACD2451A4B01C9E4 /* DitRoPETests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38E139072D28862327122F48 /* DitRoPETests.swift */; };
 		B1F8396CD4627BF03101D935 /* case1_danbooru_seed1337_fixture.json in Resources */ = {isa = PBXBuildFile; fileRef = 929D59E59198EBA4F4C291AC /* case1_danbooru_seed1337_fixture.json */; };
+		B31B0A2D248ABF6D51FE0F55 /* AnimapkRangeLocatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EEF412C70729BC71E9544B8 /* AnimapkRangeLocatorTests.swift */; };
 		BD81C9C99347181C9AB1E4B2 /* DiTBlockCPU.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BA93420FE0BF5285E6DBB6D /* DiTBlockCPU.swift */; };
 		BF1511FA336984DB3696C3E4 /* t5_tokenizer_config.json in Resources */ = {isa = PBXBuildFile; fileRef = FA4C64A421E46C82C2311767 /* t5_tokenizer_config.json */; };
 		C11949003CD5B39806C65EA3 /* tokenizer_reference_ids.json in Resources */ = {isa = PBXBuildFile; fileRef = CCD024BBBC7CB75E037214B8 /* tokenizer_reference_ids.json */; };
@@ -66,6 +68,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		0C22C2203066EFC03BF7FB83 /* AnimapkRangeLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkRangeLocator.swift; sourceTree = "<group>"; };
 		0D7DEF4C7D7998D60A743925 /* TimestepEmbedder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimestepEmbedder.swift; sourceTree = "<group>"; };
 		0D9CD1A114D528F42F21C527 /* AnimaXSApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimaXSApp.swift; sourceTree = "<group>"; };
 		0F9C4BE87CB32EE0326FB3E4 /* AnimapkHeader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkHeader.swift; sourceTree = "<group>"; };
@@ -92,6 +95,7 @@
 		6EBD5ADCDE21EF89090D0058 /* DiTInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTInput.swift; sourceTree = "<group>"; };
 		745BAB5E53065E6639F8BEA2 /* ReferenceTestsPlaceholder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReferenceTestsPlaceholder.swift; sourceTree = "<group>"; };
 		7A12B10FC621499B2CA281B3 /* QuantDecoders.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuantDecoders.swift; sourceTree = "<group>"; };
+		7EEF412C70729BC71E9544B8 /* AnimapkRangeLocatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkRangeLocatorTests.swift; sourceTree = "<group>"; };
 		8094627F9958515821CFE276 /* QwenEncoderCPU.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenEncoderCPU.swift; sourceTree = "<group>"; };
 		830D15B6FF7E37A06B2C08B2 /* TestPackFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestPackFactory.swift; sourceTree = "<group>"; };
 		8DBF5298EC8B0B81AF89019C /* TokenizerLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenizerLoader.swift; sourceTree = "<group>"; };
@@ -133,6 +137,7 @@
 			children = (
 				D576867ECC53CBF14CC30F79 /* AnimapkFile.swift */,
 				0F9C4BE87CB32EE0326FB3E4 /* AnimapkHeader.swift */,
+				0C22C2203066EFC03BF7FB83 /* AnimapkRangeLocator.swift */,
 				C416E0528D650EED48130A92 /* AnimapkTensor.swift */,
 				43FB54A2EC11428E9AFC19A4 /* Crc32.swift */,
 				9DA452A409BF52C73769318E /* MappedFile.swift */,
@@ -274,6 +279,7 @@
 			isa = PBXGroup;
 			children = (
 				1506F4F789C146E6B646F18C /* AnimapkParsingTests.swift */,
+				7EEF412C70729BC71E9544B8 /* AnimapkRangeLocatorTests.swift */,
 				8DC1D4D21EFBA6FA29D885A7 /* DiTBlockTests.swift */,
 				28C2E8E80AFBE05DB0577977 /* DiTInputTests.swift */,
 				38E139072D28862327122F48 /* DitRoPETests.swift */,
@@ -406,6 +412,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				5A84CFBB6B28FE55EBE82D86 /* AnimapkParsingTests.swift in Sources */,
+				B31B0A2D248ABF6D51FE0F55 /* AnimapkRangeLocatorTests.swift in Sources */,
 				CFD7E41C92A70D6B5ED05B8A /* DiTBlockTests.swift in Sources */,
 				774F60C7B433299EA6C55C9B /* DiTInputTests.swift in Sources */,
 				AF5BAAFDACD2451A4B01C9E4 /* DitRoPETests.swift in Sources */,
@@ -432,6 +439,7 @@
 				7CD76E6444C119FE1BDBC89F /* AnimaXSApp.swift in Sources */,
 				FC52DE8FE0010D498F008967 /* AnimapkFile.swift in Sources */,
 				6047DFE4E9621A2084E5679B /* AnimapkHeader.swift in Sources */,
+				8F07F57A8F85D199B51B2F3C /* AnimapkRangeLocator.swift in Sources */,
 				7E991650CBABF20B20E112AE /* AnimapkTensor.swift in Sources */,
 				30116E9CBC6BF3DBEA66C41E /* ContentView.swift in Sources */,
 				1E52ED71A9AD8B33A91D049C /* Crc32.swift in Sources */,
