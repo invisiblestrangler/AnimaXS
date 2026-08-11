@@ -40,4 +40,13 @@ final class DitForward {
         try await finalLayer.execute(
             residual: residual, emb: emb, adalnLora: adalnLora, velocity: velocity)
     }
+
+    /// Final projection for callers that have already executed the block loop.
+    func executeVelocityFinalLayer(
+        residual: MTLBuffer, emb: MTLBuffer, adalnLora: MTLBuffer,
+        velocity: MTLBuffer
+    ) async throws {
+        try await finalLayer.execute(
+            residual: residual, emb: emb, adalnLora: adalnLora, velocity: velocity)
+    }
 }

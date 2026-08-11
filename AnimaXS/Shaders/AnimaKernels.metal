@@ -581,6 +581,22 @@ kernel void attention_softmax_rows(
 }
 
 // ---------------------------------------------------------------------------
+// FLOW model-sampling conversion (fp32): denoised = x - sigma * velocity.
+// Kept separate from Euler so the production operation order matches ComfyUI.
+// ---------------------------------------------------------------------------
+kernel void flow_velocity_to_denoised_f32(
+    device const float *x        [[buffer(0)]],
+    device const float *velocity [[buffer(1)]],
+    device float       *denoised [[buffer(2)]],
+    constant float     &sigma    [[buffer(3)]],
+    constant uint      &count    [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) return;
+    denoised[gid] = x[gid] - sigma * velocity[gid];
+}
+
+// ---------------------------------------------------------------------------
 // Euler flow step (fp32): x_next = x + dSigma * (x - denoised) / sigma
 // ---------------------------------------------------------------------------
 kernel void euler_step_f32(

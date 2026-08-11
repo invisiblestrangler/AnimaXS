@@ -3,7 +3,7 @@
 Check a task ONLY when its validation criterion passes (not when code is merely written).
 Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` blocked/cancelled.
 
-**Current execution priority:** I001/I002 sampler integration, in parallel with J001 VAE fold validation, then J002–J004 and full-pipeline integration. Do not simply choose the first unchecked item in file order. A005 gates only model-pack release; A006/D005/D006 and UI/release work can proceed when their dependency path becomes relevant.
+**Current execution priority:** finish I002 sampler integration, then J002–J004 and full-pipeline integration. Do not simply choose the first unchecked item in file order. A005 gates only model-pack release; A006/D005/D006 and UI/release work can proceed when their dependency path becomes relevant.
 
 ---
 
@@ -146,10 +146,12 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
 
 ## I — Sampler / full diffusion
 
-- [ ] **I001** — Sigma constants (9 points) + Euler FLOW update fp32 (x_next = x + (x−denoised)/σ·dσ).
+- [x] **I001** — Sigma constants (9 points) + Euler FLOW update fp32 (x_next = x + (x−denoised)/σ·dσ).
   - deps: none (CPU) · output: Sampler.swift constants + unit test · validation: matches sampler_vectors.py data
-- [ ] **I002** — 8-step loop: single model pass per step (CFG=1), latent fp32, NaN/Inf check per step, progress + checkpoint after each step.
-  - deps: I001, H007 · output: full diffusion run (conditioning may be injected for isolated DiT test) · validation: 8 step latents finite; matches step_latents within tolerance
+  - **DONE 2026-08-11.** `EulerSampler` owns the exact nine Float32 golden sigmas and separate fp32 Metal/CPU Euler implementations. Normal CI `31493950011` passed exact-schedule and eight-step zero-denoiser trajectory tests plus generic iOS shader compilation.
+- [~] **I002** — 8-step loop: single model pass per step (CFG=1), latent fp32, NaN/Inf check per step, progress + checkpoint after each step.
+  - deps: I001, H007 · output: full diffusion run (conditioning may be injected for isolated DiT test) · validation: 8 post-step latents finite; final latent parity. The existing `step_latents` fixture is internally inconsistent and cannot gate intermediate parity until regenerated with explicit callback fields (D055).
+  - **IN PROGRESS 2026-08-11.** Production Metal preparation is real-pack parity green (`31494520040`: residual cosine `0.9999999598`, embedding/AdaLN effectively 1.0, 1.67 s). `DiffusionSampler` now orchestrates adapter-fp32→DiT-fp16 context conversion once, then preparation → 28 blocks → final velocity → explicit FLOW denoised conversion → Euler, with per-block progress, finite post-step checks, and a per-step checkpoint callback. Full-pack eight-step validation remains.
 - [ ] **I003** — Production RNG: deterministic seeded generator + Box-Muller (app-deterministic, documented as not ComfyUI-identical); golden path loads init_noise_randn instead.
   - deps: none · output: SeededRNG.swift + tests · validation: same seed → same noise; std-normal stats sane
 - [ ] **I004** — Checkpoint serialization (latent fp32, step, prompt, seed, resolution, model hashes) + atomic write + resume.

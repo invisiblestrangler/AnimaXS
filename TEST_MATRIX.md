@@ -18,8 +18,8 @@ Env: `CI-sim` = GitHub Actions standard `macos-15` arm64 iOS Simulator · `CI-de
 | D007 | block-range lookup 0…27 | AnimaXSTests | RAN synthetic (`31455204105`) + real-pack audit | CI-sim/pack |
 | D008 | Qwen embedding/layer range lookup 0…27 | AnimaXSTests | RAN synthetic (`31455204105`) + real-pack audit | CI-sim/pack |
 | G003 | adapter block/final ranges + W4 embedding rows | AnimaXSTests | PASS synthetic + real-pack subset (`31492451065`) | CI-sim/pack |
-| I001 | sampler vector | AnimaXSTests | pending | CI-sim |
-| I001 | sigma constants | AnimaXSTests | pending | CI-sim |
+| I001 | sampler vector + eight-step zero-denoiser trajectory | AnimaXSTests (SmokeTests) | PASS (`31493950011`) | CI-sim |
+| I001 | exact nine Float32 sigma constants | AnimaXSTests (SmokeTests) | PASS (`31493950011`) | CI-sim |
 | I004 | checkpoint serialization | AnimaXSTests | pending | CI-sim |
 | D005 | SHA manifest | AnimaXSTests | pending | CI-sim |
 | F004 | tokenizers exact on canonical prompts | AnimaXSTests (TokenizerParityTests) | RAN (main CI `31436850938`) | CI-sim |
@@ -75,15 +75,17 @@ Env: `CI-sim` = GitHub Actions standard `macos-15` arm64 iOS Simulator · `CI-de
 | H005-B | block 0 W4 vs original BF16 golden | ACCEPTED source-proven quantization baseline: Swift 0.998712139; original BF16 source 0.999992303 (D035) | local |
 | H006 | 28 blocks finite | PASS: all 28 finite, final min/max `-5063.061`/`39658.49`, 19.46 s (`31486134420`) | CI-sim pack-backed/A12 pending |
 | H007 | final velocity `[1,16,1,64,64]` vs same-W4 oracle | PASS: finite, cosine `0.9999999646`, RMSE `0.0003068520`, maxAbs `0.001953125` (`31488934459`) | CI-sim pack-backed/A12 pending |
-| I002 | 8 step latents finite/≈ step_latents | pending | CI-sim/A12 |
+| I002 | production preparation residual/embedding/AdaLN | PASS: cosine `0.9999999598`/effectively 1.0/1.0, 1.67 s (`31494520040`) | CI-sim pack-backed |
+| I002 | explicit FLOW conversion + Euler operation contract | implemented; normal CI pending | CI-sim |
+| I002 | 8 post-step latents finite + final latent parity | pending; `step_latents` cannot be used until trace provenance defect D055 is repaired | CI-sim/A12 |
 | J002 | VAE RGB ≈ decoded_rgb | pending | CI-sim/A12 |
 | L001 | full canonical final latent | pending | CI-sim/A12 |
 
 ## Build gates
 | Gate | Status | Env |
 |------|--------|-----|
-| Xcode 26.3 generic iOS build PASS | RAN with H007 (`31488187793`) | CI-dev |
+| Xcode 26.3 generic iOS build PASS | RAN with DiT preparation/I001 (`31493950011`) | CI-dev |
 | deployment target 18.0 | RAN (static) | — |
-| Metal shaders compile | RAN with `unpatchify_velocity16` (`31488187793`) | CI-dev/CI-sim |
-| simulator unit tests PASS | 75 tests, 6 expected fixture/real-pack skips, 0 failures (`31488187793`) | CI-sim |
-| xcodegen 2.46.0 checksum + clean regeneration | PASS (`31488187793`) | CI-sim |
+| Metal shaders compile | RAN with DiT preparation/I001 (`31493950011`) | CI-dev/CI-sim |
+| simulator unit tests PASS | PASS (`31493950011`) | CI-sim |
+| xcodegen 2.46.0 checksum + clean regeneration | PASS (`31493950011`) | CI-sim |

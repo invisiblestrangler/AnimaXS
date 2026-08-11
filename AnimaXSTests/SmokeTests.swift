@@ -28,4 +28,19 @@ final class SmokeTests: XCTestCase {
         XCTAssertThrowsError(try EulerSampler.cpuStep(
             latent: [1], denoised: [0], sigma: 0, nextSigma: 0))
     }
+
+    func testFlowVelocityConversionFeedsEulerContract() throws {
+        let latent: [Float] = [1, -2, 0.5]
+        let velocity: [Float] = [0.25, 1.5, -4]
+        let denoised = try DiffusionSampler.cpuDenoised(
+            latent: latent, velocity: velocity, sigma: 0.5)
+        XCTAssertEqual(denoised, [0.875, -2.75, 2.5])
+        let next = try EulerSampler.cpuStep(
+            latent: latent, denoised: denoised, sigma: 0.5, nextSigma: 0.25)
+        for index in next.indices {
+            XCTAssertEqual(next[index], latent[index] - 0.25 * velocity[index], accuracy: 1e-7)
+        }
+        XCTAssertThrowsError(try DiffusionSampler.cpuDenoised(
+            latent: [1], velocity: [], sigma: 1))
+    }
 }
