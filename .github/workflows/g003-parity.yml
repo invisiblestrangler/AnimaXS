@@ -1,0 +1,71 @@
+name: G003 adapter parity
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+  XCODEGEN_VERSION: 2.46.0
+  XCODEGEN_ZIP_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+
+jobs:
+  adapter:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
+        with:
+          path: .derivedData/SourcePackages
+          key: animaxs-spm-${{ runner.os }}-${{ hashFiles('**/Package.resolved', 'project.yml') }}
+          restore-keys: animaxs-spm-${{ runner.os }}-
+      - name: Select toolchain and simulator
+        id: sim
+        run: |
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          if ! xcrun --find metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+            sudo xcode-select -s "$DEVELOPER_DIR"
+          fi
+          DEST=$(xcrun simctl list devices available -j \
+            | python3 -c "import sys,json;d=json.load(sys.stdin);[print(x['udid']) for v in d['devices'].values() for x in v if 'iPhone' in x['name'] and x['isAvailable']]" \
+            | head -1)
+          test -n "$DEST"
+          echo "sim=$DEST" >> "$GITHUB_OUTPUT"
+      - name: Inject adapter pack and oracle
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/g003" AnimaXSTests/Fixtures/G003
+          gh release download g003-fixture-temp \
+            --repo "${{ github.repository }}" \
+            --pattern g003-adapter-w4.animapk \
+            --pattern g003-oracle.tar.gz \
+            --dir "$RUNNER_TEMP/g003"
+          tar -xzf "$RUNNER_TEMP/g003/g003-oracle.tar.gz" -C "$RUNNER_TEMP/g003"
+          cp "$RUNNER_TEMP/g003/g003-adapter-w4.animapk" AnimaXSTests/Fixtures/G003/
+          cp -R "$RUNNER_TEMP/g003/g003-oracle/." AnimaXSTests/Fixtures/G003/
+      - name: Regenerate ephemeral fixture-bearing project
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+            --output "$RUNNER_TEMP/xcodegen.zip"
+          echo "${XCODEGEN_ZIP_SHA256}  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
+          ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP"
+          "$RUNNER_TEMP/xcodegen/bin/xcodegen" generate
+      - name: Run streamed adapter parity
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project AnimaXS.xcodeproj \
+            -scheme AnimaXS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.sim }}" \
+            -derivedDataPath .derivedData \
+            -only-testing:AnimaXSTests/QwenEncoderMetalTests/testRealW4AdapterAgainstStructuralOracle \
+            CODE_SIGNING_ALLOWED=NO \
+            test 2>&1 | tee g003-parity.log
+          grep 'G003_ADAPTER_' g003-parity.log | tee -a "$GITHUB_STEP_SUMMARY"
+        timeout-minutes: 30

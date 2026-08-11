@@ -46,6 +46,51 @@ final class QwenEncoderMetalTests: XCTestCase {
         XCTAssertTrue(metric.finite)
     }
 
+    func testRealW4AdapterAgainstStructuralOracle() async throws {
+        let bundledPack = bundledFixture(named: "g003-adapter-w4.animapk")
+        let bundledIDs = bundledFixture(named: "adapter_t5_ids.i32")
+        guard let packURL = ProcessInfo.processInfo.environment["ANIMAXS_ADAPTER_PACK"]
+                .map(URL.init(fileURLWithPath:)) ?? bundledPack,
+              let fixtureDirectory = ProcessInfo.processInfo.environment["ANIMAXS_ADAPTER_ORACLE_DIR"]
+                .map(URL.init(fileURLWithPath:)) ?? bundledIDs?.deletingLastPathComponent() else {
+            throw XCTSkip("real adapter W4 pack/oracle fixture not available")
+        }
+        guard let context = MetalContext() else {
+            throw XCTSkip("SKIPPED_NO_METAL: default Metal device/library unavailable")
+        }
+        let ids = try int32s("adapter_t5_ids.i32", in: fixtureDirectory)
+        let weights = try floats("adapter_t5_weights.f32", in: fixtureDirectory)
+        let source = try floats("adapter_context.f32", in: fixtureDirectory)
+        XCTAssertEqual(ids.count, 47)
+        XCTAssertEqual(weights.count, ids.count)
+        XCTAssertEqual(source.count, 46 * 1_024)
+        let contextBuffer = makeBuffer(source, context: context)
+        let output = try XCTUnwrap(context.device.makeBuffer(
+            length: 512 * 1_024 * 4, options: .storageModeShared))
+        let checkpoints: [Int: String] = [0: "adapter_block_00.f32", 5: "adapter_block_05.f32"]
+        let start = Date()
+        try await LLMAdapterMetal(context: context, file: AnimapkFile(url: packURL)).execute(
+            qwenContext: contextBuffer, contextTokens: 46,
+            t5IDs: ids, t5Weights: weights, output: output
+        ) { layer, residual in
+            guard let name = checkpoints[layer] else { return }
+            let expected = try self.floats(name, in: fixtureDirectory)
+            let metric = self.metrics(residual, expected)
+            print("G003_ADAPTER_LAYER_\(layer) maxAbs=\(metric.maxAbs) "
+                + "rmse=\(metric.rmse) cosine=\(metric.cosine)")
+            XCTAssertGreaterThanOrEqual(metric.cosine, 0.995)
+            XCTAssertTrue(metric.finite)
+        }
+        let expected = try floats("adapter_final_padded.f32", in: fixtureDirectory)
+        let metric = metrics(output, expected)
+        print("G003_ADAPTER_FINAL maxAbs=\(metric.maxAbs) rmse=\(metric.rmse) "
+            + "cosine=\(metric.cosine) seconds=\(Date().timeIntervalSince(start))")
+        XCTAssertGreaterThanOrEqual(metric.cosine, 0.995)
+        XCTAssertTrue(metric.finite)
+        let pointer = output.contents().bindMemory(to: Float.self, capacity: 512 * 1_024)
+        XCTAssertTrue((ids.count * 1_024..<(512 * 1_024)).allSatisfy { pointer[$0] == 0 })
+    }
+
     private func metrics(
         _ buffer: MTLBuffer, _ expected: [Float]
     ) -> (maxAbs: Double, rmse: Double, cosine: Double, finite: Bool) {
@@ -72,6 +117,21 @@ final class QwenEncoderMetalTests: XCTestCase {
             throw AnimapkError.validation("invalid Qwen fixture \(name)")
         }
         return data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+    }
+
+    private func int32s(_ name: String, in directory: URL) throws -> [Int] {
+        let data = try Data(contentsOf: directory.appendingPathComponent(name))
+        guard data.count.isMultiple(of: 4) else {
+            throw AnimapkError.validation("invalid integer fixture \(name)")
+        }
+        return data.withUnsafeBytes { Array($0.bindMemory(to: Int32.self)).map(Int.init) }
+    }
+
+    private func makeBuffer(_ values: [Float], context: MetalContext) -> MTLBuffer {
+        values.withUnsafeBytes { bytes in
+            context.device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count,
+                                      options: .storageModeShared)!
+        }
     }
 
     private func bundledFixture(named name: String) -> URL? {
