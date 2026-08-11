@@ -136,7 +136,6 @@ final class LinearExecutor {
         try encode(commandBuffer: commandBuffer, input: input, inputOffset: inputOffset,
                    weight: weight, output: output, outputOffset: outputOffset,
                    inputRows: inputRows)
-        commandBuffer.commit()
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             commandBuffer.addCompletedHandler { completed in
                 if let error = completed.error {
@@ -145,6 +144,7 @@ final class LinearExecutor {
                     continuation.resume()
                 }
             }
+            commandBuffer.commit()
         }
     }
 

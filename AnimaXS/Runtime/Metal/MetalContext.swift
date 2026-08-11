@@ -68,7 +68,6 @@ final class MetalContext {
     func runAsync(_ body: @escaping (MTLCommandBuffer) -> Void) async throws {
         let buffer = commandQueue.makeCommandBuffer()!
         body(buffer)
-        buffer.commit()
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             buffer.addCompletedHandler { cb in
                 if let err = cb.error {
@@ -77,6 +76,7 @@ final class MetalContext {
                     cont.resume()
                 }
             }
+            buffer.commit()
         }
     }
 }
