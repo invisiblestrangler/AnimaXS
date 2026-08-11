@@ -575,8 +575,10 @@ final class MetalExecutionTests: XCTestCase {
             -1.5, 0.25,
             2, -0.75,
         ]
-        let input: [Float] = (0..<columns).map {
-            sin(Float($0) * 0.37) * 1.5 + Float(($0 % 5) - 2) * 0.1
+        let input: [Float] = (0..<columns).map { column in
+            let wave = sin(Float(column) * Float(0.37)) * Float(1.5)
+            let offset = Float((column % 5) - 2) * Float(0.1)
+            return wave + offset
         }
         let pipeline = try context.pipeline(named: "w4_matvec_f32")
         let packedBuffer = makeBuffer(packed, on: context.device)
