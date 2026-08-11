@@ -267,3 +267,77 @@ struct QwenLayerLocator {
         )
     }
 }
+
+/// Prevalidated execution ranges for the six lllite adapter blocks plus its
+/// independently streamed embedding/final tensors.
+struct LLMAdapterLocator {
+    static let blockCount = 6
+    let embedding: AnimapkTensorSpans
+    let embeddingFileOffset: UInt64
+    let blocks: [AnimapkExecutionRange]
+    let final: AnimapkExecutionRange
+    private let quantGroup: Int
+
+    init(file: AnimapkFile) throws {
+        let prefix = "model.diffusion_model.llm_adapter."
+        guard let embeddingTensor = file.tensor(named: prefix + "embed.weight") else {
+            throw AnimapkError.validation("adapter embedding tensor is missing")
+        }
+        embedding = try AnimapkRangeBuilder.tensorSpans(embeddingTensor)
+        embeddingFileOffset = embeddingTensor.blobOffset
+        blocks = try AnimapkRangeBuilder.executionRanges(
+            tensors: file.tensors, prefix: prefix + "blocks.", count: Self.blockCount)
+        let finalTensorNames = Set([
+            prefix + "norm.weight", prefix + "out_proj.bias", prefix + "out_proj.weight"
+        ])
+        final = try AnimapkRangeBuilder.executionRange(
+            tensors: file.tensors.filter { finalTensorNames.contains($0.name) },
+            exactPrefix: prefix, logicalIndex: Self.blockCount)
+        guard let group = file.quantGroup, group > 0 else {
+            throw AnimapkError.validation("adapter quantization group is missing or invalid")
+        }
+        quantGroup = group
+        let finalNames = Set(final.tensors.map(\.tensor.name))
+        guard finalNames == finalTensorNames else {
+            throw AnimapkError.validation("adapter final range contains unexpected tensors")
+        }
+    }
+
+    func block(_ logicalIndex: Int) throws -> AnimapkExecutionRange {
+        guard blocks.indices.contains(logicalIndex) else {
+            throw AnimapkError.validation("adapter block index \(logicalIndex) is out of range")
+        }
+        return blocks[logicalIndex]
+    }
+
+    func embeddingRow(_ row: Int) throws -> AnimapkQuantizedRowSpans {
+        let tensor = embedding.tensor
+        guard tensor.shape.count == 2, tensor.storage == .w4 else {
+            throw AnimapkError.validation("adapter embedding must be rank-2 W4")
+        }
+        let rows = tensor.shape[0], columns = tensor.shape[1]
+        guard rows > 0, row >= 0, row < rows, columns > 0, columns.isMultiple(of: 2) else {
+            throw AnimapkError.validation("adapter embedding row \(row) is out of range")
+        }
+        let dataBytesPerRow = UInt64(columns / 2)
+        let groupsPerRow = (columns + quantGroup - 1) / quantGroup
+        let parameterBytesPerRow = UInt64(groupsPerRow * MemoryLayout<UInt16>.size)
+        guard embedding.data.length == UInt64(rows) * dataBytesPerRow,
+              embedding.scale?.length == UInt64(rows) * parameterBytesPerRow,
+              embedding.zero?.length == UInt64(rows) * parameterBytesPerRow,
+              let scale = embedding.scale, let zero = embedding.zero else {
+            throw AnimapkError.validation("adapter embedding row layout does not match metadata")
+        }
+        return AnimapkQuantizedRowSpans(
+            row: row,
+            data: AnimapkRelativeSpan(
+                offset: embedding.data.offset + UInt64(row) * dataBytesPerRow,
+                length: dataBytesPerRow),
+            scale: AnimapkRelativeSpan(
+                offset: scale.offset + UInt64(row) * parameterBytesPerRow,
+                length: parameterBytesPerRow),
+            zero: AnimapkRelativeSpan(
+                offset: zero.offset + UInt64(row) * parameterBytesPerRow,
+                length: parameterBytesPerRow))
+    }
+}

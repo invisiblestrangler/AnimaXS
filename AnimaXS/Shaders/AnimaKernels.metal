@@ -261,6 +261,41 @@ kernel void gated_silu_half(
     out[gid] = half((x / (1.0f + exp(-x))) * float(up[gid]));
 }
 
+// Adapter MLP boundary: Linear and bias are fp16 model parameters/activations,
+// while exact GELU is evaluated in fp32 before rounding back to fp16.
+kernel void bias_gelu_half(
+    device half *values [[buffer(0)]],
+    device const half *bias [[buffer(1)]],
+    constant uint &columns [[buffer(2)]],
+    constant uint &count [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) return;
+    float x = float(values[gid]) + float(bias[gid % columns]);
+    values[gid] = half(0.5f * x * (1.0f + erf_f32(x * 0.7071067811865475f)));
+}
+
+kernel void add_bias_half(
+    device half *values [[buffer(0)]],
+    device const half *bias [[buffer(1)]],
+    constant uint &columns [[buffer(2)]],
+    constant uint &count [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid < count) values[gid] += bias[gid % columns];
+}
+
+kernel void add_bias_half_into_float(
+    device float *residual [[buffer(0)]],
+    device const half *branch [[buffer(1)]],
+    device const half *bias [[buffer(2)]],
+    constant uint &columns [[buffer(3)]],
+    constant uint &count [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid < count) residual[gid] += float(branch[gid]) + float(bias[gid % columns]);
+}
+
 // AdaLN: normalized * (1 + scale) + shift, all fp32; vectors broadcast by N.
 kernel void modulate_f32(
     device const float *normalized [[buffer(0)]],
@@ -382,6 +417,74 @@ kernel void rms_rope_split_half(
     float sine = rope[ropeBase + 2];
     out[base + p] = half(c * a + negativeSine * b);
     out[base + p + 64] = half(sine * a + c * b);
+}
+
+// LLM adapter Q/K norm + rotate_half RoPE. Adapter heads are 64 wide and its
+// theta-10000 rope therefore contains 32 two-dimensional rotation blocks/token.
+kernel void rms_rope_adapter64(
+    device const half *in [[buffer(0)]],
+    device const half *weight [[buffer(1)]],
+    device const float *rope [[buffer(2)]], // [tokens,32,2,2]
+    device half *out [[buffer(3)]],
+    constant uint &tokens [[buffer(4)]],
+    constant uint &heads [[buffer(5)]],
+    constant float &eps [[buffer(6)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint p [[thread_index_in_threadgroup]])
+{
+    uint row = group.x;
+    if (row >= tokens * heads || p >= 32) return;
+    uint token = row / heads;
+    uint base = row * 64;
+    float first = float(in[base + p]);
+    float second = float(in[base + p + 32]);
+    threadgroup float partial[32];
+    partial[p] = fma(first, first, second * second);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 16; stride > 0; stride >>= 1) {
+        if (p < stride) partial[p] += partial[p + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inv = rsqrt(partial[0] / 64.0f + eps);
+    float a = first * inv * float(weight[p]);
+    float b = second * inv * float(weight[p + 32]);
+    uint ropeBase = (token * 32 + p) * 4;
+    out[base + p] = half(rope[ropeBase] * a + rope[ropeBase + 1] * b);
+    out[base + p + 32] = half(rope[ropeBase + 2] * a + rope[ropeBase + 3] * b);
+}
+
+// Final adapter RMSNorm and per-token T5 weighting. Padding is zeroed by the
+// caller before dispatch, so only the real target rows are written.
+kernel void rmsnorm_half_to_weighted_f32(
+    device const half *in [[buffer(0)]],
+    device const half *weight [[buffer(1)]],
+    device const float *tokenWeight [[buffer(2)]],
+    device float *out [[buffer(3)]],
+    constant uint &rows [[buffer(4)]],
+    constant float &eps [[buffer(5)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint3 threads [[threads_per_threadgroup]])
+{
+    uint row = group.x;
+    if (row >= rows) return;
+    threadgroup float partial[256];
+    float sum = 0.0f;
+    for (uint d = tid; d < 1024; d += threads.x) {
+        float value = float(in[row * 1024 + d]);
+        sum = fma(value, value, sum);
+    }
+    partial[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threads.x >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inv = rsqrt(partial[0] / 1024.0f + eps);
+    float multiplier = tokenWeight[row];
+    for (uint d = tid; d < 1024; d += threads.x) {
+        out[row * 1024 + d] = float(in[row * 1024 + d]) * inv * float(weight[d]) * multiplier;
+    }
 }
 
 // ---------------------------------------------------------------------------

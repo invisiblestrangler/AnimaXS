@@ -766,4 +766,33 @@ final class MetalExecutionTests: XCTestCase {
             XCTAssertEqual(Float(actual[index]), expected, accuracy: 0)
         }
     }
+
+    func testAdapterBiasExactGELUHalfExecutes() throws {
+        let context = try requireContext()
+        let values: [Float16] = [-2, -0.5, 0, 1, 3, -1]
+        let bias: [Float16] = [0.25, -0.5, 1]
+        let valueBuffer = makeBuffer(values, on: context.device)
+        let biasBuffer = makeBuffer(bias, on: context.device)
+        let pipeline = try context.pipeline(named: "bias_gelu_half")
+        let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let encoder = try XCTUnwrap(command.makeComputeCommandEncoder())
+        var columns = UInt32(bias.count), count = UInt32(values.count)
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(valueBuffer, offset: 0, index: 0)
+        encoder.setBuffer(biasBuffer, offset: 0, index: 1)
+        encoder.setBytes(&columns, length: 4, index: 2)
+        encoder.setBytes(&count, length: 4, index: 3)
+        encoder.dispatchThreads(MTLSize(width: values.count, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: values.count, height: 1, depth: 1))
+        encoder.endEncoding()
+        command.commit()
+        command.waitUntilCompleted()
+        XCTAssertNil(command.error)
+        let actual = valueBuffer.contents().bindMemory(to: Float16.self, capacity: values.count)
+        for index in values.indices {
+            let x = Float(values[index]) + Float(bias[index % bias.count])
+            let expected = Float(Float16(0.5 * x * (1 + Float(erf(Double(x) / sqrt(2))))))
+            XCTAssertEqual(Float(actual[index]), expected, accuracy: 0.001)
+        }
+    }
 }
