@@ -57,10 +57,7 @@ enum ModelConstants {
     static let adapterRmsNormEps: Float = 1e-6
 
     // Sampler
-    static let sigma8Step: [Float] = [
-        1.0, 0.95469, 0.90036, 0.834, 0.75112,
-        0.64469, 0.50299, 0.30501, 0.0
-    ]
+    static let sigma8Step = EulerSampler.sigmas
     static let samplerSteps = 8
     static let cfg: Float = 1.0
     static let shift: Float = 3.0

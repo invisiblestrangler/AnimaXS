@@ -93,7 +93,7 @@ Resolved discrepancies are recorded in `DECISIONS.md` and override stale handoff
 
 ## Current implementation checkpoint (2026-08-11)
 
-The parser, CPU quantized references, tokenizer parity, Qwen CPU reference, adapter CPU reference, DiT input/timestep/modulation/RoPE, and CPU DiT block 0 oracle are implemented and numerically validated through H005. These CPU implementations are correctness oracles, not the production inference architecture.
+The parser, CPU correctness oracles, tokenizer parity, streamed Metal Qwen/adapter, and complete streamed Metal DiT path through final velocity are implemented and numerically validated through G003/H007. CPU implementations remain correctness oracles, not the production inference architecture.
 
 The production Metal DiT path is validated through H007. Do **not** replace it with `DiTBlockCPU` or retain fully dequantized weights in nested Swift arrays. Continue from the completed vertical slice:
 
@@ -105,7 +105,7 @@ D007 block/tensor range locator with mmap-backed spans
 → H006 streamed 28-block Metal loop
 → H007 streamed final layer + source-order velocity unpatchify
 → D008/F007 streamed Metal Qwen
-→ G003 streamed Metal adapter
+→ G003 streamed Metal adapter (complete)
 ```
 
 Normal GitHub Actions simulator CI has been verified to execute both a project Metal kernel and `MPSMatrixMultiplication` on the standard `macos-15` arm64 runner (final snapshot run `31452206651`). Put all pack-free functional Metal/MPS tests in the normal simulator test target. A physical XS Max remains mandatory only for A12-specific performance, memory, thermal, watchdog, and device-family acceptance.

@@ -35,14 +35,14 @@ final class QwenEncoderMetalTests: XCTestCase {
             let metric = self.metrics(residual, expected)
             print("F007_QWEN_LAYER_\(layer) maxAbs=\(metric.maxAbs) "
                 + "rmse=\(metric.rmse) cosine=\(metric.cosine)")
-            XCTAssertGreaterThanOrEqual(metric.cosine, 0.995)
+            XCTAssertGreaterThanOrEqual(metric.cosine, 0.999)
             XCTAssertTrue(metric.finite)
         }
         let expected = try floats("qwen_final.f32", in: fixtureDirectory)
         let metric = metrics(output, expected)
         print("F007_QWEN_FINAL maxAbs=\(metric.maxAbs) rmse=\(metric.rmse) "
             + "cosine=\(metric.cosine) seconds=\(Date().timeIntervalSince(start))")
-        XCTAssertGreaterThanOrEqual(metric.cosine, 0.995)
+        XCTAssertGreaterThanOrEqual(metric.cosine, 0.999)
         XCTAssertTrue(metric.finite)
     }
 
@@ -78,14 +78,14 @@ final class QwenEncoderMetalTests: XCTestCase {
             let metric = self.metrics(residual, expected)
             print("G003_ADAPTER_LAYER_\(layer) maxAbs=\(metric.maxAbs) "
                 + "rmse=\(metric.rmse) cosine=\(metric.cosine)")
-            XCTAssertGreaterThanOrEqual(metric.cosine, 0.995)
+            XCTAssertGreaterThanOrEqual(metric.cosine, 0.999)
             XCTAssertTrue(metric.finite)
         }
         let expected = try floats("adapter_final_padded.f32", in: fixtureDirectory)
         let metric = metrics(output, expected)
         print("G003_ADAPTER_FINAL maxAbs=\(metric.maxAbs) rmse=\(metric.rmse) "
             + "cosine=\(metric.cosine) seconds=\(Date().timeIntervalSince(start))")
-        XCTAssertGreaterThanOrEqual(metric.cosine, 0.995)
+        XCTAssertGreaterThanOrEqual(metric.cosine, 0.999)
         XCTAssertTrue(metric.finite)
         let pointer = output.contents().bindMemory(to: Float.self, capacity: 512 * 1_024)
         XCTAssertTrue((ids.count * 1_024..<(512 * 1_024)).allSatisfy { pointer[$0] == 0 })

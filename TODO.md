@@ -3,7 +3,7 @@
 Check a task ONLY when its validation criterion passes (not when code is merely written).
 Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` blocked/cancelled.
 
-**Current execution priority:** F007, then G003 and the sampler/integration dependency path. Do not simply choose the first unchecked item in file order. A005 gates only model-pack release; A006/D005/D006 and UI/release work can proceed when their dependency path becomes relevant.
+**Current execution priority:** I001/I002 sampler integration, in parallel with J001 VAE fold validation, then J002–J004 and full-pipeline integration. Do not simply choose the first unchecked item in file order. A005 gates only model-pack release; A006/D005/D006 and UI/release work can proceed when their dependency path becomes relevant.
 
 ---
 
@@ -104,8 +104,9 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
 - [x] **F006** — Qwen layer internals: GQA 16/8 head broadcast, per-head Q/K RMSNorm (gemma3), causal mask exact, RoPE theta 1e6.
   - deps: F005 · output: verified layer math · validation: per-layer cosine ≥ 0.999 vs reference where available
   - **DONE 2026-08-10.** GQA 16/8 grouped broadcast (`kvHead = qHead / 2`, D018), gemma3 per-head Q/K RMSNorm, causal mask, half-split RoPE theta 1e6 all validated against pinned-ComfyUI oracle; per-layer oracle outputs saved (scripts/oracle_out/qwen_oracle_layers.npz). Regression test GqaHeadMappingTests.
-- [ ] **F007** — Production streamed Metal Qwen encoder: gather only requested W8 embedding rows, one Qwen layer range at a time, reusable buffers, final RMSNorm.
+- [x] **F007** — Production streamed Metal Qwen encoder: gather only requested W8 embedding rows, one Qwen layer range at a time, reusable buffers, final RMSNorm.
   - deps: D008, E002–E008, F005–F006 · output: `QwenEncoderMetal.swift`/executor · validation: bounded memory, no large Swift arrays/Data copies, finite, and same-W8 parity against F005 at layer checkpoints/final context; pack-backed hosted CI plus A12 acceptance
+  - **DONE 2026-08-11.** Hosted real-W8 run `31491046871`: layer 0/15/27 cosine `0.9999995091`/`0.9999999958`/`0.9999992347`; final cosine **0.9999992405**, RMSE `0.00430097`, maxAbs `0.172913`, 5.19 s. It gathers selected rows, streams one ~16 MB layer, uses grouped 16Q/8KV attention, and keeps fp32 residuals. A12 acceptance remains pending.
 
 ## G — LLM adapter
 
@@ -115,8 +116,9 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
 - [x] **G002** — Resolve from pinned source (not handoff guess): adapter MLP activation, self-attn causality, cross-attn mask, RoPE placement, norm order, bias behavior.
   - deps: G001 · output: DECISIONS entry + code comments · validation: source-cited, matches reference numerics
   - **DONE 2026-08-10.** All resolved from `comfy/ldm/anima/model.py` (see D021): MLP = exact GELU (nn.GELU, not SiLU); self-attn = MHA 16/16 bidirectional (no causal mask, target_attention_mask=None); cross-attn = MHA over Qwen context (source_attention_mask=None); RoPE = INTERLEAVED (rotate_half, HF-style), theta 10000, applied to Q&K of both attns (DIFFERS from Qwen's half-split); norm = RMSNorm(eps 1e-6) before each attn + before MLP + final after out_proj; biases: out_proj + MLP have bias, attn projections do NOT.
-- [ ] **G003** — Production Metal LLM adapter: row-gather W4 T5 embeddings, six bounded-memory blocks, out projection/RMSNorm/T5 weighting, zero-pad to `[1,512,1024]`.
+- [x] **G003** — Production Metal LLM adapter: row-gather W4 T5 embeddings, six bounded-memory blocks, out projection/RMSNorm/T5 weighting, zero-pad to `[1,512,1024]`.
   - deps: D007 span primitives, E002–E008, F007, G001–G002 · output: `LLMAdapterMetal.swift`/executor · validation: no full embedding or nested Swift matrices, same-W4 parity against G001, all finite, padded tail exactly zero
+  - **DONE 2026-08-11.** Hosted real-W4 subset run `31492451065`: layer 0/5 cosine `0.9999997571`/`0.9999991391`; final cosine **0.9999984505**, RMSE `9.579e-5`, maxAbs `0.00190943`, 1.46 s; all 465 padded rows exactly zero. One ~9.6 MB block ring, selected embedding rows, exact GELU/bias, and fp32 residuals are retained. A12 acceptance remains pending.
 
 ## H — DiT
 

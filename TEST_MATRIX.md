@@ -17,6 +17,7 @@ Env: `CI-sim` = GitHub Actions standard `macos-15` arm64 iOS Simulator · `CI-de
 | D001 | fp16 tensor reader | AnimaXSTests | RAN (main CI `31436850938`) | CI-sim |
 | D007 | block-range lookup 0…27 | AnimaXSTests | RAN synthetic (`31455204105`) + real-pack audit | CI-sim/pack |
 | D008 | Qwen embedding/layer range lookup 0…27 | AnimaXSTests | RAN synthetic (`31455204105`) + real-pack audit | CI-sim/pack |
+| G003 | adapter block/final ranges + W4 embedding rows | AnimaXSTests | PASS synthetic + real-pack subset (`31492451065`) | CI-sim/pack |
 | I001 | sampler vector | AnimaXSTests | pending | CI-sim |
 | I001 | sigma constants | AnimaXSTests | pending | CI-sim |
 | I004 | checkpoint serialization | AnimaXSTests | pending | CI-sim |
@@ -53,15 +54,17 @@ Env: `CI-sim` = GitHub Actions standard `macos-15` arm64 iOS Simulator · `CI-de
 | E007 | MPS precision K=2048/8192 | PASS; MPS cosine ≥ `0.999999975`, maxAbs ≤ `1.76e-4` (`31482950188`) | CI-sim; A12 repeat pending |
 | E009 | production Metal block 0 vs H005 same-W4 oracle | PASS: cosine `0.9999999798`, RMSE `3.750e-4`, maxAbs `2.190e-2` (`31485374918`) | CI-sim pack-backed |
 | H007 | final-layer exact range, fp16 boundaries, projection and 64-wide source-order unpatchify | PASS synthetic normal CI `31488187793`; real W4 cosine `0.9999999646`, RMSE `3.069e-4`, maxAbs `1.953e-3` (`31488934459`) | CI-sim/pack-backed |
+| F007 | streamed W8 Qwen, grouped GQA, selected embedding rows, final norm | PASS final cosine `0.9999992405`, RMSE `0.004301`, 5.19 s (`31491046871`) | CI-sim pack-backed; A12 pending |
+| G003 | streamed W4 adapter, bias+exact GELU, 64-d RoPE, weighted norm/padding | PASS final cosine `0.9999984505`, RMSE `9.579e-5`, 1.46 s (`31492451065`) | CI-sim pack-backed; A12 pending |
 
 ## Model integration
 | ID | Test | Status | Env |
 |----|------|--------|-----|
 | F005 | TE final context ≈ golden (cosine 0.992, structural 1.0 vs oracle) | RAN (harness, real pack) | local |
-| F007 | streamed Metal TE ≈ F005 same-W8 oracle | pending | manual pack-backed CI/A12 |
+| F007 | streamed Metal TE ≈ F005 same-W8 oracle | PASS final cosine `0.9999992405`; layers 0/15/27 pass (`31491046871`) | manual pack-backed CI; A12 pending |
 | G001 | adapter conditioning [1,512,1024] ≈ oracle (cosine 1.000000) | RAN (harness, real pack) | local |
 | G001 | adapter output finite + padded tail zero | RAN (harness, real pack) | local |
-| G003 | streamed Metal adapter ≈ G001 same-W4 oracle | pending | manual pack-backed CI/A12 |
+| G003 | streamed Metal adapter ≈ G001 same-W4 oracle | PASS final cosine `0.9999984505`; exact zero tail (`31492451065`) | manual pack-backed CI; A12 pending |
 | H001 | DiT input x_embedder [1024,2048] ≈ corrected row-aware oracle (cosine 1.000000, maxAbs 3.58e-7) | RAN (harness, real pack) | local |
 | H002 | timestep embedding + adaln [6144] ≈ oracle (cosine 1.000000, all finite) | RAN (harness, real pack) | local |
 | H003 | AdaLN shift/scale/gate all branches ≈ oracle (cosine 1.000000, all finite) | RAN (harness, real pack) | local |
