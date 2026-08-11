@@ -54,6 +54,47 @@ final class DiTFinalLayerExecutorTests: XCTestCase {
         print("H007_FINAL_LAYER_SYNTHETIC=PASS rangeBytes=\(located.length)")
     }
 
+    func testRealFinalLayerAgainstSameW4Oracle() async throws {
+        let environment = ProcessInfo.processInfo.environment
+        let bundled = bundledFixture(named: "h007_final.animapk")?.deletingLastPathComponent()
+        guard let directory = environment["ANIMAXS_H007_FIXTURE_DIR"]
+                .map(URL.init(fileURLWithPath:)) ?? bundled else {
+            throw XCTSkip("H007 real-weight fixture not available")
+        }
+        guard let context = MetalContext() else {
+            throw XCTSkip("SKIPPED_NO_METAL: default Metal device/library unavailable")
+        }
+        let file = try AnimapkFile(url: directory.appendingPathComponent("h007_final.animapk"))
+        let residualValues = try floats("h007_residual.f32", in: directory)
+        let expected = try floats("h007_expected.f32", in: directory)
+        let residual = buffer(residualValues, context: context)
+        let emb = buffer(try floats("h007_emb.f32", in: directory), context: context)
+        let adaln = buffer(try floats("h007_adaln.f32", in: directory), context: context)
+        let velocity = try sharedBuffer(bytes: expected.count * 4, context: context)
+
+        try await DiTFinalLayerExecutor(context: context, file: file).execute(
+            residual: residual, emb: emb, adalnLora: adaln, velocity: velocity)
+
+        let actual = velocity.contents().bindMemory(to: Float.self, capacity: expected.count)
+        var maxAbsolute = 0.0, squareError = 0.0
+        var dot = 0.0, actualNorm = 0.0, expectedNorm = 0.0
+        for index in expected.indices {
+            let a = Double(actual[index]), e = Double(expected[index])
+            XCTAssertTrue(a.isFinite)
+            let error = abs(a - e)
+            maxAbsolute = max(maxAbsolute, error)
+            squareError += error * error
+            dot += a * e
+            actualNorm += a * a
+            expectedNorm += e * e
+        }
+        let rmse = sqrt(squareError / Double(expected.count))
+        let cosine = dot / sqrt(actualNorm * expectedNorm)
+        print("H007_FINAL_REAL maxAbs=\(maxAbsolute) rmse=\(rmse) cosine=\(cosine)")
+        XCTAssertGreaterThanOrEqual(cosine, 0.999)
+        XCTAssertLessThan(rmse, 0.1)
+    }
+
     private func zeroW4(_ name: String, rows: Int, columns: Int) -> TestPackFactory.BlobSpec {
         let groups = (columns + 63) / 64
         return TestPackFactory.BlobSpec(
@@ -69,5 +110,28 @@ final class DiTFinalLayerExecutorTests: XCTestCase {
             length: bytes, options: .storageModeShared))
         memset(buffer.contents(), 0, bytes)
         return buffer
+    }
+
+    private func buffer<T>(_ values: [T], context: MetalContext) -> MTLBuffer {
+        values.withUnsafeBytes {
+            context.device.makeBuffer(bytes: $0.baseAddress!, length: $0.count,
+                                      options: .storageModeShared)!
+        }
+    }
+
+    private func floats(_ name: String, in directory: URL) throws -> [Float] {
+        let data = try Data(contentsOf: directory.appendingPathComponent(name))
+        guard data.count.isMultiple(of: 4) else {
+            throw AnimapkError.validation("invalid H007 fixture \(name)")
+        }
+        return data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+    }
+
+    private func bundledFixture(named name: String) -> URL? {
+        guard let root = Bundle(for: Self.self).resourceURL,
+              let enumerator = FileManager.default.enumerator(
+                at: root, includingPropertiesForKeys: nil) else { return nil }
+        for case let url as URL in enumerator where url.lastPathComponent == name { return url }
+        return nil
     }
 }
