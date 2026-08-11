@@ -126,4 +126,33 @@ final class SmokeTests: XCTestCase {
         XCTAssertTrue(try installed.resourceValues(
             forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup ?? false)
     }
+
+    func testWanVAENumerics() throws {
+        var latent = [Float](repeating: 0, count: 16)
+        latent[0] = 0.5
+        let decoded = try VAENumerics.decodeLatent(latent)
+        XCTAssertEqual(decoded[0], ModelConstants.latentsStd[0] + ModelConstants.latentsMean[0],
+                       accuracy: 1e-6)
+        XCTAssertEqual(decoded[1], ModelConstants.latentsMean[1], accuracy: 1e-6)
+
+        let normalized = try VAENumerics.channelRMSNorm(
+            [3, 0, 4, 0], gamma: [1, 2], channels: 2, spatial: 2)
+        XCTAssertEqual(normalized[0], Float(3.0 / 5.0 * sqrt(2.0)), accuracy: 1e-6)
+        XCTAssertEqual(normalized[2], Float(4.0 / 5.0 * sqrt(2.0) * 2.0), accuracy: 1e-6)
+        XCTAssertEqual(normalized[1], 0, accuracy: 0)
+        XCTAssertEqual(normalized[3], 0, accuracy: 0)
+
+        XCTAssertEqual(VAENumerics.silu([0])[0], 0, accuracy: 0)
+        XCTAssertEqual(
+            try VAENumerics.nearestExact2x([1, 2, 3, 4], channels: 1, height: 2, width: 2),
+            [1, 1, 2, 2, 1, 1, 2, 2, 3, 3, 4, 4, 3, 3, 4, 4])
+    }
+
+    func testRGBConversionClampsAndUsesCHWOrder() throws {
+        let rgba = try RGBConverter.rgba8(
+            [-1, 1, 0, 2, -2, 0], width: 2, height: 1)
+        XCTAssertEqual(rgba, [0, 128, 0, 255, 255, 255, 128, 255])
+        XCTAssertEqual(try RGBConverter.image(
+            [-1, 1, 0, 2, -2, 0], width: 2, height: 1).size.width, 2)
+    }
 }
