@@ -49,6 +49,13 @@ final class SmokeTests: XCTestCase {
         var repeatSeed = SeededRNG(seed: 1_337)
         var other = SeededRNG(seed: 1_338)
         let a = try first.normal(count: 100_000)
+        let expectedPrefix: [Float] = [
+            0.22878295, -0.78915966, -1.7395047, 0.3901934,
+            -0.89549154, -1.4645813, 1.1782961, 0.78697103,
+        ]
+        for (actual, expected) in zip(a.prefix(expectedPrefix.count), expectedPrefix) {
+            XCTAssertEqual(actual, expected, accuracy: 1e-6)
+        }
         XCTAssertEqual(a, try repeatSeed.normal(count: 100_000))
         XCTAssertNotEqual(Array(a.prefix(16)), try other.normal(count: 16))
         let mean = a.reduce(0.0) { $0 + Double($1) } / Double(a.count)

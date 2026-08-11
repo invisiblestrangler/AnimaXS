@@ -36,8 +36,11 @@ actor ModelStore {
             return temporary
         }
         self.availableCapacity = availableCapacity ?? { url in
-            let values = try url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-            return values.volumeAvailableCapacityForImportantUsage ?? 0
+            let values = try url.resourceValues(forKeys: [
+                .volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey,
+            ])
+            return values.volumeAvailableCapacityForImportantUsage
+                ?? Int64(values.volumeAvailableCapacity ?? 0)
         }
         try FileManager.default.createDirectory(
             at: self.directory, withIntermediateDirectories: true)
