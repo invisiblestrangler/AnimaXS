@@ -96,10 +96,10 @@ final class VAEDecoder {
             let groupIndex = 5 + module
             let group = try locator.group(groupIndex)
             let nextKey = xInA ? "vae.activation.b" : "vae.activation.a"
-            let isResample = try requireTensorSpan(group, suffix: ".resample.1.weight") != nil
+            let isResample = try requireTensorSpan(group.range, suffix: ".resample.1.weight") != nil
             if isResample {
                 // Resample module: fused nearest-exact 2x + 3x3 Cin -> Cout.
-                let rs = try requireTensorSpan(group, suffix: ".resample.1.weight")
+                let rs = try requireTensorSpan(group.range, suffix: ".resample.1.weight")
                 let inC = rs.tensor.shape[1]
                 let outC = rs.tensor.shape[0]
                 let next = activation(key: nextKey, positions: height * width * 4, channels: outC)
@@ -112,8 +112,8 @@ final class VAEDecoder {
                 width *= 2
             } else {
                 // Residual-only module.
-                let hasShortcut = try requireTensorSpan(group, suffix: ".shortcut.weight") != nil
-                let w2Shape = try requireTensorSpan(group, suffix: ".residual.2.weight").tensor.shape
+                let hasShortcut = try requireTensorSpan(group.range, suffix: ".shortcut.weight") != nil
+                let w2Shape = try requireTensorSpan(group.range, suffix: ".residual.2.weight").tensor.shape
                 let inC = w2Shape[1]
                 let outC = w2Shape[0]
                 x = try await runResidual(groupIndex: groupIndex, input: x,
@@ -150,15 +150,15 @@ extension VAEDecoder {
         guard let command = context.commandQueue.makeCommandBuffer() else {
             throw AnimapkError.validation("failed to create VAE 1x1 group command buffer")
         }
-        let weight = try requireTensorSpan(group, suffix: ".weight")
-        let bias = try requireTensorSpan(group, suffix: ".bias")
+        let weight = try requireTensorSpan(group.range, suffix: ".weight")
+        let bias = try requireTensorSpan(group.range, suffix: ".bias")
         let rowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: inputChannels, dataType: .float16)
         let folded = try convolution.encodeFoldWeight(
             commandBuffer: command, source: streamer.ring,
             sourceOffset: Int(weight.data.offset), shape: weight.tensor.shape,
             outputRowStrideElements: rowBytes / 2, scratchKey: "vae.weight.1x1")
         try convolution.encode1x1(
-            commandBuffer: command, input: input, weight: folded,
+            commandBuffer: command, input: input, weight: folded, weightOffset: 0,
             output: output, rows: positions,
             inputChannels: inputChannels, outputChannels: outputChannels)
         try encodeAddBias(command: command, output: output,
@@ -179,8 +179,8 @@ extension VAEDecoder {
         guard let command = context.commandQueue.makeCommandBuffer() else {
             throw AnimapkError.validation("failed to create VAE 3x3 group command buffer")
         }
-        let weight = try requireTensorSpan(group, suffix: ".weight")
-        let bias = try requireTensorSpan(group, suffix: ".bias")
+        let weight = try requireTensorSpan(group.range, suffix: ".weight")
+        let bias = try requireTensorSpan(group.range, suffix: ".bias")
         let columns = inputChannels * 9
         let rowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: columns, dataType: .float16)
         let folded = try convolution.encodeFoldWeight(
@@ -188,7 +188,7 @@ extension VAEDecoder {
             sourceOffset: Int(weight.data.offset), shape: weight.tensor.shape,
             outputRowStrideElements: rowBytes / 2, scratchKey: "vae.weight.3x3")
         try convolution.encode3x3(
-            commandBuffer: command, input: input, weight: folded,
+            commandBuffer: command, input: input, weight: folded, weightOffset: 0,
             bias: streamer.ring, biasOffset: Int(bias.data.offset),
             output: output, inputHeight: height, inputWidth: width,
             outputChannels: outputChannels, inputChannels: inputChannels)
@@ -228,9 +228,9 @@ extension VAEDecoder {
         }
 
         // Stage 1: RMS(g0) -> SiLU -> 3x3 w2/b2 (workA -> workB)
-        let g0 = try requireTensorSpan(group, suffix: ".residual.0.gamma")
-        let w2 = try requireTensorSpan(group, suffix: ".residual.2.weight")
-        let b2 = try requireTensorSpan(group, suffix: ".residual.2.bias")
+        let g0 = try requireTensorSpan(group.range, suffix: ".residual.0.gamma")
+        let w2 = try requireTensorSpan(group.range, suffix: ".residual.2.weight")
+        let b2 = try requireTensorSpan(group.range, suffix: ".residual.2.bias")
         let columns2 = inChannels * 9
         let rowBytes2 = MPSMatrixDescriptor.rowBytes(fromColumns: columns2, dataType: .float16)
         let folded2 = try convolution.encodeFoldWeight(
@@ -242,15 +242,15 @@ extension VAEDecoder {
                              positions: positions, channels: inChannels)
         try encodeSiluHalf(command: command, input: workA, output: workA, count: positions * inChannels)
         try convolution.encode3x3(
-            commandBuffer: command, input: workA, weight: folded2,
+            commandBuffer: command, input: workA, weight: folded2, weightOffset: 0,
             bias: streamer.ring, biasOffset: Int(b2.data.offset),
             output: workB, inputHeight: height, inputWidth: width,
             outputChannels: outChannels, inputChannels: inChannels)
 
         // Stage 2: RMS(g3) -> SiLU -> 3x3 w6/b6 (workB -> workA)
-        let g3 = try requireTensorSpan(group, suffix: ".residual.3.gamma")
-        let w6 = try requireTensorSpan(group, suffix: ".residual.6.weight")
-        let b6 = try requireTensorSpan(group, suffix: ".residual.6.bias")
+        let g3 = try requireTensorSpan(group.range, suffix: ".residual.3.gamma")
+        let w6 = try requireTensorSpan(group.range, suffix: ".residual.6.weight")
+        let b6 = try requireTensorSpan(group.range, suffix: ".residual.6.bias")
         let columns6 = outChannels * 9
         let rowBytes6 = MPSMatrixDescriptor.rowBytes(fromColumns: columns6, dataType: .float16)
         let folded6 = try convolution.encodeFoldWeight(
@@ -262,22 +262,22 @@ extension VAEDecoder {
                              positions: positions, channels: outChannels)
         try encodeSiluHalf(command: command, input: workA, output: workA, count: positions * outChannels)
         try convolution.encode3x3(
-            commandBuffer: command, input: workA, weight: folded6,
+            commandBuffer: command, input: workA, weight: folded6, weightOffset: 0,
             bias: streamer.ring, biasOffset: Int(b6.data.offset),
             output: workB, inputHeight: height, inputWidth: width,
             outputChannels: outChannels, inputChannels: outChannels)
 
         // Shortcut (in != out): 1x1 conv from input into output.
         if hasShortcut {
-            let sc = try requireTensorSpan(group, suffix: ".shortcut.weight")
-            let scb = try requireTensorSpan(group, suffix: ".shortcut.bias")
+            let sc = try requireTensorSpan(group.range, suffix: ".shortcut.weight")
+            let scb = try requireTensorSpan(group.range, suffix: ".shortcut.bias")
             let rowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: inChannels, dataType: .float16)
             let foldedShortcut = try convolution.encodeFoldWeight(
                 commandBuffer: command, source: streamer.ring,
                 sourceOffset: Int(sc.data.offset), shape: sc.tensor.shape,
                 outputRowStrideElements: rowBytes / 2, scratchKey: "vae.weight.shortcut")
             try convolution.encode1x1(
-                commandBuffer: command, input: input, weight: foldedShortcut,
+                commandBuffer: command, input: input, weight: foldedShortcut, weightOffset: 0,
                 output: output, rows: positions,
                 inputChannels: inChannels, outputChannels: outChannels)
             try encodeAddBias(command: command, output: output,
@@ -312,20 +312,20 @@ extension VAEDecoder {
             throw AnimapkError.validation("failed to create VAE attention command buffer")
         }
 
-        let normGamma = try requireTensorSpan(group, suffix: ".norm.gamma")
+        let normGamma = try requireTensorSpan(group.range, suffix: ".norm.gamma")
         try encodeChannelRMS(command: command, input: input, gamma: streamer.ring,
                              gammaOffset: Int(normGamma.data.offset), output: normalized,
                              positions: positions, channels: channels)
 
-        let toQKV = try requireTensorSpan(group, suffix: ".to_qkv.weight")
-        let toQKVBias = try requireTensorSpan(group, suffix: ".to_qkv.bias")
+        let toQKV = try requireTensorSpan(group.range, suffix: ".to_qkv.weight")
+        let toQKVBias = try requireTensorSpan(group.range, suffix: ".to_qkv.bias")
         let rowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: channels, dataType: .float16)
         let foldedQKV = try convolution.encodeFoldWeight(
             commandBuffer: command, source: streamer.ring,
             sourceOffset: Int(toQKV.data.offset), shape: toQKV.tensor.shape,
             outputRowStrideElements: rowBytes / 2, scratchKey: "vae.weight.qkv")
         try convolution.encode1x1(
-            commandBuffer: command, input: normalized, weight: foldedQKV,
+            commandBuffer: command, input: normalized, weight: foldedQKV, weightOffset: 0,
             output: qkv, rows: positions, inputChannels: channels,
             outputChannels: channels * 3)
         try encodeAddBias(command: command, output: qkv,
@@ -348,14 +348,14 @@ extension VAEDecoder {
         guard let command2 = context.commandQueue.makeCommandBuffer() else {
             throw AnimapkError.validation("failed to create VAE attention proj command buffer")
         }
-        let proj = try requireTensorSpan(group, suffix: ".proj.weight")
-        let projBias = try requireTensorSpan(group, suffix: ".proj.bias")
+        let proj = try requireTensorSpan(group.range, suffix: ".proj.weight")
+        let projBias = try requireTensorSpan(group.range, suffix: ".proj.bias")
         let foldedProj = try convolution.encodeFoldWeight(
             commandBuffer: command2, source: streamer.ring,
             sourceOffset: Int(proj.data.offset), shape: proj.tensor.shape,
             outputRowStrideElements: rowBytes / 2, scratchKey: "vae.weight.proj")
         try convolution.encode1x1(
-            commandBuffer: command2, input: projected, weight: foldedProj,
+            commandBuffer: command2, input: projected, weight: foldedProj, weightOffset: 0,
             output: output, rows: positions, inputChannels: channels,
             outputChannels: channels)
         try encodeAddBias(command: command2, output: output,
@@ -377,8 +377,8 @@ extension VAEDecoder {
         guard let command = context.commandQueue.makeCommandBuffer() else {
             throw AnimapkError.validation("failed to create VAE resample command buffer")
         }
-        let weight = try requireTensorSpan(group, suffix: ".resample.1.weight")
-        let bias = try requireTensorSpan(group, suffix: ".resample.1.bias")
+        let weight = try requireTensorSpan(group.range, suffix: ".resample.1.weight")
+        let bias = try requireTensorSpan(group.range, suffix: ".resample.1.bias")
         let columns = inputChannels * 9
         let rowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: columns, dataType: .float16)
         let folded = try convolution.encodeFoldWeight(
@@ -386,7 +386,7 @@ extension VAEDecoder {
             sourceOffset: Int(weight.data.offset), shape: weight.tensor.shape,
             outputRowStrideElements: rowBytes / 2, scratchKey: "vae.weight.resample")
         try convolution.encode3x3(
-            commandBuffer: command, input: input, weight: folded,
+            commandBuffer: command, input: input, weight: folded, weightOffset: 0,
             bias: streamer.ring, biasOffset: Int(bias.data.offset),
             output: output, inputHeight: height, inputWidth: width,
             outputChannels: outputChannels, inputChannels: inputChannels,
@@ -406,14 +406,14 @@ extension VAEDecoder {
         guard let command = context.commandQueue.makeCommandBuffer() else {
             throw AnimapkError.validation("failed to create VAE head command buffer")
         }
-        let gamma = try requireTensorSpan(group, suffix: ".head.0.gamma")
+        let gamma = try requireTensorSpan(group.range, suffix: ".head.0.gamma")
         try encodeChannelRMS(command: command, input: input, gamma: streamer.ring,
                              gammaOffset: Int(gamma.data.offset), output: normalized,
                              positions: positions, channels: 96)
         try encodeSiluHalf(command: command, input: normalized, output: normalized,
                            count: positions * 96)
-        let weight = try requireTensorSpan(group, suffix: ".head.2.weight")
-        let bias = try requireTensorSpan(group, suffix: ".head.2.bias")
+        let weight = try requireTensorSpan(group.range, suffix: ".head.2.weight")
+        let bias = try requireTensorSpan(group.range, suffix: ".head.2.bias")
         let columns = 96 * 9
         let rowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: columns, dataType: .float16)
         let folded = try convolution.encodeFoldWeight(
@@ -421,7 +421,7 @@ extension VAEDecoder {
             sourceOffset: Int(weight.data.offset), shape: weight.tensor.shape,
             outputRowStrideElements: rowBytes / 2, scratchKey: "vae.weight.head")
         try convolution.encode3x3(
-            commandBuffer: command, input: normalized, weight: folded,
+            commandBuffer: command, input: normalized, weight: folded, weightOffset: 0,
             bias: streamer.ring, biasOffset: Int(bias.data.offset),
             output: output, inputHeight: height, inputWidth: width,
             outputChannels: 3, inputChannels: 96)
@@ -602,7 +602,7 @@ extension VAEDecoder {
     private func requireTensorSpan(
         _ group: AnimapkExecutionRange, suffix: String
     ) throws -> AnimapkTensorSpans {
-        guard let item = try tensorSpan(group, suffix: suffix) else {
+        guard let item = try tensorSpan(group.range, suffix: suffix) else {
             throw AnimapkError.validation(
                 "VAE decoder group \(group.logicalIndex) is missing tensor \(suffix)")
         }
