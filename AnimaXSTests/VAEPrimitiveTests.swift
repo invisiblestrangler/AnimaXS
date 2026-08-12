@@ -26,7 +26,8 @@ final class VAEPrimitiveTests: XCTestCase {
     }
 
     private func readHalf(_ buffer: MTLBuffer, count: Int) -> [Float] {
-        buffer.contents().bindMemory(to: Float16.self, capacity: count).map { Float($0) }
+        let pointer = buffer.contents().bindMemory(to: Float16.self, capacity: count)
+        return (0..<count).map { Float(pointer[$0]) }
     }
 
     /// CPU reference conv for rank-4 PyTorch weights [Cout,Cin,KH,KW], padding
@@ -122,7 +123,7 @@ final class VAEPrimitiveTests: XCTestCase {
             shape: [cout, cin, 1, 1], outputRowStrideElements: rowBytes / 2,
             scratchKey: "test.weight.1x1")
         try executor.encode1x1(
-            commandBuffer: command, input: inputBuffer, weight: folded,
+            commandBuffer: command, input: inputBuffer, weight: folded, weightOffset: 0,
             output: outputBuffer, rows: rows,
             inputChannels: cin, outputChannels: cout)
         command.commit()
@@ -175,7 +176,7 @@ final class VAEPrimitiveTests: XCTestCase {
             shape: [cout, cin, 3, 3], outputRowStrideElements: rowBytes / 2,
             scratchKey: "test.weight.3x3")
         try executor.encode3x3(
-            commandBuffer: command, input: inputBuffer, weight: folded,
+            commandBuffer: command, input: inputBuffer, weight: folded, weightOffset: 0,
             bias: biasBuffer, biasOffset: 0,
             output: outputBuffer, inputHeight: height, inputWidth: width,
             outputChannels: cout, inputChannels: cin)
@@ -222,7 +223,7 @@ extension VAEPrimitiveTests {
             shape: [cout, cin, 3, 3, 3], outputRowStrideElements: rowBytes / 2,
             scratchKey: "test.weight.rank5")
         try executor.encode3x3(
-            commandBuffer: command, input: inputBuffer, weight: foldedScratch,
+            commandBuffer: command, input: inputBuffer, weight: foldedScratch, weightOffset: 0,
             bias: nil, biasOffset: 0,
             output: outputBuffer, inputHeight: height, inputWidth: width,
             outputChannels: cout, inputChannels: cin)
@@ -232,7 +233,7 @@ extension VAEPrimitiveTests {
         let actual = readHalf(outputBuffer, count: height * width * cout)
         let expected = referenceConv(
             input.map { Float($0) }, height: height, width: width, inputChannels: cin,
-            weight: folded, outputChannels: cout)
+            weight: folded, weightOffset: 0, outputChannels: cout)
         for i in 0..<expected.count {
             XCTAssertEqual(actual[i], expected[i], accuracy: 0.02,
                            "folded rank-5 position \(i / cout) channel \(i % cout)")
@@ -298,7 +299,7 @@ extension VAEPrimitiveTests {
             shape: [cout, cin, 3, 3], outputRowStrideElements: rowBytes / 2,
             scratchKey: "test.weight.upsample")
         try executor.encode3x3(
-            commandBuffer: command, input: inputBuffer, weight: folded,
+            commandBuffer: command, input: inputBuffer, weight: folded, weightOffset: 0,
             bias: biasBuffer, biasOffset: 0,
             output: outputBuffer, inputHeight: height, inputWidth: width,
             outputChannels: cout, inputChannels: cin, upsample2x: true)
