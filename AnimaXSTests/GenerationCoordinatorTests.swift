@@ -359,15 +359,16 @@ final class GenerationCoordinatorTests: XCTestCase {
         XCTAssertEqual(factory.callCount, callsBefore,
                        "second generation ignored while one is running")
 
-        // Wait until the first generation's sampler is actually blocked
-        // (tokenization and encoding run first), then release it.
-        for _ in 0..<100 {
+        // Wait until the first generation's sampler is actually blocked.
+        // Tokenizer loading is reloaded per generate() call and can take ~2s
+        // in the simulator, so budget generously.
+        for _ in 0..<250 {
             if factory.isAnySamplerBlocked { break }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
         XCTAssertTrue(factory.isAnySamplerBlocked, "first sampler reached the blocked stage")
         factory.releaseAll()
-        for _ in 0..<100 {
+        for _ in 0..<200 {
             if !coordinator.isGenerating { break }
             try await Task.sleep(nanoseconds: 50_000_000)
         }
