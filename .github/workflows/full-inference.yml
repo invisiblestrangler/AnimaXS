@@ -126,6 +126,15 @@ jobs:
           echo "All three packs downloaded and verified."
           df -h
 
+      - name: Install pinned XcodeGen
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip" \
+            --output "$RUNNER_TEMP/xcodegen.zip"
+          echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
+          ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+
       - name: Run full-model integration inference (required mode)
         if: steps.metal.outputs.available == 'true'
         env:
@@ -137,7 +146,19 @@ jobs:
           ANIMAXS_VAE_PACK: "${{ env.MODEL_DIR }}/qwen-image-vae-xsmax-fp16.animapk"
           ANIMAXS_NOISE_FILE: "${{ github.workspace }}/AnimaXSTests/Fixtures/Case1Binary/case1_noise.f32"
         run: |
-          set -o pipefail
+          set -euo pipefail
+          # Robustness: xcodebuild does not reliably forward arbitrary step env
+          # vars to the simulator's test process (observed: FullInferenceTests
+          # skipped despite ANIMAXS_*_PACK being set in the step env). The proven
+          # parity workflows (e.g. vae-parity) instead made the packs available as
+          # BUNDLED test resources: copy them into the committed fixture dir and
+          # regenerate the project so FullInferenceTests finds them via
+          # `bundledFixture(named:)`. The packs are *.animapk (gitignored) so they
+          # are never committed; the regeneration is ephemeral on the runner.
+          cp "$ANIMAXS_QWEN_PACK"    AnimaXSTests/Fixtures/Case1Binary/
+          cp "$ANIMAXS_DIFFUSION_PACK" AnimaXSTests/Fixtures/Case1Binary/
+          cp "$ANIMAXS_VAE_PACK"     AnimaXSTests/Fixtures/Case1Binary/
+          xcodegen generate
           xcodebuild \
             -project AnimaXS.xcodeproj \
             -scheme AnimaXS \
