@@ -465,6 +465,9 @@ extension VAEDecoder {
                              positions: positions, channels: 96)
         try encodeSiluHalf(command: command, input: normalized, output: normalized,
                            count: positions * 96)
+        #if DEBUG
+        dumpStage(normalized, name: "head_preconv", height: height, width: width, channels: 96)
+        #endif
         let weight = try requireTensorSpan(group.range, suffix: ".head.2.weight")
         let bias = try requireTensorSpan(group.range, suffix: ".head.2.bias")
         let columns = 96 * 9
