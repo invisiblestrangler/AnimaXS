@@ -136,19 +136,29 @@ struct VAEDecoderLocator {
              "decoder.middle.2.residual.6.weight", "decoder.middle.2.residual.6.bias"],
         ]
         var ordered: [[String]] = groupNames
-        // 15 upsample modules in execution order (0..14), residual/shortcut/resample.
+        // 15 upsample modules in execution order (0..14). Resample modules
+        // (3, 7, 11) carry ONLY the resample 3x3; all others carry residual
+        // (+ shortcut for the 192->384 channel-change module 4). Verified
+        // against the real pack: modules 3/7/11 have zero residual tensors.
         for m in 0..<15 {
             var names: [String] = []
             let base = "decoder.upsamples.\(m)."
-            for suffix in ["residual.0.gamma", "residual.2.weight", "residual.2.bias",
-                           "residual.3.gamma", "residual.6.weight", "residual.6.bias"] {
-                names.append(base + suffix)
-            }
             if m == 4 {
+                // 192->384 residual + shortcut (channel change).
+                for suffix in ["residual.0.gamma", "residual.2.weight", "residual.2.bias",
+                               "residual.3.gamma", "residual.6.weight", "residual.6.bias"] {
+                    names.append(base + suffix)
+                }
                 names.append(contentsOf: [base + "shortcut.weight", base + "shortcut.bias"])
-            }
-            if [3, 7, 11].contains(m) {
+            } else if m == 3 || m == 7 || m == 11 {
+                // Pure resample modules: nearest-exact 2x + 3x3 conv only.
                 names.append(contentsOf: [base + "resample.1.weight", base + "resample.1.bias"])
+            } else {
+                // Residual-only module (384->384 or 192->192).
+                for suffix in ["residual.0.gamma", "residual.2.weight", "residual.2.bias",
+                               "residual.3.gamma", "residual.6.weight", "residual.6.bias"] {
+                    names.append(base + suffix)
+                }
             }
             // time_conv tensors stay OUT of the execution groups (unexecuted at T=1).
             ordered.append(names)
