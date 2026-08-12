@@ -59,10 +59,12 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
   - deps: D001 · output: W4Decoder.swift + tests · validation: known first-values match handoff
 - [x] **D004** — CPU reference W8 decoder + real embedding-row vector test.
   - deps: D001 · output: W8Decoder.swift + tests · validation: matches HANDOFF.md documented vector
-- [ ] **D005** — ModelManifest: built-in manifest struct (filename/size/sha256/URL/component) + incremental CryptoKit SHA256.
+- [x] **D005** — ModelManifest: built-in manifest struct (filename/size/sha256/URL/component) + incremental CryptoKit SHA256.
   - deps: B002 · output: ModelManifest.swift · validation: unit tests on synthetic file + known hash
-- [ ] **D006** — ModelStore download/verify/ready states; Application Support storage; backup exclusion + file protection; disk-space check.
+  - **DONE 2026-08-11.** `ModelManifest` pins filename, exact byte size, SHA-256, component and future `model-assets-v1` URL for all three packs. Incremental 1 MiB CryptoKit hashing and size/hash verification pass the `abc` known vector in normal CI `31496280087`.
+- [~] **D006** — ModelStore download/verify/ready states; Application Support storage; backup exclusion + file protection; disk-space check.
   - deps: D005 · output: `ModelStore.swift` with testable state machine · validation: synthetic download/verify/storage tests plus real-pack download on manual CI/device; K001 binds these states to UI
+  - **IN PROGRESS 2026-08-11.** The actor state machine, disk reserve check, injected downloader/capacity seams, incremental verification, staging install, backup exclusion and file protection are implemented; synthetic download→verify→ready/reuse passes `31496280087`. A real `ModelStore` release download remains correctly blocked by A005/model-assets-v1 not existing.
 - [x] **D007** — Zero-copy DiT locator: logical block 0…27 → validated physical range and tensor-relative data/scale/zero spans via `model.diffusion_model.blocks.N.` prefix (never `block_index`).
   - deps: D001 · output: `DiTBlockLocator` span API suitable for mmap→one-slot ring copies · validation: exactly 28 disjoint logical ranges; every tensor span is in-range/aligned; synthetic order test + real-pack audit pass; no full-tensor `Data` copies
 - [x] **D008** — Zero-copy Qwen locator: embedding tensor rows plus logical layer 0…27 contiguous ranges and tensor-relative spans.
@@ -150,13 +152,15 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
 - [x] **I001** — Sigma constants (9 points) + Euler FLOW update fp32 (x_next = x + (x−denoised)/σ·dσ).
   - deps: none (CPU) · output: Sampler.swift constants + unit test · validation: matches sampler_vectors.py data
   - **DONE 2026-08-11.** `EulerSampler` owns the exact nine Float32 golden sigmas and separate fp32 Metal/CPU Euler implementations. Normal CI `31493950011` passed exact-schedule and eight-step zero-denoiser trajectory tests plus generic iOS shader compilation.
-- [~] **I002** — 8-step loop: single model pass per step (CFG=1), latent fp32, NaN/Inf check per step, progress + checkpoint after each step.
+- [x] **I002** — 8-step loop: single model pass per step (CFG=1), latent fp32, NaN/Inf check per step, progress + checkpoint after each step.
   - deps: I001, H007 · output: full diffusion run (conditioning may be injected for isolated DiT test) · validation: 8 post-step latents finite; final latent parity. The existing `step_latents` fixture is internally inconsistent and cannot gate intermediate parity until regenerated with explicit callback fields (D055).
-  - **IN PROGRESS 2026-08-11.** Production Metal preparation is real-pack parity green (`31494520040`: residual cosine `0.9999999598`, embedding/AdaLN effectively 1.0, 1.67 s). `DiffusionSampler` now orchestrates adapter-fp32→DiT-fp16 context conversion once, then preparation → 28 blocks → final velocity → explicit FLOW denoised conversion → Euler, with per-block progress, finite post-step checks, and a per-step checkpoint callback. Full-pack eight-step validation remains.
-- [ ] **I003** — Production RNG: deterministic seeded generator + Box-Muller (app-deterministic, documented as not ComfyUI-identical); golden path loads init_noise_randn instead.
+  - **DONE 2026-08-12.** `DiffusionSampler` orchestrates adapter-fp32→DiT-fp16 context conversion once, then preparation → 28 blocks → final FLOW velocity → explicit denoised conversion → Euler, with per-block progress, finite post-step checks and per-step checkpoint callback. Dedicated run `31497208620` passed: 224 blocks, eight finite states in 107.92 s, callback cosines 0.9670→0.8665, final W4-vs-source-BF16 cosine `0.6919` ≥ `0.65` floor (D057/D059). Production Metal preparation `31494520040` residual cosine `0.9999999598`.
+- [x] **I003** — Production RNG: deterministic seeded generator + Box-Muller (app-deterministic, documented as not ComfyUI-identical); golden path loads init_noise_randn instead.
   - deps: none · output: SeededRNG.swift + tests · validation: same seed → same noise; std-normal stats sane
-- [ ] **I004** — Checkpoint serialization (latent fp32, step, prompt, seed, resolution, model hashes) + atomic write + resume.
+  - **DONE 2026-08-11.** `SeededRNG` uses specified SplitMix64 uniforms and cached-pair Box–Muller normals. Seed 1337 has a fixed prefix regression, 100k samples are deterministic with mean `-0.00419`/stddev `1.00020`, and normal CI `31496280087` passes. Golden tests still inject canonical noise.
+- [x] **I004** — Checkpoint serialization (latent fp32, step, prompt, seed, resolution, model hashes) + atomic write + resume.
   - deps: I002, D005 · output: Checkpoint.swift + tests · validation: round-trip exact; atomic rename
+  - **DONE 2026-08-11.** Versioned JSON metadata plus base64 raw Float32 latent records completed step, prompt, seed, resolution and three model hashes. Validation rejects shape/nonfinite/version/hash errors; `Data.write(.atomic)` round-trips every Float bit and leaves no staging file (`31496280087`). `DiffusionSampler.stepCompleted` is the write boundary.
 
 ## J — VAE
 
@@ -167,8 +171,10 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
   - deps: J001, E006 · output: VAEDecoder.swift · validation: decoded_rgb vs golden: max abs ≤ 0.05, PSNR ≥ 30 dB
 - [ ] **J003** — Wan decoder channel-wise RMS normalization (`F.normalize` over C × sqrt(C) × gamma), exact SiLU, attention, and nearest-exact spatial upsampling.
   - deps: J002 · output: VAE normalization/activation/upsampling primitives + tests · validation: pinned-source CPU reference match
-- [ ] **J004** — RGB: (rgb+1)/2 clamp → CGImage/UIImage; release fp32 buffer.
+  - **PARTIAL 2026-08-11.** `VAENumerics` now locks chunk-0 latent denormalization, channel-wise RMS, exact SiLU and integer-2× nearest-exact equations in CPU tests (`31496280087`). Production Metal kernels and the one-head middle attention remain part of J002/J003.
+- [~] **J004** — RGB: (rgb+1)/2 clamp → CGImage/UIImage; release fp32 buffer.
   - deps: J002 · output: RGBConverter.swift · validation: image displayed, memory released
+  - **IN PROGRESS 2026-08-11.** `RGBConverter` implements CHW `(rgb+1)/2`, clamp, rounded RGBA8 and sRGB `UIImage`; edge/order tests pass `31496280087`. Wiring a real decoder output and proving fp32-buffer release waits on J002/K002.
 - [ ] **J005** — Tiled VAE ONLY if device diagnostics demand it; preserve convolution halos and global spatial-attention behavior. NOT in first implementation.
   - deps: J002 + device evidence · output: decision in DECISIONS.md · validation: decision recorded, not speculative code
 

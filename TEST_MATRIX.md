@@ -21,8 +21,10 @@ Env: `CI-sim` = GitHub Actions standard `macos-15` arm64 iOS Simulator · `CI-de
 | G003 | adapter block/final ranges + W4 embedding rows | AnimaXSTests | PASS synthetic + real-pack subset (`31492451065`) | CI-sim/pack |
 | I001 | sampler vector + eight-step zero-denoiser trajectory | AnimaXSTests (SmokeTests) | PASS (`31493950011`) | CI-sim |
 | I001 | exact nine Float32 sigma constants | AnimaXSTests (SmokeTests) | PASS (`31493950011`) | CI-sim |
-| I004 | checkpoint serialization | AnimaXSTests | pending | CI-sim |
-| D005 | SHA manifest | AnimaXSTests | pending | CI-sim |
+| D005 | three-pack manifest + incremental SHA known vector/verification | AnimaXSTests (SmokeTests) | PASS (`31496280087`) | CI-sim |
+| D006 | synthetic download→verify→protected ready/reuse state | AnimaXSTests (SmokeTests) | PASS (`31496280087`); real release download waits on A005 | CI-sim |
+| I003 | fixed-seed SplitMix64/Box–Muller prefix, repeatability and 100k stats | AnimaXSTests (SmokeTests) | PASS (`31496280087`) | CI-sim |
+| I004 | atomic checkpoint metadata + bit-exact latent round trip | AnimaXSTests (SmokeTests) | PASS (`31496280087`) | CI-sim |
 | F004 | tokenizers exact on canonical prompts | AnimaXSTests (TokenizerParityTests) | RAN (main CI `31436850938`) | CI-sim |
 | D018 | GQA head mapping table (16/8 → h/2) | AnimaXSTests (GqaHeadMappingTests) | RAN (main CI `31436850938`) | CI-sim |
 | D018 | synthetic 1-token attention reveals KV head | AnimaXSTests (GqaHeadMappingTests) | RAN (main CI `31436850938`) | CI-sim |
@@ -31,7 +33,8 @@ Env: `CI-sim` = GitHub Actions standard `macos-15` arm64 iOS Simulator · `CI-de
 | H003 | CPU modulation reference (LayerNorm, SiLU) | AnimaXSTests (ModulationTests) | RAN (main CI `31436850938`) | CI-sim |
 | H004 | CPU RoPE reference (config, thetas, t/h/w order, 2×2 layout) | AnimaXSTests (DitRoPETests) | RAN (main CI `31436850938`) | CI-sim |
 | H005 | DiT block primitives (split-half RoPE, LayerNorm/AdaLN, RMSNorm, attention, concat, GELU) | AnimaXSTests (DiTBlockTests) | RAN: 9/9 PASS (`31452206651`) | CI-sim |
-| J003 | Wan channel-wise RMS norm/SiLU/upsampling reference | AnimaXSTests | pending | CI-sim |
+| J003 | Wan latent denorm/channel-wise RMS norm/SiLU/nearest-exact CPU references | AnimaXSTests (SmokeTests) | PASS (`31496280087`) | CI-sim |
+| J004 | CHW RGB clamp/RGBA order + UIImage creation | AnimaXSTests (SmokeTests) | PASS (`31496280087`); real decoder wiring pending | CI-sim |
 | J001 | VAE T=1 causal-conv fold across 34 real decoder/post-quant tensors | `scripts/validate_vae_fold.py` | PASS maxAbs ≤ `1.11e-16`; sum fold rejected for 32/32 kt=3 tensors | local real pack |
 | H001 | DiT input patchify ordering + token count (1024×68) + inChannels 17 | AnimaXSTests (DiTInputTests) | RAN (main CI `31436850938`) | CI-sim |
 | H002 | Timestep sinusoidal vs torch reference + SiLU | AnimaXSTests (TimestepEmbedderTests) | RAN (main CI `31436850938`) | CI-sim |
@@ -78,7 +81,7 @@ Env: `CI-sim` = GitHub Actions standard `macos-15` arm64 iOS Simulator · `CI-de
 | H007 | final velocity `[1,16,1,64,64]` vs same-W4 oracle | PASS: finite, cosine `0.9999999646`, RMSE `0.0003068520`, maxAbs `0.001953125` (`31488934459`) | CI-sim pack-backed/A12 pending |
 | I002 | production preparation residual/embedding/AdaLN | PASS: cosine `0.9999999598`/effectively 1.0/1.0, 1.67 s (`31494520040`) | CI-sim pack-backed |
 | I002 | explicit FLOW conversion + Euler operation contract | implemented; normal CI pending | CI-sim |
-| I002 | 8 post-step latents finite + final latent parity | pending; `step_latents` cannot be used until trace provenance defect D055 is repaired | CI-sim/A12 |
+| I002 | 8 post-step latents finite + final latent parity | PASS: 224 blocks, eight finite states in 107.92 s; callback cosines 0.9670→0.8665; final W4-vs-source-BF16 cosine `0.6919` ≥ `0.65` floor, maxAbs 4.2050, rmse 0.9756 (dedicated `I002 diffusion parity` `31497208620`; D057/D059). `step_latents` remains invalid as intermediate gate (D055). | CI-sim pack-backed |
 | J002 | VAE RGB ≈ decoded_rgb | pending | CI-sim/A12 |
 | L001 | full canonical final latent | pending | CI-sim/A12 |
 
@@ -88,5 +91,5 @@ Env: `CI-sim` = GitHub Actions standard `macos-15` arm64 iOS Simulator · `CI-de
 | Xcode 26.3 generic iOS build PASS | RAN with DiT preparation/I001 (`31493950011`) | CI-dev |
 | deployment target 18.0 | RAN (static) | — |
 | Metal shaders compile | RAN with DiT preparation/I001 (`31493950011`) | CI-dev/CI-sim |
-| simulator unit tests PASS | PASS (`31493950011`) | CI-sim |
-| xcodegen 2.46.0 checksum + clean regeneration | PASS (`31493950011`) | CI-sim |
+| simulator unit tests PASS | 92 tests, 11 expected fixture/real-pack skips, 0 failures (`31496280087`) | CI-sim |
+| xcodegen 2.46.0 checksum + clean regeneration | PASS (`31496280087`) | CI-sim |

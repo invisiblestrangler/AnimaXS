@@ -1,4 +1,6 @@
-# AnimaXS — Phase 3 Progress & Debug Report for Continuation AI
+# AnimaXS — Progress & Debug Report for Continuation AI
+
+> **⚠️ HISTORICAL SNAPSHOT (2026-08-10) — SUPERSEDED.** This document predates the production Qwen/adapter/DiT/sampler implementation and contains stale blocker claims (it describes the Qwen full-28-layer encoder, adapter, DiT, sampler, VAE and release work as "not yet implemented"). Current truth lives in `STATUS.md`, `TODO.md`, `TEST_MATRIX.md` and `DECISIONS.md` (through D059). Do not use this report as an authority on current state.
 
 **Author:** current implementation agent
 **Date:** 2026-08-10
