@@ -179,7 +179,8 @@ struct DiagnosticsEngine {
         let scale: [UInt16] = [Float16(1).bitPattern]
         let zero: [UInt16] = [Float16(0).bitPattern]
         let values = QuantDecoders.dequantW4(
-            data: Data(nibbles), scale: Data(bytes: scale), zero: Data(bytes: zero),
+            data: Data(nibbles), scale: scale.withUnsafeBytes { Data($0) },
+            zero: zero.withUnsafeBytes { Data($0) },
             k: 4, groupSize: 4)
         let expected: [Float] = [2, 3, 0, 1]
         guard values == expected else {
@@ -195,7 +196,8 @@ struct DiagnosticsEngine {
         let scale: [UInt16] = [Float16(1).bitPattern]
         let zero: [UInt16] = [Float16(0).bitPattern]
         let values = QuantDecoders.dequantW8(
-            data: Data(bytes), scale: Data(bytes: scale), zero: Data(bytes: zero),
+            data: Data(bytes), scale: scale.withUnsafeBytes { Data($0) },
+            zero: zero.withUnsafeBytes { Data($0) },
             k: 4, groupSize: 4)
         guard values == [10, 20, 30, 40] else {
             return .init(name: "W8 vector", status: .fail, detail: "got \(values)")
