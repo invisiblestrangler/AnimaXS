@@ -80,8 +80,9 @@ final class VAEDecoderLocatorTests: XCTestCase {
             file: AnimapkFile(url: url), requiresCompleteArchitecture: false)
 
         XCTAssertGreaterThanOrEqual(locator.groups.count, 5)
-        let groupIndices = locator.groups.map(\.logicalIndex)
-        XCTAssertEqual(groupIndices, Array(0..<locator.groups.count))
+        // Groups retain their logical indices (skipped groups absent in subset).
+        XCTAssertEqual(Set(locator.groups.map(\.logicalIndex)),
+                       Set([0, 1, 2, 3, 4, 8, 9, 20]))
 
         // Every group is non-empty, aligned, and physically disjoint.
         let physical = locator.groups.sorted { $0.range.fileOffset < $1.range.fileOffset }
@@ -150,7 +151,7 @@ final class VAEDecoderLocatorTests: XCTestCase {
         ]
         let url = try writePack(named: "vae-shape", specs: specs)
         XCTAssertThrowsError(try VAEDecoderLocator(
-            file: AnimapkFile(url: url), requiresCompleteArchitecture: true)) { error in
+            file: AnimapkFile(url: url), requiresCompleteArchitecture: false)) { error in
             guard case AnimapkError.validation(let message) = error else {
                 return XCTFail("expected validation error, got \\(error)")
             }

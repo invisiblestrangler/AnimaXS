@@ -84,6 +84,20 @@ struct VAEDecoderLocator {
         // 1) Full architecture validation: every expected tensor present, exact
         //    shape, fp16 storage, and no unexpected decoder/post-quant tensors.
         let decoderNames = Set(file.tensors.map(\.name))
+        // Per-tensor validation always applies to present decoder tensors.
+        for name in decoderNames {
+            guard Self.expectedArchitecture[name] != nil else { continue }
+            guard let tensor = file.tensor(named: name) else { continue }
+            let shape = Self.expectedArchitecture[name]!
+            guard tensor.shape == shape else {
+                throw AnimapkError.validation(
+                    "VAE decoder tensor \(name) shape \(tensor.shape) != expected \(shape)")
+            }
+            guard tensor.storage == .fp16 else {
+                throw AnimapkError.validation("VAE decoder tensor \(name) is not fp16")
+            }
+        }
+        // Completeness: every expected tensor must be present (production).
         if requiresCompleteArchitecture {
             for (name, shape) in Self.expectedArchitecture {
                 guard let tensor = file.tensor(named: name) else {
@@ -145,9 +159,18 @@ struct VAEDecoderLocator {
 
         var built: [Group] = []
         for (index, names) in ordered.enumerated() {
+            let present = file.tensors.filter { names.contains($0.name) }
+            if present.isEmpty {
+                // In subset mode (synthetic tests) a group may be absent; the
+                // full decoder relies on requiresCompleteArchitecture:true.
+                if requiresCompleteArchitecture {
+                    throw AnimapkError.validation(
+                        "VAE decoder group \(index) has no tensors (\(names.first ?? "?"))")
+                }
+                continue
+            }
             let range = try AnimapkRangeBuilder.executionRange(
-                tensors: file.tensors.filter { names.contains($0.name) },
-                exactPrefix: commonPrefix(of: names), logicalIndex: index)
+                tensors: present, exactPrefix: commonPrefix(of: names), logicalIndex: index)
             guard Set(range.tensors.map(\.tensor.name)) == Set(names) else {
                 throw AnimapkError.validation(
                     "VAE decoder group \(index) tensor set mismatch")
