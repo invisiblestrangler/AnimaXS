@@ -117,25 +117,8 @@ struct ContentView: View {
         }
         do {
             // Three production packs; the DiT pack serves both adapter and sampler.
-            let byComponent = Dictionary(
-                uniqueKeysWithValues: try await withThrowingTaskGroup(of: (ModelComponent, URL).self) { group in
-                    for entry in ModelManifest.entries {
-                        group.addTask {
-                            let url = try await store.prepare(entry)
-                            return (entry.component, url)
-                        }
-                    }
-                    var result: [(ModelComponent, URL)] = []
-                    for try await pair in group { result.append(pair) }
-                    return result
-                })
-            guard let textEncoder = byComponent[.textEncoder],
-                  let dit = byComponent[.dit],
-                  let vae = byComponent[.vae] else {
-                modelStatus = "Incomplete model set"
-                return
-            }
-            resolvedModels = ResolvedModels(textEncoder: textEncoder, dit: dit, vae: vae)
+            let models = try await store.resolvedModels()
+            resolvedModels = models
             modelStatus = "Models ready"
         } catch {
             modelStatus = "Model error: \(error.localizedDescription)"
