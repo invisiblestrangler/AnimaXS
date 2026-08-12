@@ -165,21 +165,25 @@ struct ContentView: View {
             if let image = coordinator.image {
                 Image(uiImage: image)
                     .resizable().scaledToFit().frame(maxHeight: 300)
-                ShareLink(item: shareURL(for: image),
-                          preview: SharePreview("AnimaXS image", image: image))
+                if let url = shareURL(for: image) {
+                    ShareLink(item: url, preview: SharePreview("AnimaXS image", image: Image(uiImage: image)))
+                }
             }
         }
     }
 
-    /// Writes the generated image to a temporary PNG for sharing. Falls back
-    /// to the PNG data URL when the write fails (ShareLink can share a URL).
-    private func shareURL(for image: UIImage) -> URL {
+    /// Writes the generated image to a temporary PNG for sharing; returns nil
+    /// if the file could not be created (share is then omitted gracefully).
+    private func shareURL(for image: UIImage) -> URL? {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("anima-xs-\(UUID().uuidString).png")
-        if let data = image.pngData() {
-            try? data.write(to: url)
+        guard let data = image.pngData() else { return nil }
+        do {
+            try data.write(to: url)
+            return url
+        } catch {
+            return nil
         }
-        return url
     }
 
     // MARK: - Helpers

@@ -176,8 +176,8 @@ struct DiagnosticsEngine {
         // low nibble 0, high nibble 1. Decoded k=4 order is [2,3,0,1] with
         // scale=1, zero=0 (decode = q*scale + zero).
         let nibbles: [UInt8] = [0x32, 0x10]
-        let scale: [UInt16] = [UInt16(1).bitPattern]
-        let zero: [UInt16] = [UInt16(0).bitPattern]
+        let scale: [UInt16] = [Float16(1).bitPattern]
+        let zero: [UInt16] = [Float16(0).bitPattern]
         let values = QuantDecoders.dequantW4(
             data: Data(nibbles), scale: Data(bytes: scale), zero: Data(bytes: zero),
             k: 4, groupSize: 4)
@@ -192,8 +192,8 @@ struct DiagnosticsEngine {
     /// Deterministic W8 vector decode.
     private func w8Vector() -> DiagnosticItem {
         let bytes: [UInt8] = [10, 20, 30, 40]
-        let scale: [UInt16] = [UInt16(1).bitPattern]
-        let zero: [UInt16] = [UInt16(0).bitPattern]
+        let scale: [UInt16] = [Float16(1).bitPattern]
+        let zero: [UInt16] = [Float16(0).bitPattern]
         let values = QuantDecoders.dequantW8(
             data: Data(bytes), scale: Data(bytes: scale), zero: Data(bytes: zero),
             k: 4, groupSize: 4)
@@ -205,9 +205,12 @@ struct DiagnosticsEngine {
 
     /// Golden-noise RNG determinism self-test (I003).
     private func goldenNoiseRNG() -> DiagnosticItem {
-        let a = try? SeededRNG(seed: 1337).normal(count: 64)
-        let b = try? SeededRNG(seed: 1337).normal(count: 64)
-        let c = try? SeededRNG(seed: 9999).normal(count: 64)
+        var rngA = SeededRNG(seed: 1337)
+        var rngB = SeededRNG(seed: 1337)
+        var rngC = SeededRNG(seed: 9999)
+        let a = try? rngA.normal(count: 64)
+        let b = try? rngB.normal(count: 64)
+        let c = try? rngC.normal(count: 64)
         guard let a, let b, let c else {
             return .init(name: "Golden-noise RNG", status: .fail, detail: "normal() threw")
         }
@@ -259,7 +262,7 @@ struct DiagnosticsEngine {
             return .init(name: "MPS precision", status: .fail, detail: "non-finite result")
         }
         return .init(name: "MPS precision", status: .pass,
-                     String(format: "MPS fp16 GEMM result %.2f (expected ~16)", result[0]))
+                     detail: String(format: "MPS fp16 GEMM result %.2f (expected ~16)", result[0]))
     }
 
     private func gemm(context: MetalContext) -> DiagnosticItem {
@@ -289,7 +292,7 @@ struct DiagnosticsEngine {
             let seconds = Date().timeIntervalSince(start)
             let mbps = Double(data.count) / 1_048_576 / max(seconds, 1e-9)
             return .init(name: "mmap benchmark", status: .pass,
-                         String(format: "%.0f MB/s (%.1f ms)", mbps, seconds * 1000))
+                         detail: String(format: "%.0f MB/s (%.1f ms)", mbps, seconds * 1000))
         } catch {
             return .init(name: "mmap benchmark", status: .fail, detail: error.localizedDescription)
         }
