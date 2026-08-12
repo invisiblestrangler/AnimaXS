@@ -1,0 +1,12 @@
+{
+  "pinned_commit": "cbbc9dab1f03d0d9a6caa8a8be7d77a7e37e1e44",
+  "pack_sha256": "10171af0b826927b75fecf4482aaa0e268254874e694a0788ebdd8c4254fc447",
+  "scale_factor": 0.0,
+  "metrics": {
+    "max_abs": 0.2179188709706068,
+    "rmse": 0.0032582352129522213,
+    "psnr": 97.87115494701801,
+    "cosine": 0.9999872446060181
+  },
+  "decoded_rgb_source_sha256": "d8a9c237c7e69ca02559cd69b564017af6ad053081d2dcb25d7cadec3ab7f1fd"
+}

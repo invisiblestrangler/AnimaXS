@@ -171,7 +171,7 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
   - deps: J001, E006 · output: VAEDecoder.swift · validation: decoded_rgb vs golden: max abs ≤ 0.05, PSNR ≥ 30 dB
 - [ ] **J003** — Wan decoder channel-wise RMS normalization (`F.normalize` over C × sqrt(C) × gamma), exact SiLU, attention, and nearest-exact spatial upsampling.
   - deps: J002 · output: VAE normalization/activation/upsampling primitives + tests · validation: pinned-source CPU reference match
-  - **PARTIAL 2026-08-11.** `VAENumerics` now locks chunk-0 latent denormalization, channel-wise RMS, exact SiLU and integer-2× nearest-exact equations in CPU tests (`31496280087`). Production Metal kernels and the one-head middle attention remain part of J002/J003.
+  - **PARTIAL 2026-08-11, revised 2026-08-12.** `VAENumerics` locks channel-wise RMS, exact SiLU and integer-2× nearest-exact equations in CPU tests (`31496280087`). NOTE (D060): `decodeLatent`'s `z/0.5·std+mean` is NOT the production decode contract — the same-pack oracle proves the canonical path feeds the sampler's final latent into the decoder unchanged (cosine `0.9999872` vs canonical RGB). Production Metal kernels and the one-head middle attention remain part of J002/J003.
 - [~] **J004** — RGB: (rgb+1)/2 clamp → CGImage/UIImage; release fp32 buffer.
   - deps: J002 · output: RGBConverter.swift · validation: image displayed, memory released
   - **IN PROGRESS 2026-08-11.** `RGBConverter` implements CHW `(rgb+1)/2`, clamp, rounded RGBA8 and sRGB `UIImage`; edge/order tests pass `31496280087`. Wiring a real decoder output and proving fp32-buffer release waits on J002/K002.

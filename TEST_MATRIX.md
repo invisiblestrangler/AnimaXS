@@ -82,7 +82,7 @@ Env: `CI-sim` = GitHub Actions standard `macos-15` arm64 iOS Simulator · `CI-de
 | I002 | production preparation residual/embedding/AdaLN | PASS: cosine `0.9999999598`/effectively 1.0/1.0, 1.67 s (`31494520040`) | CI-sim pack-backed |
 | I002 | explicit FLOW conversion + Euler operation contract | implemented; normal CI pending | CI-sim |
 | I002 | 8 post-step latents finite + final latent parity | PASS: 224 blocks, eight finite states in 107.92 s; callback cosines 0.9670→0.8665; final W4-vs-source-BF16 cosine `0.6919` ≥ `0.65` floor, maxAbs 4.2050, rmse 0.9756 (dedicated `I002 diffusion parity` `31497208620`; D057/D059). `step_latents` remains invalid as intermediate gate (D055). | CI-sim pack-backed |
-| J002 | VAE RGB ≈ decoded_rgb | pending | CI-sim/A12 |
+| J002 | VAE RGB ≈ decoded_rgb | Oracle (Lane B, same-pack): cosine `0.9999872`, RMSE `0.003258`, PSNR `97.87 dB`, maxAbs `0.2179` vs canonical RGB with identity latent input (D060) | local real pack |
 | L001 | full canonical final latent | pending | CI-sim/A12 |
 
 ## Build gates
