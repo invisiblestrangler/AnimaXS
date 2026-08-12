@@ -156,6 +156,14 @@ final class VAEDecoder {
                 xInA.toggle()
             }
             #if DEBUG
+            if module == 3 || module == 7 || module == 11 {
+                dumpStage(x, name: "upsample\(module)", height: height, width: width,
+                          channels: module == 11 ? 96 : 192)
+            } else {
+                let w2s = try requireTensorSpan(group.range, suffix: ".residual.2.weight").tensor.shape
+                dumpStage(x, name: "upsample\(module)", height: height, width: width,
+                          channels: w2s[0])
+            }
             stage("upsample\(module)")
             #endif
         }

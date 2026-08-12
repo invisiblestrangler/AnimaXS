@@ -223,7 +223,9 @@ def main():
         x = residual_block(x, {
             "g0": t[pre + "0.gamma"], "w2": t[pre + "2.weight"], "b2": t[pre + "2.bias"],
             "g3": t[pre + "3.gamma"], "w6": t[pre + "6.weight"], "b6": t[pre + "6.bias"]})
+        dump_intermediate(f"upsample{m}", x)
     x = resample_up(x, t["decoder.upsamples.3.resample.1.weight"], t["decoder.upsamples.3.resample.1.bias"])
+    dump_intermediate("upsample3", x)
     # stage 1 (192->384@128): upsamples.4 residual + shortcut, 5,6 residuals, resample 384->192 @256
     pre = "decoder.upsamples.4.residual."
     x = residual_block(x, {
@@ -231,25 +233,31 @@ def main():
         "g3": t[pre + "3.gamma"], "w6": t[pre + "6.weight"], "b6": t[pre + "6.bias"],
         "shortcut": t["decoder.upsamples.4.shortcut.weight"],
         "shortcut_b": t["decoder.upsamples.4.shortcut.bias"]})
+    dump_intermediate("upsample4", x)
     for m in (5, 6):
         pre = f"decoder.upsamples.{m}.residual."
         x = residual_block(x, {
             "g0": t[pre + "0.gamma"], "w2": t[pre + "2.weight"], "b2": t[pre + "2.bias"],
             "g3": t[pre + "3.gamma"], "w6": t[pre + "6.weight"], "b6": t[pre + "6.bias"]})
+        dump_intermediate(f"upsample{m}", x)
     x = resample_up(x, t["decoder.upsamples.7.resample.1.weight"], t["decoder.upsamples.7.resample.1.bias"])
+    dump_intermediate("upsample7", x)
     # stage 2 (192@256): residuals 8,9,10, resample 192->96 @512
     for m in (8, 9, 10):
         pre = f"decoder.upsamples.{m}.residual."
         x = residual_block(x, {
             "g0": t[pre + "0.gamma"], "w2": t[pre + "2.weight"], "b2": t[pre + "2.bias"],
             "g3": t[pre + "3.gamma"], "w6": t[pre + "6.weight"], "b6": t[pre + "6.bias"]})
+        dump_intermediate(f"upsample{m}", x)
     x = resample_up(x, t["decoder.upsamples.11.resample.1.weight"], t["decoder.upsamples.11.resample.1.bias"])
+    dump_intermediate("upsample11", x)
     # stage 3 (96@512): residuals 12,13,14
     for m in (12, 13, 14):
         pre = f"decoder.upsamples.{m}.residual."
         x = residual_block(x, {
             "g0": t[pre + "0.gamma"], "w2": t[pre + "2.weight"], "b2": t[pre + "2.bias"],
             "g3": t[pre + "3.gamma"], "w6": t[pre + "6.weight"], "b6": t[pre + "6.bias"]})
+        dump_intermediate(f"upsample{m}", x)
     # ---- head: RMS norm -> SiLU -> 3x3 conv 96->3 ----
     x = channel_rms_norm(x, t["decoder.head.0.gamma"])
     x = silu(x)
