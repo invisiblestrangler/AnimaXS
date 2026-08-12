@@ -1,6 +1,9 @@
 import XCTest
 import Metal
 import Tokenizers
+import CoreGraphics
+import ImageIO
+import UniformTypeIdentifiers
 @testable import AnimaXS
 
 /// L001: real end-to-end prompt → RGBA8 inference on the production path.
@@ -137,12 +140,16 @@ final class FullInferenceTests: XCTestCase {
         // source-BF16 canonical final latent). The canonical reference is the
         // committed case1_final_latent.f32 (== golden NPZ final_latent). ----
         let finalValues = read(finalLatent)
+        var latentCosineText = "n/a", latentRMSText = "n/a", latentMaxAbsText = "n/a"
         if let reference = bundledFixture(named: "case1_final_latent.f32") {
             let refValues = try floats(from: reference)
             if refValues.count == finalValues.count {
                 let cosine = cosineSimilarity(finalValues, refValues)
                 let rmse = rmse(finalValues, refValues)
                 let maxAbs = maxAbsolute(finalValues, refValues)
+                latentCosineText = String(format: "%.4f", cosine)
+                latentRMSText = String(format: "%.4f", rmse)
+                latentMaxAbsText = String(format: "%.4f", maxAbs)
                 print("FULL_FINAL_LATENT_COSINE=\(cosine)")
                 print("FULL_FINAL_LATENT_RMSE=\(rmse)")
                 print("FULL_FINAL_LATENT_MAXABS=\(maxAbs)")
@@ -189,9 +196,12 @@ final class FullInferenceTests: XCTestCase {
         // 0.9 gate would falsely reject a correct pipeline; 0.65 keeps a small
         // justified margin below the measured 0.7035 while still catching any
         // gross regression (broken pipeline / wrong conditioning drops far below).
+        var referenceRGB: [UInt8] = []
+        var rgbCosineText = "n/a", rgbRMSText = "n/a", rgbMAEText = "n/a", rgbMaxAbsText = "n/a"
         if let rgbRefURL = bundledFixture(named: "case1_decoded_rgb8.bin") {
             let refBytes = try Data(contentsOf: rgbRefURL)
             let refRGB = refBytes.map { Float($0) / 255.0 * 2.0 - 1.0 }
+            referenceRGB = [UInt8](refBytes)
             let rgbBytes = image.bytes.enumerated()
                 .filter { $0.offset % 4 != 3 }
                 .map { $0.element }
@@ -201,6 +211,10 @@ final class FullInferenceTests: XCTestCase {
                 let rmse = rmse(rgbValues, refRGB)
                 let mae = mae(rgbValues, refRGB)
                 let maxAbs = maxAbsolute(rgbValues, refRGB)
+                rgbCosineText = String(format: "%.4f", cosine)
+                rgbRMSText = String(format: "%.4f", rmse)
+                rgbMAEText = String(format: "%.4f", mae)
+                rgbMaxAbsText = String(format: "%.4f", maxAbs)
                 print("FULL_RGB_COSINE=\(cosine)")
                 print("FULL_RGB_RMSE=\(rmse)")
                 print("FULL_RGB_MAE=\(mae)")
@@ -218,6 +232,36 @@ final class FullInferenceTests: XCTestCase {
         print("FULL_DIFFUSION_SECONDS=\(String(format: "%.2f", diffusionSeconds))")
         print("FULL_VAE_SECONDS=\(String(format: "%.2f", vaeSeconds))")
         print("FULL_TOTAL_SECONDS=\(String(format: "%.2f", totalSeconds))")
+
+        // ---- Image capture (artifact branch only) ----
+        // After the full inference has reached its normal output and all
+        // regression assertions above have run, serialize the generated image
+        // and the canonical reference into PNGs and attach them so the
+        // workflow can export them as a GitHub artifact. This block does NOT
+        // alter tensors, noise, precision, synchronization, or any comparison:
+        // it only reads the already-decoded `image` and the already-loaded
+        // `case1_decoded_rgb8.bin` reference.
+        captureArtifacts(image: image, referenceRGB: referenceRGB, metrics: [
+            "commit": "<injected-by-workflow>",
+            "run_id": "<injected-by-workflow>",
+            "prompt": prompt,
+            "case": "case1_danbooru_seed1337",
+            "packs": "qwen3-0.6b-xsmax-w8 / anima-turbo-v1.0-xsmax-w4 / qwen-image-vae-xsmax-fp16",
+            "latent_cosine": latentCosineText,
+            "latent_rmse": latentRMSText,
+            "latent_maxabs": latentMaxAbsText,
+            "rgb_cosine": rgbCosineText,
+            "rgb_rmse": rgbRMSText,
+            "rgb_mae": rgbMAEText,
+            "rgb_maxabs": rgbMaxAbsText,
+            "qwen_seconds": String(format: "%.2f", qwenSeconds),
+            "adapter_seconds": String(format: "%.2f", adapterSeconds),
+            "diffusion_seconds": String(format: "%.2f", diffusionSeconds),
+            "vae_seconds": String(format: "%.2f", vaeSeconds),
+            "total_seconds": String(format: "%.2f", totalSeconds),
+            "full_inference": "PASS",
+        ])
+
         print("FULL_INFERENCE=PASS")
     }
 
@@ -320,5 +364,146 @@ final class FullInferenceTests: XCTestCase {
     private func dynamicRange(_ bytes: [UInt8]) -> Int {
         let rgb = bytes.enumerated().filter { $0.offset % 4 != 3 }.map { Int($0.element) }
         return (rgb.max() ?? 0) - (rgb.min() ?? 0)
+    }
+
+    // MARK: - Artifact capture (temporary instrumentation, artifact branch only)
+
+    /// Serializes the generated and reference images to PNGs, composes a
+    /// lossless side-by-side comparison, and attaches them plus a metrics.txt
+    /// so the workflow can export them as a GitHub artifact. This reads only
+    /// already-produced data; it never touches inference internals.
+    private func captureArtifacts(
+        image: DecodedRGBA8,
+        referenceRGB: [UInt8],
+        metrics: [String: String]
+    ) {
+        let generatedPNG = makePNG(rgba8: image.bytes, width: 512, height: 512)
+        let referencePNG = makePNG(rgb8: referenceRGB, width: 512, height: 512)
+        let comparisonPNG = makeComparisonPNG(
+            generatedRGBA: image.bytes, referenceRGB: referenceRGB,
+            width: 512, height: 512)
+
+        if let generatedPNG {
+            let attachment = XCTAttachment(data: generatedPNG, uniformTypeIdentifier: UTType.png.identifier)
+            attachment.name = "generated.png"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        if let referencePNG {
+            let attachment = XCTAttachment(data: referencePNG, uniformTypeIdentifier: UTType.png.identifier)
+            attachment.name = "reference.png"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        if let comparisonPNG {
+            let attachment = XCTAttachment(data: comparisonPNG, uniformTypeIdentifier: UTType.png.identifier)
+            attachment.name = "comparison.png"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+
+        // metrics.txt (key: value, ordered, human-readable).
+        var lines: [String] = []
+        for key in [
+            "commit", "run_id", "prompt", "case", "packs",
+            "latent_cosine", "latent_rmse", "latent_maxabs",
+            "rgb_cosine", "rgb_rmse", "rgb_mae", "rgb_maxabs",
+            "qwen_seconds", "adapter_seconds", "diffusion_seconds",
+            "vae_seconds", "total_seconds", "full_inference",
+        ] {
+            if let value = metrics[key] { lines.append("\(key): \(value)") }
+        }
+        let textAttachment = XCTAttachment(string: lines.joined(separator: "\n") + "\n")
+        textAttachment.name = "metrics.txt"
+        textAttachment.lifetime = .keepAlways
+        add(textAttachment)
+    }
+
+    /// Encodes interleaved RGBA8 bytes into a PNG (lossless) via CoreGraphics.
+    private func makePNG(rgba8 bytes: [UInt8], width: Int, height: Int) -> Data? {
+        guard width > 0, height > 0, bytes.count == width * height * 4 else { return nil }
+        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+        let ctx = CGContext(
+            data: nil, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: width * 4,
+            space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        let data = Data(bytes)
+        data.withUnsafeBytes { raw in
+            ctx.data?.copyMemory(from: raw.baseAddress!, byteCount: bytes.count)
+        }
+        guard let cgImage = ctx.makeImage() else { return nil }
+        return pngData(from: cgImage)
+    }
+
+    /// Encodes interleaved RGB8 bytes into a PNG (lossless). Alpha = 255.
+    private func makePNG(rgb8 bytes: [UInt8], width: Int, height: Int) -> Data? {
+        guard width > 0, height > 0, bytes.count == width * height * 3 else { return nil }
+        var rgba = [UInt8](repeating: 255, count: width * height * 4)
+        for i in 0..<(width * height) {
+            rgba[i * 4 + 0] = bytes[i * 3 + 0]
+            rgba[i * 4 + 1] = bytes[i * 3 + 1]
+            rgba[i * 4 + 2] = bytes[i * 3 + 2]
+        }
+        return makePNG(rgba8: rgba, width: width, height: height)
+    }
+
+    /// Composes a lossless side-by-side: LEFT = generated, RIGHT = reference.
+    /// Pure pixel compositing into a 2×512 wide, 512 tall canvas. No content
+    /// is altered or resampled; no labels are drawn over image pixels.
+    private func makeComparisonPNG(
+        generatedRGBA: [UInt8], referenceRGB: [UInt8],
+        width: Int, height: Int
+    ) -> Data? {
+        guard generatedRGBA.count == width * height * 4,
+              referenceRGB.count == width * height * 3 else { return nil }
+        let canvasWidth = width * 2
+        let canvasHeight = height
+        let cs = CGColorSpace(name: CGColorSpace.sRGB)!
+        let ctx = CGContext(
+            data: nil, width: canvasWidth, height: canvasHeight,
+            bitsPerComponent: 8, bytesPerRow: canvasWidth * 4,
+            space: cs,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        let raw = ctx.data!.bindMemory(to: UInt8.self, capacity: canvasWidth * canvasHeight * 4)
+
+        // Left half = generated RGBA (row 0 = top of image).
+        for y in 0..<height {
+            let srcRow = y * width * 4
+            let dstRow = (canvasHeight - 1 - y) * canvasWidth * 4
+            for x in 0..<width {
+                let si = srcRow + x * 4
+                let di = dstRow + x * 4
+                raw[di + 0] = generatedRGBA[si + 0]
+                raw[di + 1] = generatedRGBA[si + 1]
+                raw[di + 2] = generatedRGBA[si + 2]
+                raw[di + 3] = 255
+            }
+        }
+        // Right half = reference RGB8 (alpha 255).
+        for y in 0..<height {
+            let srcRow = y * width * 3
+            let dstRow = (canvasHeight - 1 - y) * canvasWidth * 4
+            for x in 0..<width {
+                let si = srcRow + x * 3
+                let di = dstRow + (width + x) * 4
+                raw[di + 0] = referenceRGB[si + 0]
+                raw[di + 1] = referenceRGB[si + 1]
+                raw[di + 2] = referenceRGB[si + 2]
+                raw[di + 3] = 255
+            }
+        }
+
+        guard let cgImage = ctx.makeImage() else { return nil }
+        return pngData(from: cgImage)
+    }
+
+    /// Encodes a CGImage to PNG data via ImageIO.
+    private func pngData(from image: CGImage) -> Data? {
+        let data = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dest, image, nil)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return data as Data
     }
 }
