@@ -69,7 +69,12 @@ struct DiagnosticsEngine {
         let store = try? ModelStore()
         var packs: [DiagnosticsReport.ModelPackInfo] = []
         for entry in ModelManifest.entries {
-            let url = store?.localURL(for: entry)
+            let url: URL?
+            if let store {
+                url = await store.localURL(for: entry)
+            } else {
+                url = nil
+            }
             let exists = url.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
             let size = exists ? (url.flatMap { try? FileManager.default.attributesOfItem(atPath: $0.path)[.size] as? NSNumber })?.uint64Value ?? 0 : 0
             var verified = false
@@ -116,7 +121,7 @@ struct DiagnosticsEngine {
 
     func runSelfTests() async -> [DiagnosticItem] {
         var items: [DiagnosticItem] = []
-        items.append(packValidation())
+        items.append(await packValidation())
         items.append(w4Vector())
         items.append(w8Vector())
         items.append(goldenNoiseRNG())
@@ -135,19 +140,34 @@ struct DiagnosticsEngine {
         return items
     }
 
-    private func packValidation() -> DiagnosticItem {
+    private func packValidation() async -> DiagnosticItem {
         let store = try? ModelStore()
-        let missing = ModelManifest.entries.filter { entry in
-            guard let url = store?.localURL(for: entry) else { return true }
-            guard FileManager.default.fileExists(atPath: url.path) else { return true }
-            return (try? ModelManifest.verify(url, against: entry)) == nil
+        var missing: [String] = []
+        for entry in ModelManifest.entries {
+            let url: URL?
+            if let store {
+                url = await store.localURL(for: entry)
+            } else {
+                url = nil
+            }
+            guard let url else {
+                missing.append(entry.filename)
+                continue
+            }
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                missing.append(entry.filename)
+                continue
+            }
+            if (try? ModelManifest.verify(url, against: entry)) == nil {
+                missing.append(entry.filename)
+            }
         }
         if missing.isEmpty {
             return .init(name: "Pack validation", status: .pass,
                          detail: "all 3 packs verified (size + SHA-256)")
         }
         return .init(name: "Pack validation", status: .fail,
-                     detail: "missing/corrupt: \(missing.map(\.filename).joined(separator: ", "))")
+                     detail: "missing/corrupt: \(missing.joined(separator: ", "))")
     }
 
     /// Deterministic W4 vector decode against a known packed value.

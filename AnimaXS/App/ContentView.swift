@@ -165,9 +165,21 @@ struct ContentView: View {
             if let image = coordinator.image {
                 Image(uiImage: image)
                     .resizable().scaledToFit().frame(maxHeight: 300)
-                ShareLink(item: image, preview: SharePreview("AnimaXS image", image: image))
+                ShareLink(item: shareURL(for: image),
+                          preview: SharePreview("AnimaXS image", image: image))
             }
         }
+    }
+
+    /// Writes the generated image to a temporary PNG for sharing. Falls back
+    /// to the PNG data URL when the write fails (ShareLink can share a URL).
+    private func shareURL(for image: UIImage) -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("anima-xs-\(UUID().uuidString).png")
+        if let data = image.pngData() {
+            try? data.write(to: url)
+        }
+        return url
     }
 
     // MARK: - Helpers
@@ -274,7 +286,7 @@ final class ModelCatalog: ObservableObject {
         }
         // Discover already-installed valid packs (cold-launch ready).
         for entry in ModelManifest.entries {
-            let url = store.localURL(for: entry)
+            let url = await store.localURL(for: entry)
             if FileManager.default.fileExists(atPath: url.path) {
                 do {
                     try ModelManifest.verify(url, against: entry)
