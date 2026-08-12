@@ -115,10 +115,14 @@ actor ModelStore {
     /// The single validated result for the three production packs (K002 §5.1):
     /// textEncoder, dit, vae. The adapter reads the DiT pack, so only these
     /// three URLs are exposed.
-    func resolvedModels() async throws -> ResolvedModels {
+    ///
+    /// - Parameter entries: Manifest entries to resolve. Defaults to the
+    ///   production `ModelManifest.entries`; a test seam may inject tiny
+    ///   synthetic entries to avoid the multi-GB real packs.
+    func resolvedModels(entries: [ModelManifestEntry] = ModelManifest.entries) async throws -> ResolvedModels {
         let byComponent = Dictionary(
             uniqueKeysWithValues: try await withThrowingTaskGroup(of: (ModelComponent, URL).self) { group in
-                for entry in ModelManifest.entries {
+                for entry in entries {
                     group.addTask { (entry.component, try await self.prepare(entry)) }
                 }
                 var result: [(ModelComponent, URL)] = []
