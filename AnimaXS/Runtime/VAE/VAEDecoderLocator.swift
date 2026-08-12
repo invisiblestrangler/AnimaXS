@@ -77,23 +77,25 @@ struct VAEDecoderLocator {
 
     let groups: [Group]
 
-    init(file: AnimapkFile) throws {
+    init(file: AnimapkFile, requiresCompleteArchitecture: Bool = true) throws {
         guard file.component == "vae" else {
             throw AnimapkError.validation("VAE decoder locator requires a vae component pack")
         }
         // 1) Full architecture validation: every expected tensor present, exact
         //    shape, fp16 storage, and no unexpected decoder/post-quant tensors.
         let decoderNames = Set(file.tensors.map(\.name))
-        for (name, shape) in Self.expectedArchitecture {
-            guard let tensor = file.tensor(named: name) else {
-                throw AnimapkError.validation("VAE decoder tensor missing: \(name)")
-            }
-            guard tensor.shape == shape else {
-                throw AnimapkError.validation(
-                    "VAE decoder tensor \(name) shape \(tensor.shape) != expected \(shape)")
-            }
-            guard tensor.storage == .fp16 else {
-                throw AnimapkError.validation("VAE decoder tensor \(name) is not fp16")
+        if requiresCompleteArchitecture {
+            for (name, shape) in Self.expectedArchitecture {
+                guard let tensor = file.tensor(named: name) else {
+                    throw AnimapkError.validation("VAE decoder tensor missing: \(name)")
+                }
+                guard tensor.shape == shape else {
+                    throw AnimapkError.validation(
+                        "VAE decoder tensor \(name) shape \(tensor.shape) != expected \(shape)")
+                }
+                guard tensor.storage == .fp16 else {
+                    throw AnimapkError.validation("VAE decoder tensor \(name) is not fp16")
+                }
             }
         }
         let extras = decoderNames.filter { name in
