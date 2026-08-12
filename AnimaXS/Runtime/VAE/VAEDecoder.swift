@@ -60,10 +60,18 @@ final class VAEDecoder {
             throw AnimapkError.validation("VAE decoder input or output buffer is too small")
         }
         context.refreshDiagnostics()
+        let headRGB = try await decodeToPositionMajorRGB(latent: latent)
+        try await encodeRGBToChannelMajor(input: headRGB, output: rgb,
+                                          positions: Self.outputSize * Self.outputSize,
+                                          channels: Self.outputChannels)
+        context.refreshDiagnostics()
+    }
+
+    /// Single VAE decoder implementation shared by both output adapters (J004
+    /// refactor). Returns the position-major fp16 head RGB buffer
+    /// `[512*512, 3]` — the validated J002 graph lives here once.
+    private func decodeToPositionMajorRGB(latent: MTLBuffer) async throws -> MTLBuffer {
         #if DEBUG
-        // Stage/dump diagnostics only fire when ANIMAXS_VAE_DEBUG is set, so
-        // normal CI logs stay clean; the vae-parity workflow set it to isolate
-        // layer-by-layer divergence.
         let vaeDebug = ProcessInfo.processInfo.environment["ANIMAXS_VAE_DEBUG"] != nil
         var stageStart = Date()
         func stage(_ name: String) {
@@ -125,20 +133,15 @@ final class VAEDecoder {
         #endif
 
         // 5) upsample modules 0...14. Group index = 5 + module.
-        //    Resample modules are 3, 7, 11; module 4 is the 192->384
-        //    channel-change block with shortcut. x ping-pongs between the two
-        //    activation buffers (never aliased as conv input and output).
         var height = Self.latentSize
         var width = Self.latentSize
-        var xInA = false  // after middle residual, x lives in vae.activation.b
+        var xInA = false
         for module in 0..<15 {
             let groupIndex = 5 + module
             let group = try locator.group(groupIndex)
             let nextKey = xInA ? "vae.activation.b" : "vae.activation.a"
-            // Resample modules (3/7/11) carry .resample.1.weight; others don't.
             let isResample = try tensorSpan(group.range, suffix: ".resample.1.weight") != nil
             if isResample {
-                // Resample module: fused nearest-exact 2x + 3x3 Cin -> Cout.
                 let rs = try requireTensorSpan(group.range, suffix: ".resample.1.weight")
                 let inC = rs.tensor.shape[1]
                 let outC = rs.tensor.shape[0]
@@ -151,8 +154,6 @@ final class VAEDecoder {
                 height *= 2
                 width *= 2
             } else {
-                // Residual-only module.
-                // Only module 4 carries a shortcut (192->384 channel change).
                 let hasShortcut = try tensorSpan(group.range, suffix: ".shortcut.weight") != nil
                 let w2Shape = try requireTensorSpan(group.range, suffix: ".residual.2.weight").tensor.shape
                 let inC = w2Shape[1]
@@ -185,10 +186,7 @@ final class VAEDecoder {
         dumpStage(headRGB, name: "head_rgb", height: Self.outputSize, width: Self.outputSize, channels: Self.outputChannels)
         stage("head")
         #endif
-        try await encodeRGBToChannelMajor(input: headRGB, output: rgb,
-                                          positions: Self.outputSize * Self.outputSize,
-                                          channels: Self.outputChannels)
-        context.refreshDiagnostics()
+        return headRGB
     }
 }
 
@@ -699,6 +697,14 @@ extension VAEDecoder {
     }
 }
 
+/// Platform-neutral decoded image: interleaved RGBA8 pixels (w×h×4).
+/// Keeps the VAE runtime free of UIKit/CGImage concerns (J004 §6).
+struct DecodedRGBA8 {
+    let width: Int
+    let height: Int
+    let bytes: [UInt8]
+}
+
 // MARK: - Activation buffers
 
 extension VAEDecoder {
@@ -709,12 +715,12 @@ extension VAEDecoder {
     /// The caller should drop the `VAEDecoder` (and its `AnimapkFile` mmap)
     /// after this returns to release the pack mapping.
     func image(latent: MTLBuffer) async throws -> UIImage {
-        let rgba = try await rgba8(latent: latent)
+        let decoded = try await decode(latent: latent)
         guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-              let provider = CGDataProvider(data: Data(rgba) as CFData),
+              let provider = CGDataProvider(data: Data(decoded.bytes) as CFData),
               let cgImage = CGImage(
-                width: Self.outputSize, height: Self.outputSize,
-                bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: Self.outputSize * 4,
+                width: decoded.width, height: decoded.height,
+                bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: decoded.width * 4,
                 space: colorSpace,
                 bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
                 provider: provider, decode: nil, shouldInterpolate: false,
@@ -724,58 +730,17 @@ extension VAEDecoder {
         return UIImage(cgImage: cgImage)
     }
 
+    /// Platform-neutral decode: latent → `DecodedRGBA8` (no UIKit dependency).
+    func decode(latent: MTLBuffer) async throws -> DecodedRGBA8 {
+        let rgba = try await rgba8(latent: latent)
+        return DecodedRGBA8(width: Self.outputSize, height: Self.outputSize, bytes: rgba)
+    }
+
     /// Full-frame decode to an interleaved RGBA8 `[UInt8]` (w×h×4), releasing
     /// the large VAE activation/weight buffers before returning. Pure RGBA8 is
     /// useful for tests and for clients that want the raw pixels.
     func rgba8(latent: MTLBuffer) async throws -> [UInt8] {
-        let inputPositions = Self.latentSize * Self.latentSize
-        let positioned = activation(key: "vae.activation.a",
-                                    positions: inputPositions, channels: Self.latentChannels)
-        try await encodeLatentToPosition(latent: latent, output: positioned,
-                                         positions: inputPositions, channels: Self.latentChannels)
-        var x = positioned
-        x = try await run1x1Group(groupIndex: 0, input: x, positions: inputPositions,
-                                  inputChannels: Self.latentChannels,
-                                  outputChannels: Self.latentChannels, key: "vae.activation.b")
-        x = try await run3x3Group(groupIndex: 1, input: x, height: Self.latentSize,
-                                  width: Self.latentSize, inputChannels: Self.latentChannels,
-                                  outputChannels: 384, key: "vae.activation.a")
-        x = try await runResidualGroup(groupIndex: 2, input: x, height: Self.latentSize,
-                                       width: Self.latentSize, inChannels: 384, outChannels: 384,
-                                       key: "vae.activation.b")
-        x = try await runAttentionGroup(groupIndex: 3, input: x, height: Self.latentSize,
-                                        width: Self.latentSize, channels: 384, key: "vae.activation.a")
-        x = try await runResidualGroup(groupIndex: 4, input: x, height: Self.latentSize,
-                                       width: Self.latentSize, inChannels: 384, outChannels: 384,
-                                       key: "vae.activation.b")
-        var height = Self.latentSize, width = Self.latentSize, xInA = false
-        for module in 0..<15 {
-            let groupIndex = 5 + module
-            let group = try locator.group(groupIndex)
-            let nextKey = xInA ? "vae.activation.b" : "vae.activation.a"
-            let isResample = try tensorSpan(group.range, suffix: ".resample.1.weight") != nil
-            if isResample {
-                let rs = try requireTensorSpan(group.range, suffix: ".resample.1.weight")
-                let inC = rs.tensor.shape[1], outC = rs.tensor.shape[0]
-                let next = activation(key: nextKey, positions: height * width * 4, channels: outC)
-                try await encodeResampleGroup(groupIndex: groupIndex, input: x, output: next,
-                                              height: height, width: width,
-                                              inputChannels: inC, outputChannels: outC)
-                x = next; xInA.toggle(); height *= 2; width *= 2
-            } else {
-                let hasShortcut = try tensorSpan(group.range, suffix: ".shortcut.weight") != nil
-                let w2 = try requireTensorSpan(group.range, suffix: ".residual.2.weight").tensor.shape
-                x = try await runResidual(groupIndex: groupIndex, input: x,
-                                          height: height, width: width,
-                                          inChannels: w2[1], outChannels: w2[0],
-                                          key: nextKey, hasShortcut: hasShortcut)
-                xInA.toggle()
-            }
-        }
-        let headRGB = activation(key: "vae.head.rgb", positions: Self.outputSize * Self.outputSize,
-                                 channels: Self.outputChannels)
-        try await encodeHead(groupIndex: 20, input: x, output: headRGB,
-                             height: Self.outputSize, width: Self.outputSize)
+        let headRGB = try await decodeToPositionMajorRGB(latent: latent)
         // Release large activation/conv scratch buffers before the RGBA8 read so
         // the final image path holds no giant VAE tensors (J004 lifetime).
         buffers.removeAll()

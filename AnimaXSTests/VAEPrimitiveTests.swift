@@ -514,8 +514,16 @@ extension VAEPrimitiveTests {
         command.waitUntilCompleted()
 
         let result = out.contents().bindMemory(to: UInt8.self, capacity: pixels * 4)
-        // CPU reference via RGBConverter.rgba8 on the same values (fp32).
-        let cpu = try RGBConverter.rgba8(rgb.map { Float($0) }, width: pixels, height: 1)
+        // CPU reference via RGBConverter.rgba8. The Metal kernel reads HWC
+        // [pixel, channel]; RGBConverter expects CHW [channel, pixel], so
+        // convert the input to CHW before passing it.
+        var rgbCHW = [Float](repeating: 0, count: pixels * 3)
+        for pixel in 0..<pixels {
+            for channel in 0..<3 {
+                rgbCHW[channel * pixels + pixel] = Float(rgb[pixel * 3 + channel])
+            }
+        }
+        let cpu = try RGBConverter.rgba8(rgbCHW, width: pixels, height: 1)
         for i in 0..<(pixels * 4) {
             XCTAssertEqual(result[i], cpu[i], "RGBA byte \(i)")
         }
