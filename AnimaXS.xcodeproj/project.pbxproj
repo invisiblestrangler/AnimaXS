@@ -15,6 +15,7 @@
 		0DBB66A5E3DA44E0A984B762 /* VAEPrimitiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94B18038F06B899E8A619F95 /* VAEPrimitiveTests.swift */; };
 		10ECAB707F0D3BF55B5F9884 /* LLMAdapterMetal.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6F8E86593AEA3EED857C888F /* LLMAdapterMetal.swift */; };
 		1303514D8DBE7F84010B07A7 /* AnimaKernels.metal in Sources */ = {isa = PBXBuildFile; fileRef = 4C7A6A2DAA97C767D88AE25B /* AnimaKernels.metal */; };
+		1604E64A1B2D5CE972F1FF3D /* CheckpointStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2A943EBBA2F4761EFF10F06 /* CheckpointStore.swift */; };
 		19655429A907FC60821F1867 /* RealPackDecoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 24AA7FDE4D5F416423C74125 /* RealPackDecoderTests.swift */; };
 		1CE2D9C17323437A5B23EBF3 /* ReferenceTestsPlaceholder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 745BAB5E53065E6639F8BEA2 /* ReferenceTestsPlaceholder.swift */; };
 		1E52ED71A9AD8B33A91D049C /* Crc32.swift in Sources */ = {isa = PBXBuildFile; fileRef = 43FB54A2EC11428E9AFC19A4 /* Crc32.swift */; };
@@ -81,6 +82,7 @@
 		D49309A80BBD9F702F9E71A8 /* TimestepEmbedder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D7DEF4C7D7998D60A743925 /* TimestepEmbedder.swift */; };
 		D66CA83A712868A0FDAF7595 /* case1_final_latent.f32 in Resources */ = {isa = PBXBuildFile; fileRef = 0A37396ACF4F39FE78041309 /* case1_final_latent.f32 */; };
 		D7BF749539EBEF04781FBDE2 /* GenerationEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4347B31599A3D35830186731 /* GenerationEngine.swift */; };
+		DC41B314DCFA74EAA87FE57B /* ResumeEquivalenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A85A8F3F27A84580E23A837E /* ResumeEquivalenceTests.swift */; };
 		E03432114D1256677B254408 /* EulerSampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99DD442C7A3CCB6E47D0F488 /* EulerSampler.swift */; };
 		E4237CF411C2158613158D83 /* DiTBlockExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F14B5397CD1B2C4DE3D41CB /* DiTBlockExecutorTests.swift */; };
 		E8B287C14227EAB23ED6D5DB /* QwenEncoderCPU.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8094627F9958515821CFE276 /* QwenEncoderCPU.swift */; };
@@ -164,10 +166,12 @@
 		9DA452A409BF52C73769318E /* MappedFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MappedFile.swift; sourceTree = "<group>"; };
 		A109D17B6E3524E405A9B85B /* QwenEncoderMetal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenEncoderMetal.swift; sourceTree = "<group>"; };
 		A6F117CCE3CBBF4E5ECAF4B1 /* GenerationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationCoordinator.swift; sourceTree = "<group>"; };
+		A85A8F3F27A84580E23A837E /* ResumeEquivalenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResumeEquivalenceTests.swift; sourceTree = "<group>"; };
 		A9346A85EC2056315DFCE66D /* LinearExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinearExecutor.swift; sourceTree = "<group>"; };
 		B55416DCCBC54FD863B0137D /* case1_noise.f32 */ = {isa = PBXFileReference; path = case1_noise.f32; sourceTree = "<group>"; };
 		BE9A7C6882C9A11F40FD3816 /* RGBConverter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RGBConverter.swift; sourceTree = "<group>"; };
 		BF7F7DDF80FF8FC3729F608B /* SeededRNG.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeededRNG.swift; sourceTree = "<group>"; };
+		C2A943EBBA2F4761EFF10F06 /* CheckpointStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CheckpointStore.swift; sourceTree = "<group>"; };
 		C3E243B29F63E716A7FA5916 /* StageConformances.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StageConformances.swift; sourceTree = "<group>"; };
 		C416E0528D650EED48130A92 /* AnimapkTensor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkTensor.swift; sourceTree = "<group>"; };
 		C509546307CB21BE0D1A9146 /* LLMAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMAdapterTests.swift; sourceTree = "<group>"; };
@@ -336,6 +340,7 @@
 			isa = PBXGroup;
 			children = (
 				DFC5EBDAD72F3E1ECBEB3947 /* Checkpoint.swift */,
+				C2A943EBBA2F4761EFF10F06 /* CheckpointStore.swift */,
 				A6F117CCE3CBBF4E5ECAF4B1 /* GenerationCoordinator.swift */,
 				4347B31599A3D35830186731 /* GenerationEngine.swift */,
 				684C63379028C718819607CA /* ModelConstants.swift */,
@@ -431,6 +436,7 @@
 				63A581535AFB0BECB025A73F /* QwenEncoderMetalTests.swift */,
 				24AA7FDE4D5F416423C74125 /* RealPackDecoderTests.swift */,
 				745BAB5E53065E6639F8BEA2 /* ReferenceTestsPlaceholder.swift */,
+				A85A8F3F27A84580E23A837E /* ResumeEquivalenceTests.swift */,
 				DD10CAEE3E25726CE527243D /* SmokeTests.swift */,
 				D08BB48D952EAD6537D49B5E /* TimestepEmbedderTests.swift */,
 				1A1319CA9D168F08F49BA3EB /* TokenizerParityTests.swift */,
@@ -578,6 +584,7 @@
 				ACF5E6ADE5026984036BFFEC /* QwenEncoderMetalTests.swift in Sources */,
 				19655429A907FC60821F1867 /* RealPackDecoderTests.swift in Sources */,
 				1CE2D9C17323437A5B23EBF3 /* ReferenceTestsPlaceholder.swift in Sources */,
+				DC41B314DCFA74EAA87FE57B /* ResumeEquivalenceTests.swift in Sources */,
 				5D62EA8796701F40539F86DA /* SmokeTests.swift in Sources */,
 				79E4DFD6600B4D04E8C93CD6 /* TestExtensions.swift in Sources */,
 				556D3B10877CD4D85A9D4D9F /* TestPackFactory.swift in Sources */,
@@ -600,6 +607,7 @@
 				7E991650CBABF20B20E112AE /* AnimapkTensor.swift in Sources */,
 				473AE0F68178293C9A58882C /* AttentionExecutor.swift in Sources */,
 				D2CEA1830C6E17E0AB682B09 /* Checkpoint.swift in Sources */,
+				1604E64A1B2D5CE972F1FF3D /* CheckpointStore.swift in Sources */,
 				30116E9CBC6BF3DBEA66C41E /* ContentView.swift in Sources */,
 				1E52ED71A9AD8B33A91D049C /* Crc32.swift in Sources */,
 				BD81C9C99347181C9AB1E4B2 /* DiTBlockCPU.swift in Sources */,
