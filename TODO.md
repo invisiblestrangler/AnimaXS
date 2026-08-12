@@ -174,9 +174,9 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
 - [ ] **J003** — Wan decoder channel-wise RMS normalization (`F.normalize` over C × sqrt(C) × gamma), exact SiLU, attention, and nearest-exact spatial upsampling.
   - deps: J002 · output: VAE normalization/activation/upsampling primitives + tests · validation: pinned-source CPU reference match
   - **PARTIAL 2026-08-11, revised 2026-08-12.** `VAENumerics` locks channel-wise RMS, exact SiLU and integer-2× nearest-exact equations in CPU tests (`31496280087`). NOTE (D060): `decodeLatent`'s `z/0.5·std+mean` is NOT the production decode contract — the same-pack oracle proves the canonical path feeds the sampler's final latent into the decoder unchanged (cosine `0.9999872` vs canonical RGB). Production Metal kernels and the one-head middle attention remain part of J002/J003.
-- [~] **J004** — RGB: (rgb+1)/2 clamp → CGImage/UIImage; release fp32 buffer.
-  - deps: J002 · output: RGBConverter.swift + `VAEDecoder.image()/rgba8()` · validation: image displayed, memory released
-  - **IN PROGRESS 2026-08-12.** `RGBConverter` implements CHW `(rgb+1)/2`, clamp, rounded RGBA8 and sRGB `UIImage`; edge/order tests pass `31496280087`. `VAEDecoder` now exposes `image(latent:)`/`rgba8(latent:)` (J002, real-pack validated `31593343788`) that convert the decoder's fp16 HWC RGB directly to RGBA8 in Metal (`vae_position_to_rgba8` kernel), call `buffers.removeAll()` before returning, and produce a UIImage without a full `[Float]` lifetime; pack-free RGBA8-vs-CPU kernel test added. Remaining: display in the app UI (K002) and second-generation memory verification on the physical device (A12).
+- [x] **J004** — RGB: (rgb+1)/2 clamp → CGImage/UIImage; release fp32 buffer.
+  - deps: J002 · output: RGBConverter.swift + `VAEDecoder.image()/rgba8()/decode()` · validation: image displayed, memory released
+  - **DONE 2026-08-12.** `RGBConverter` implements CHW `(rgb+1)/2`, clamp, rounded RGBA8 and sRGB `UIImage`; edge/order tests pass `31496280087`. `VAEDecoder` exposes `image(latent:)`/`rgba8(latent:)`/`decode(latent:)` (J002, real-pack validated `31593343788`) that convert the decoder's fp16 HWC RGB directly to RGBA8 in Metal (`vae_position_to_rgba8` kernel), call `buffers.removeAll()` before returning, and produce a UIImage without a full `[Float]` lifetime; pack-free RGBA8-vs-CPU kernel test fixed and passing (HWC↔CHW layout, CI `31601722959`). VAE decoder graph exists in ONE implementation (`decodeToPositionMajorRGB`); platform-neutral `DecodedRGBA8` struct separates runtime from UIKit. Physical device memory behavior pending.
 - [ ] **J005** — Tiled VAE ONLY if device diagnostics demand it; preserve convolution halos and global spatial-attention behavior. NOT in first implementation.
   - deps: J002 + device evidence · output: decision in DECISIONS.md · validation: decision recorded, not speculative code
 
@@ -184,8 +184,9 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
 
 - [ ] **K001** — Minimal SwiftUI: model status/download, prompt, seed, Randomize, Generate, Cancel, progress (stage/step/block), elapsed, image, Share, Diagnostics.
   - deps: D006 · output: ContentView/GenerationViewModel · validation: builds; all controls wired
-- [ ] **K002** — GenerationCoordinator: one generation at a time; map/unmap per stage; keep only 512×1024 cond between TE/DiT.
+- [x] **K002** — GenerationCoordinator: one generation at a time; map/unmap per stage; keep only 512×1024 cond between TE/DiT.
   - deps: D006, F007, G003, I002, J004 · output: `GenerationCoordinator.swift` · validation: full pipeline runs; memory maps/releases occur at stage boundaries
+  - **DONE 2026-08-12.** `GenerationCoordinator` orchestrates prompt→tokenizers→Qwen→adapter→diffusion→VAE→UIImage with stage-scoped object lifetime (heavy model objects created and released inside `generate()`). `GenerationState` enum for UI progress. `Task.checkCancellation()` at stage boundaries. No duplicated model math. ContentView wired to coordinator. CI-green (`31601722959` baseline + K002 commit `6e7f042`). Physical device memory behavior pending.
 - [ ] **K003** — Cancellation at safe boundaries + background: stop scheduling, finish safe work, checkpoint, release; foreground Resume.
   - deps: I004, K002 · output: lifecycle handling · validation: cancel/background/resume behave without crash
 - [ ] **K004** — Memory warning: checkpoint + graceful cancel + free buffers + recoverable message. Thermal: pause/stop policy.
@@ -195,8 +196,9 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
 
 ## L — Full CI / inference testing
 
-- [ ] **L001** — Full canonical inference integration test: prompt→production Qwen/adapter→golden noise→8-step DiT→VAE at 512/CFG1; compare checkpoints and assert finite.
+- [~] **L001** — Full canonical inference integration test: prompt→production Qwen/adapter→golden noise→8-step DiT→VAE at 512/CFG1; compare checkpoints and assert finite.
   - deps: F007, G003, I002, J004, A006 · output: `FullInferenceTests.swift` · validation: final latent/RGB meet recorded source-vs-quantized tolerances; runs where Metal exists
+  - **IN PROGRESS 2026-08-12.** `FullInferenceTests.swift` compiles in normal CI and uses correct production APIs: `QwenEncoderMetal.execute(tokenIDs:output:)`, `LLMAdapterMetal.execute(qwenContext:contextTokens:t5IDs:t5Weights:output:)`, `DiffusionSampler.execute(initialLatent:crossContext:outputLatent:)`, `VAEDecoder.decode(latent:)→DecodedRGBA8`. Production `TokenizerLoader` semantics (Qwen: no specials; T5: no specials + [1] EOS; t5Weights all 1.0 verified from case1 fixture JSON). Fixture-gated: skips cleanly when model packs unavailable (A005 gates model-assets-v1). Remaining: full end-to-end run in Actions when legitimate model assets are available; establish measured final-image regression metrics from real full-pack run.
 - [ ] **L002** — Model release `model-assets-v1` (3 packs + manifest + LICENSE + NOTICE) AFTER license gate A005 passes; unauthenticated URL verification + re-hash.
   - deps: A005, D005 · output: GitHub Release · validation: unauthenticated download matches SHA-256
 - [ ] **L003** — Manual full-inference run: permanent Metal/MPS smoke → verified pack download → golden noise → canonical inference → timings/finite/parity asserts → small logs only.

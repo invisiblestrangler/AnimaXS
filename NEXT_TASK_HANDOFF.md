@@ -1,55 +1,70 @@
 # AnimaXS — Next Execution Agent Handoff
 
-Updated 2026-08-11 after production sampler/support infrastructure and the J001 VAE audit. The next critical path is **J002/J003 full-frame Wan VAE decoding**, followed by J004/K002 full-pipeline wiring.
+Updated 2026-08-12 after J004 refactor, K002 GenerationCoordinator, and L001 FullInferenceTests repair.
 
-## Start here
+## Repository state
 
-Work in `/root/AnimaXS`. Preserve and never commit untracked `scripts/oracle_out/block0/` (~347 MB). Read `STATUS.md`, `TODO.md`, D052–D058 in `DECISIONS.md`, and `docs/VAE_FOLD_REPORT.md` before touching the VAE.
+```
+branch: main
+HEAD: 9e2393c (chore: regenerate AnimaXS.xcodeproj from project.yml)
+origin/main: 9e2393c
+working-tree: clean (except untracked scripts/oracle_out/block0/ — do not commit)
+```
 
-Normal CI baseline `31496280087` passed the generic iOS build, project consistency, and 92 simulator tests (11 expected fixture/real-pack skips). A final I002 full-pack regression rerun may be newer than this handoff; inspect the latest `I002 diffusion parity` run and record it before continuing. Delete its temporary release/tag/workflow after a green proof.
+## Last known green CI
 
-## Proven production inference path
+```
+CI run: 31601722959 (refactor: share validated VAE decode path, fix RGBA8 test)
+  ✓ project-consistency
+  ✓ iphone-build
+  ✓ simulator-tests (106 tests, 12 skipped, 0 failures)
+```
 
-These are real Metal paths, not CPU placeholders:
+K002 and L001 commits (`6e7f042`, `594a04b`) were pushed after; CI triggered by `workflow_dispatch` is run `31602869235` (check status). Bootstrap was run to regenerate xcodeproj for new files.
 
-- Qwen F007 run `31491046871`: final same-W8 cosine `0.9999992405`, 5.19 s.
-- Adapter G003 run `31492451065`: final same-W4 cosine `0.9999984505`, 1.46 s; padded tail exactly zero.
-- DiT preparation run `31494520040`: residual cosine `0.9999999598`; timestep embedding/AdaLN effectively 1.0, 1.67 s.
-- DiT block/final gates: E009 `0.9999999798`, H007 `0.9999999646`; full 28-block residual was finite.
-- `DiffusionSampler` converts the adapter's fp32 `[512,1024]` output to fp16 once, then performs eight iterations of preparation → 28 blocks → final FLOW velocity → explicit fp32 `denoised = latent - sigma*velocity` → fp32 Euler. It rejects nonfinite post-step states and exposes block progress plus a post-step checkpoint callback.
+## Completed work this phase
 
-The first complete I002 execution ran all 224 blocks and eight finite Euler updates in 96.40 s. Its source-BF16 observational comparison was final cosine `0.6919034`; individual callback cosines were `0.9670` down to `0.8665`. Do not confuse this cumulative quantized-vs-source quality measurement with graph parity: every component has a tight same-W4 gate, while recurrent W4 error compounds. The retained regression floor is `0.65`; decoded-image quality remains an L001 release decision.
+1. **Commit `ddcf409`** — `fix: restore J004 iOS build` — UIKit import fix for VAEDecoder compile failure.
+2. **Commit `1a32112`** — `refactor: share validated VAE decode path, fix RGBA8 test` — Extracted `decodeToPositionMajorRGB(latent:)` shared method; both `execute(latent:rgb:)` and `rgba8(latent:)` call it. Added `DecodedRGBA8` struct and `decode(latent:)` method. Fixed `testPositionToRGBA8MatchesCPUReference` (HWC↔CHW layout bug). CI green `31601722959`.
+3. **Commit `594a04b`** — `test: repair full inference integration scaffold (L001)` — Rewrote `FullInferenceTests.swift` with correct production APIs, `TokenizerLoader` semantics, fixture gating.
+4. **Commit `6e7f042`** — `feat: add generation coordinator (K002)` — `GenerationCoordinator.swift` + `ContentView` wired. Stage-scoped lifetime, `GenerationState` enum, `Task.checkCancellation()`.
 
-The old golden `step_latents` is internally contradictory (D055): it cannot be post-step state, and treating it as denoised violates the final Euler invariant. Do not tune code to it. Regenerate the trace later with separately named callback `x`, `denoised`, post-step state, commit, and hashes. Full noise/final latent/context and compact anchors now live under `AnimaXSTests/Fixtures/Case1Binary` (A006).
+## Key architecture decisions
 
-## Immediate J002/J003 work
+- **One VAE decoder graph**: `decodeToPositionMajorRGB(latent:)` is the single implementation. RGB and RGBA8 outputs are thin adapters.
+- **Platform-neutral output**: `DecodedRGBA8` struct keeps UIKit out of the VAE runtime. `image(latent:)` is a thin UI adapter.
+- **Stage-scoped ownership**: `GenerationCoordinator.generate()` creates and releases all heavy model objects (Qwen, adapter, sampler, VAE + AnimapkFile mmaps) within the method body.
+- **L001 fixture gating**: `FullInferenceTests` skips cleanly when model packs are unavailable (A005 gates `model-assets-v1`).
 
-The model is pinned Wan `comfy/ldm/wan/vae.py`, not the Cosmos tokenizer. At T=1 with no feature cache:
+## What cannot be proven in this phase
 
-- `conv2` runs first, then `decoder.conv1`, middle residual → one-head spatial attention → residual, 15 `decoder.upsamples` modules, then head RMSNorm → SiLU → convolution.
-- Every executed rank-5 causal convolution folds to its **final temporal slice** because the source sees `[0,0,x]`. All 34 folds passed J001; temporal sums are wrong. The two decoder `time_conv` tensors do not execute at T=1.
-- Native rank-4 resample/attention weights stay ordinary 2-D weights.
-- Latent preprocessing is `z / 0.5 * std + mean`, channel-wise for the 16 chunk-0 values.
-- Wan RMS normalization is `F.normalize` across C at each pixel, then `×sqrt(C)×gamma`; it is not GroupNorm. `VAENumerics` contains the tested CPU equations.
-- Upsampling is integer 2× `nearest-exact` followed by the packed 3×3 convolution.
-- Middle attention is one head over 64×64 = 4096 positions at C=384. Reuse/query-tile `AttentionExecutor`; never allocate a 4096×4096 full score matrix.
+```
+physical iPhone XS Max launch
+real A12 GPU behavior
+actual A12 Metal throughput
+actual device peak RSS
+iOS jetsam behavior
+thermal behavior
+real-device GPU memory reclamation timing
+real-device second-generation memory stability
+```
 
-Implement the straightforward full-frame decoder first, stream/stage one fp16 weight at a time, and reuse activation scratch. Hosted simulator Metal can validate functional kernels and real-pack parity, so add a fixture-gated decoder test and use temporary release assets exactly like earlier gates. Do not implement VAE tiling unless A12 evidence later requires it. The required gate is decoded RGB maxAbs ≤0.05 and PSNR ≥30 dB versus canonical `decoded_rgb`.
+Progress files say: **CI-validated; physical A12 acceptance pending.**
 
-`RGBConverter` already implements CHW `(rgb+1)/2`, clamp, RGBA8, and sRGB `UIImage`; J004 only needs the real decoder buffer wired and its fp32 storage released at the stage boundary.
+## Remaining tasks (ordered by dependency)
 
-## Support work already landed
+1. **A005** — Resolve license review (CircleStone + NVIDIA Cosmos) to unblock `model-assets-v1`.
+2. **L001 full run** — When A005 resolves and model packs are available, run `full-inference.yml` workflow to execute end-to-end inference in Actions. Establish measured final-image regression metrics from the real full-pack run.
+3. **K003** — Cancellation at safe boundaries (stop scheduling, finish safe work, checkpoint, release).
+4. **K004** — Memory warning handler (checkpoint + graceful cancel + free buffers).
+5. **Physical A12 acceptance** — Build in Xcode, install on iPhone XS Max, record stage timings, peak memory, second-generation stability, thermal behavior. Tune VAE tile size only if device measurements justify it.
 
-- D005: exact built-in three-pack manifest plus incremental CryptoKit SHA-256.
-- D006 partial: actor download/verify/install state machine, disk reserve, Application Support, backup exclusion and file protection. Synthetic CI is green. A real release download cannot pass until A005 license review authorizes `model-assets-v1`; do not publish packs early.
-- I003: SplitMix64 + Box–Muller deterministic app RNG. It intentionally does not match ComfyUI; golden paths inject recorded noise.
-- I004: versioned atomic JSON checkpoint with bit-exact Float32 latent and model hashes. Use `DiffusionSampler.stepCompleted` as the persistence boundary.
-- J003 references and J004 RGB conversion have pack-free tests; production VAE execution remains missing.
+## First command for next agent
 
-## Hygiene and verification
-
-Normal push CI must remain pack-free. Adding a source/resource requires changing `project.yml`, letting `bootstrap-project` regenerate the committed Xcode project, pulling the bot commit, then manually dispatching CI because bot pushes do not trigger another run.
-
-Real-pack tests stay fixture-gated. Temporary releases, tags, and workflows must be removed immediately after proof. A12 memory, speed, thermal, page-cache and watchdog behavior remain device-only unknowns; hosted simulator success is functional evidence, not device acceptance.
-
-After J002–J004, implement K002 stage ownership and L001 full canonical inference. A005 gates public model-pack release, not local or temporary private validation.
+```bash
+cd /root/AnimaXS
+git pull --rebase origin main
+gh run list --limit 5
+# Verify CI is green on the latest commit
+# If A005 is resolved, run: gh workflow run full-inference.yml
+```
