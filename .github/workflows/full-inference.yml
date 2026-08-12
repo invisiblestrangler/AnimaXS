@@ -1,7 +1,10 @@
 name: full-inference
 
 # Manual full-model inference attempt on a macOS runner's simulator Metal device.
-# This downloads the ~2.1 GB model packs from the GitHub Release, so it only runs on demand.
+# This downloads the ~2.1 GB model packs from the GitHub Release (model-assets-v1),
+# verifies them against the manifest, then runs FullInferenceTests in REQUIRED
+# mode: any missing/mismatched pack or fixture-related skip is a FAILURE, and an
+# explicit FULL_INFERENCE=PASS marker is required in the log.
 on:
   workflow_dispatch:
     inputs:
@@ -19,6 +22,7 @@ permissions:
 
 env:
   DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+  MODEL_DIR: "${{ github.workspace }}/models"
 
 jobs:
   full-inference:
@@ -83,16 +87,46 @@ jobs:
             echo "result=PASS" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Run full-model integration inference
+      - name: Download and verify model packs
+        if: steps.metal.outputs.available == 'true'
+        run: |
+          set -e
+          mkdir -p "$MODEL_DIR"
+          TAG="${{ inputs.release }}"
+          BASE="https://github.com/invisiblestrangler/AnimaXS/releases/download/$TAG"
+          declare -A PACKS=(
+            [qwen3-0.6b-xsmax-w8.animapk]=ba59e4d1797de5f6512aeafcecf3f38e1f62a47313a2a400b949c9018d84ceab
+            [anima-turbo-v1.0-xsmax-w4.animapk]=ba1ce615f03665812f05088f9239f0cb23591a0811067d57fa51773abf6f0d25
+            [qwen-image-vae-xsmax-fp16.animapk]=10171af0b826927b75fecf4482aaa0e268254874e694a0788ebdd8c4254fc447
+          )
+          for name in "${!PACKS[@]}"; do
+            url="$BASE/$name"
+            dest="$MODEL_DIR/$name"
+            echo "Downloading $name ..."
+            curl -sSL -o "$dest" "$url"
+            [ -f "$dest" ] || { echo "::error::download failed: $name"; exit 1; }
+            ACTUAL=$(shasum -a 256 "$dest" | awk '{print $1}')
+            if [ "$ACTUAL" != "${PACKS[$name]}" ]; then
+              echo "::error::SHA-256 mismatch for $name: got $ACTUAL"
+              exit 1
+            fi
+            echo "$name verified (size $(wc -c < "$dest") bytes)"
+          done
+          echo "All three packs downloaded and verified."
+          df -h
+
+      - name: Run full-model integration inference (required mode)
         if: steps.metal.outputs.available == 'true'
         env:
           ANIMAXS_RELEASE: ${{ inputs.release }}
           ANIMAXS_CASE: ${{ inputs.case }}
+          ANIMAXS_REQUIRE_FULL_INFERENCE: "1"
+          ANIMAXS_QWEN_PACK: "${{ env.MODEL_DIR }}/qwen3-0.6b-xsmax-w8.animapk"
+          ANIMAXS_DIFFUSION_PACK: "${{ env.MODEL_DIR }}/anima-turbo-v1.0-xsmax-w4.animapk"
+          ANIMAXS_VAE_PACK: "${{ env.MODEL_DIR }}/qwen-image-vae-xsmax-fp16.animapk"
+          ANIMAXS_NOISE_FILE: "${{ github.workspace }}/AnimaXSTests/Fixtures/Case1Binary/case1_noise.f32"
         run: |
-          test -f AnimaXSTests/FullInferenceTests.swift || {
-            echo "::error::FullInferenceTests is not implemented yet; complete L001 before running this workflow."
-            exit 1
-          }
+          set -o pipefail
           xcodebuild \
             -project AnimaXS.xcodeproj \
             -scheme AnimaXS \
@@ -101,7 +135,15 @@ jobs:
             -derivedDataPath .derivedData \
             -only-testing:AnimaXSTests/FullInferenceTests \
             CODE_SIGNING_ALLOWED=NO \
-            test
+            test 2>&1 | tee full-inference.log
+          RESULT=${PIPESTATUS[0]}
+          test "$RESULT" -eq 0
+          # In REQUIRED mode with Metal available, a fixture skip is a FAILURE.
+          if grep -q 'full inference pack' full-inference.log; then
+            echo "::error::full-inference fixture skip appeared in required mode"
+            exit 1
+          fi
+          grep -q 'FULL_INFERENCE=PASS' full-inference.log
         timeout-minutes: 90
 
       - name: Report Metal availability and result
@@ -110,5 +152,11 @@ jobs:
           echo "Metal smoke: ${{ steps.metal.outputs.result }}" | tee -a "$GITHUB_STEP_SUMMARY"
           if [ "${{ steps.metal.outputs.result }}" = "SKIPPED_NO_METAL" ]; then
             echo "Full inference: SKIPPED_NO_METAL" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            if grep -q 'FULL_INFERENCE=PASS' full-inference.log 2>/dev/null; then
+              echo "Full inference: PASS" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              echo "Full inference: FAIL" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
           fi
           df -h
