@@ -223,6 +223,7 @@ final class ModelStoreTests: XCTestCase {
     func testImportVerifiesAndInstalls() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { Self.cleanup(root) }
         let content = Data("imported pack bytes".utf8)
         let entry = makeEntry(content: content)
@@ -239,6 +240,7 @@ final class ModelStoreTests: XCTestCase {
     func testImportRejectsMismatchedFile() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { Self.cleanup(root) }
         let entry = makeEntry(content: Data("expected".utf8))
         let source = root.appendingPathComponent("user-import.animapk")
