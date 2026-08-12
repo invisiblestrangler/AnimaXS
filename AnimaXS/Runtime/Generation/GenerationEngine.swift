@@ -73,19 +73,19 @@ protocol GenerationStageFactory {
 /// Production factory: real executors over real `AnimapkFile` mmaps.
 struct ProductionStageFactory: GenerationStageFactory {
     func makePromptEncoder(context: MetalContext, fileURL: URL) throws -> PromptEncoderStage {
-        QwenEncoderMetal(context: context, file: try AnimapkFile(url: fileURL))
+        try QwenEncoderMetal(context: context, file: try AnimapkFile(url: fileURL))
     }
 
     func makeContextAdapter(context: MetalContext, fileURL: URL) throws -> ContextAdapterStage {
-        LLMAdapterMetal(context: context, file: try AnimapkFile(url: fileURL))
+        try LLMAdapterMetal(context: context, file: try AnimapkFile(url: fileURL))
     }
 
     func makeDiffusion(context: MetalContext, fileURL: URL) throws -> DiffusionStage {
-        DiffusionSampler(context: context, file: try AnimapkFile(url: fileURL))
+        try DiffusionSampler(context: context, file: try AnimapkFile(url: fileURL))
     }
 
     func makeVAE(context: MetalContext, fileURL: URL) throws -> VAEDecodeStage {
-        VAEDecoder(context: context, file: try AnimapkFile(url: fileURL))
+        try VAEDecoder(context: context, file: try AnimapkFile(url: fileURL))
     }
 }
 
