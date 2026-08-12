@@ -62,6 +62,10 @@ jobs:
           ANIMAXS_VAE_ORACLE_DIR: "${{ github.workspace }}/AnimaXSTests/Fixtures/VAEParity"
         run: |
           set -o pipefail
+          # xcodebuild test forwards its process environment to the simulator
+          # test runner, so the vars are already exported by the step env block.
+          echo "VAE_PACK=$ANIMAXS_VAE_PACK exists=$(test -f "$ANIMAXS_VAE_PACK" && echo yes || echo no)"
+          echo "ORACLE_DIR=$ANIMAXS_VAE_ORACLE_DIR"
           xcodebuild \
             -project AnimaXS.xcodeproj \
             -scheme AnimaXS \

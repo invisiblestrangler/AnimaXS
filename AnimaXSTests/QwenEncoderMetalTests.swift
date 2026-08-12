@@ -192,12 +192,16 @@ final class QwenEncoderMetalTests: XCTestCase {
     /// decoder — both execute the identical fp16 pack, so this is the tight
     /// Lane A gate (D060). The canonical source RGB comparison is observational.
     func testRealW4VAEDecodeParity() async throws {
+        // Resolve the real pack + Lane A fixtures from env vars (manual
+        // workflow) or the bundled test fixtures, mirroring the I002 pattern.
+        let bundledPack = bundledFixture(named: "qwen-image-vae-xsmax-fp16.animapk")
+        let bundledLatent = bundledFixture(named: "vae_latent.f32")
         guard let packURL = ProcessInfo.processInfo.environment["ANIMAXS_VAE_PACK"]
-            .map(URL.init(fileURLWithPath:)) else {
+                .map(URL.init(fileURLWithPath:)) ?? bundledPack else {
             throw XCTSkip("real VAE pack not available")
         }
         guard let directory = ProcessInfo.processInfo.environment["ANIMAXS_VAE_ORACLE_DIR"]
-            .map(URL.init(fileURLWithPath:)) else {
+                .map(URL.init(fileURLWithPath:)) ?? bundledLatent?.deletingLastPathComponent() else {
             throw XCTSkip("VAE Lane A oracle fixture not available")
         }
         guard let context = MetalContext() else {
