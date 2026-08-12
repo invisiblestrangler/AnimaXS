@@ -480,3 +480,44 @@ extension VAEPrimitiveTests {
         print("VAE_ATTENTION_SPLIT=PASS")
     }
 }
+
+extension VAEPrimitiveTests {
+    // MARK: - RGBA8 final conversion (J004)
+
+    /// The decoder's fp16 HWC RGB -> interleaved RGBA8 kernel must fuse the
+    /// (rgb+1)/2 clamp and round the same as RGBConverter.rgba8 (CPU reference).
+    func testPositionToRGBA8MatchesCPUReference() async throws {
+        let context = try requireContext()
+        let pixels = 4
+        let rgb: [Float16] = [
+            -1.0, 0.0, 1.0,     // -> (0, 128, 255)
+            -0.5, 0.5, 0.25,   // -> (64, 191, 159)
+            0.0, -1.0, 0.75,   // -> (128, 0, 223)
+            0.9, -0.9, 0.1,    // -> (242, 13, 140)
+        ]
+        let input = makeBuffer(rgb, on: context.device)
+        let pipeline = try context.pipeline(named: "vae_position_to_rgba8")
+        guard let command = context.commandQueue.makeCommandBuffer(),
+              let out = context.device.makeBuffer(length: pixels * 4, options: .storageModeShared),
+              let encoder = command.makeComputeCommandEncoder() else {
+            return XCTFail("failed to create RGBA8 test buffers")
+        }
+        var pixelsU = UInt32(pixels)
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(input, offset: 0, index: 0)
+        encoder.setBuffer(out, offset: 0, index: 1)
+        encoder.setBytes(&pixelsU, length: 4, index: 2)
+        encoder.dispatchThreads(MTLSize(width: pixels, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 4, height: 1, depth: 1))
+        encoder.endEncoding()
+        command.commit()
+        command.waitUntilCompleted()
+
+        let result = out.contents().bindMemory(to: UInt8.self, capacity: pixels * 4)
+        // CPU reference via RGBConverter.rgba8 on the same values (fp32).
+        let cpu = try RGBConverter.rgba8(rgb.map { Float($0) }, width: pixels, height: 1)
+        for i in 0..<(pixels * 4) {
+            XCTAssertEqual(result[i], cpu[i], "RGBA byte \(i)")
+        }
+    }
+}

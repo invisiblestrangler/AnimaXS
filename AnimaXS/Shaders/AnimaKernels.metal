@@ -947,3 +947,26 @@ kernel void vae_split_qkv_half(
     split[positions * channels + gid.x * channels + gid.y] = k;
     split[2 * positions * channels + gid.x * channels + gid.y] = v;
 }
+
+// Decoder's fp16 position-major [H*W,3] RGB (~[-1,1]) -> RGBA8 interleaved
+// (r,g,b,255), fusing the (rgb+1)/2 clamp. One thread per pixel. This is the
+// J004 final image path: it avoids materializing a full [Float] RGB copy.
+kernel void vae_position_to_rgba8(
+    device const half *positioned [[buffer(0)]],
+    device uchar4     *output     [[buffer(1)]],
+    constant uint     &pixels     [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= pixels) return;
+    float r = float(positioned[gid * 3 + 0]);
+    float g = float(positioned[gid * 3 + 1]);
+    float b = float(positioned[gid * 3 + 2]);
+    r = clamp((r + 1.0) * 0.5, 0.0, 1.0);
+    g = clamp((g + 1.0) * 0.5, 0.0, 1.0);
+    b = clamp((b + 1.0) * 0.5, 0.0, 1.0);
+    output[gid] = uchar4(
+        (uchar)(r * 255.0 + 0.5),
+        (uchar)(g * 255.0 + 0.5),
+        (uchar)(b * 255.0 + 0.5),
+        255);
+}

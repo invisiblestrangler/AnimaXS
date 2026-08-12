@@ -175,8 +175,8 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
   - deps: J002 · output: VAE normalization/activation/upsampling primitives + tests · validation: pinned-source CPU reference match
   - **PARTIAL 2026-08-11, revised 2026-08-12.** `VAENumerics` locks channel-wise RMS, exact SiLU and integer-2× nearest-exact equations in CPU tests (`31496280087`). NOTE (D060): `decodeLatent`'s `z/0.5·std+mean` is NOT the production decode contract — the same-pack oracle proves the canonical path feeds the sampler's final latent into the decoder unchanged (cosine `0.9999872` vs canonical RGB). Production Metal kernels and the one-head middle attention remain part of J002/J003.
 - [~] **J004** — RGB: (rgb+1)/2 clamp → CGImage/UIImage; release fp32 buffer.
-  - deps: J002 · output: RGBConverter.swift · validation: image displayed, memory released
-  - **IN PROGRESS 2026-08-11.** `RGBConverter` implements CHW `(rgb+1)/2`, clamp, rounded RGBA8 and sRGB `UIImage`; edge/order tests pass `31496280087`. Wiring a real decoder output and proving fp32-buffer release waits on J002/K002.
+  - deps: J002 · output: RGBConverter.swift + `VAEDecoder.image()/rgba8()` · validation: image displayed, memory released
+  - **IN PROGRESS 2026-08-12.** `RGBConverter` implements CHW `(rgb+1)/2`, clamp, rounded RGBA8 and sRGB `UIImage`; edge/order tests pass `31496280087`. `VAEDecoder` now exposes `image(latent:)`/`rgba8(latent:)` (J002, real-pack validated `31593343788`) that convert the decoder's fp16 HWC RGB directly to RGBA8 in Metal (`vae_position_to_rgba8` kernel), call `buffers.removeAll()` before returning, and produce a UIImage without a full `[Float]` lifetime; pack-free RGBA8-vs-CPU kernel test added. Remaining: display in the app UI (K002) and second-generation memory verification on the physical device (A12).
 - [ ] **J005** — Tiled VAE ONLY if device diagnostics demand it; preserve convolution halos and global spatial-attention behavior. NOT in first implementation.
   - deps: J002 + device evidence · output: decision in DECISIONS.md · validation: decision recorded, not speculative code
 

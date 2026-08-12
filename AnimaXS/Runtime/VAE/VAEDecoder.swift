@@ -699,6 +699,107 @@ extension VAEDecoder {
 // MARK: - Activation buffers
 
 extension VAEDecoder {
+    /// Full-frame decode of `latent` (fp32 `[16,64,64]`) directly to a UIImage
+    /// (J004). The decoder's fp16 HWC RGB is converted to RGBA8 in a Metal
+    /// kernel (fusing the `(rgb+1)/2` clamp), avoiding a full `[Float]` copy;
+    /// the large activation/weight buffers are then released before returning.
+    /// The caller should drop the `VAEDecoder` (and its `AnimapkFile` mmap)
+    /// after this returns to release the pack mapping.
+    func image(latent: MTLBuffer) async throws -> UIImage {
+        let rgba = try await rgba8(latent: latent)
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let provider = CGDataProvider(data: Data(rgba) as CFData),
+              let cgImage = CGImage(
+                width: Self.outputSize, height: Self.outputSize,
+                bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: Self.outputSize * 4,
+                space: colorSpace,
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                provider: provider, decode: nil, shouldInterpolate: false,
+                intent: .defaultIntent) else {
+            throw AnimapkError.validation("failed to create decoded RGB image")
+        }
+        return UIImage(cgImage: cgImage)
+    }
+
+    /// Full-frame decode to an interleaved RGBA8 `[UInt8]` (w×h×4), releasing
+    /// the large VAE activation/weight buffers before returning. Pure RGBA8 is
+    /// useful for tests and for clients that want the raw pixels.
+    func rgba8(latent: MTLBuffer) async throws -> [UInt8] {
+        let inputPositions = Self.latentSize * Self.latentSize
+        let positioned = activation(key: "vae.activation.a",
+                                    positions: inputPositions, channels: Self.latentChannels)
+        try await encodeLatentToPosition(latent: latent, output: positioned,
+                                         positions: inputPositions, channels: Self.latentChannels)
+        var x = positioned
+        x = try await run1x1Group(groupIndex: 0, input: x, positions: inputPositions,
+                                  inputChannels: Self.latentChannels,
+                                  outputChannels: Self.latentChannels, key: "vae.activation.b")
+        x = try await run3x3Group(groupIndex: 1, input: x, height: Self.latentSize,
+                                  width: Self.latentSize, inputChannels: Self.latentChannels,
+                                  outputChannels: 384, key: "vae.activation.a")
+        x = try await runResidualGroup(groupIndex: 2, input: x, height: Self.latentSize,
+                                       width: Self.latentSize, inChannels: 384, outChannels: 384,
+                                       key: "vae.activation.b")
+        x = try await runAttentionGroup(groupIndex: 3, input: x, height: Self.latentSize,
+                                        width: Self.latentSize, channels: 384, key: "vae.activation.a")
+        x = try await runResidualGroup(groupIndex: 4, input: x, height: Self.latentSize,
+                                       width: Self.latentSize, inChannels: 384, outChannels: 384,
+                                       key: "vae.activation.b")
+        var height = Self.latentSize, width = Self.latentSize, xInA = false
+        for module in 0..<15 {
+            let groupIndex = 5 + module
+            let group = try locator.group(groupIndex)
+            let nextKey = xInA ? "vae.activation.b" : "vae.activation.a"
+            let isResample = try tensorSpan(group.range, suffix: ".resample.1.weight") != nil
+            if isResample {
+                let rs = try requireTensorSpan(group.range, suffix: ".resample.1.weight")
+                let inC = rs.tensor.shape[1], outC = rs.tensor.shape[0]
+                let next = activation(key: nextKey, positions: height * width * 4, channels: outC)
+                try await encodeResampleGroup(groupIndex: groupIndex, input: x, output: next,
+                                              height: height, width: width,
+                                              inputChannels: inC, outputChannels: outC)
+                x = next; xInA.toggle(); height *= 2; width *= 2
+            } else {
+                let hasShortcut = try tensorSpan(group.range, suffix: ".shortcut.weight") != nil
+                let w2 = try requireTensorSpan(group.range, suffix: ".residual.2.weight").tensor.shape
+                x = try await runResidual(groupIndex: groupIndex, input: x,
+                                          height: height, width: width,
+                                          inChannels: w2[1], outChannels: w2[0],
+                                          key: nextKey, hasShortcut: hasShortcut)
+                xInA.toggle()
+            }
+        }
+        let headRGB = activation(key: "vae.head.rgb", positions: Self.outputSize * Self.outputSize,
+                                 channels: Self.outputChannels)
+        try await encodeHead(groupIndex: 20, input: x, output: headRGB,
+                             height: Self.outputSize, width: Self.outputSize)
+        // Release large activation/conv scratch buffers before the RGBA8 read so
+        // the final image path holds no giant VAE tensors (J004 lifetime).
+        buffers.removeAll()
+        return try await encodeRGBA8(input: headRGB,
+                                     pixels: Self.outputSize * Self.outputSize)
+    }
+
+    private func encodeRGBA8(input: MTLBuffer, pixels: Int) async throws -> [UInt8] {
+        let pipeline = try context.pipeline(named: "vae_position_to_rgba8")
+        guard let command = context.commandQueue.makeCommandBuffer(),
+              let rgba = context.device.makeBuffer(length: pixels * 4, options: .storageModeShared),
+              let encoder = command.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create VAE RGBA8 encoder")
+        }
+        var pixelsU = UInt32(pixels)
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(input, offset: 0, index: 0)
+        encoder.setBuffer(rgba, offset: 0, index: 1)
+        encoder.setBytes(&pixelsU, length: 4, index: 2)
+        encoder.dispatchThreads(MTLSize(width: pixels, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+        encoder.endEncoding()
+        try await commit(command)
+        let pointer = rgba.contents().bindMemory(to: UInt8.self, capacity: pixels * 4)
+        return Array(UnsafeBufferPointer(start: pointer, count: pixels * 4))
+    }
+
     /// Position-major fp16 activation buffer: `[positions, channels]`, tight rows.
     /// Buffers grow on demand and are reused across stages (bounded memory).
     private func activation(key: String, positions: Int, channels: Int) -> MTLBuffer {
