@@ -55,7 +55,14 @@ final class FullInferenceTests: XCTestCase {
             envKey: "ANIMAXS_NOISE_FILE", name: "case1_noise.f32")
 
         let overall = Date()
-        let prompt = "1girl, solo, danbooru, masterpiece, best quality"
+        // The canonical golden (case1_danbooru_seed1337.npz, seed 1337) was
+        // generated with this EXACT prompt (see fixtures.json / extract
+        // script). The production chain must regenerate the same conditioning,
+        // or the final latent/RGB regression against case1_final_latent.f32 and
+        // case1_decoded_rgb8.bin is apples-to-oranges and cannot pass. (A
+        // shorter/different prompt produced latent cosine 0.488 / RGB 0.438 in
+        // the first full run — see DECISIONS D073.)
+        let prompt = "masterpiece, best quality, score_7, safe, 1girl, long brown hair, blue eyes, school uniform, cherry blossom, outdoors, looking at viewer, smile, depth of field, highres, absurdres"
 
         // ---- 1. Tokenization (production TokenizerLoader semantics) ----
         // Qwen: encode(prompt, no specials); T5: + [1] EOS; t5Weights all 1.0.
