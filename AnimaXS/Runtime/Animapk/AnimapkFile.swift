@@ -21,6 +21,8 @@ final class AnimapkFile {
     let byBlobOffset: [UInt64: AnimapkTensor]
     let quantScheme: String?
     let quantGroup: Int?
+    /// "dit" / "te" / "vae" component from the architecture JSON.
+    let component: String
 
     private let map: MappedFile
 
@@ -43,6 +45,7 @@ final class AnimapkFile {
             throw AnimapkError.json("failed to decode architecture JSON: \(error)")
         }
         self.tensors = envelope.tensorMeta
+        self.component = envelope.component
         self.quantScheme = envelope.quant?.scheme
         self.quantGroup = envelope.quant?.group
 

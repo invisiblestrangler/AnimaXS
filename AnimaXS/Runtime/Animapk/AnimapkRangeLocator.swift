@@ -35,7 +35,7 @@ struct AnimapkQuantizedRowSpans: Equatable {
     let zero: AnimapkRelativeSpan
 }
 
-private enum AnimapkRangeBuilder {
+enum AnimapkRangeBuilder {
     static func executionRanges(
         tensors: [AnimapkTensor],
         prefix: String,
