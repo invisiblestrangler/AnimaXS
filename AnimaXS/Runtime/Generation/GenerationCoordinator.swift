@@ -48,6 +48,9 @@ enum GenerationError: Error, LocalizedError {
 /// - guarantees one generation at a time;
 /// - forwards the visible seed into production `SeededRNG`;
 /// - reports diffusion step AND block progress to the UI;
+/// - persists a full-metadata checkpoint after each completed diffusion step
+///   (I004/K003) so cancel/background/memory-warning can resume;
+/// - validates checkpoint compatibility (prompt/seed/hashes) before resume;
 /// - exposes cooperative cancellation (K003 core);
 /// - keeps the last successful image across failed runs.
 @MainActor
@@ -57,15 +60,18 @@ final class GenerationCoordinator: ObservableObject {
 
     private let context: MetalContext?
     private let factory: any GenerationStageFactory
+    private let checkpointStore: CheckpointStore?
     private var generationTask: Task<Void, Never>?
-    private var latestCheckpoint: (step: Int, latent: [Float])?
+    private var latestCheckpoint: GenerationCheckpoint?
 
     init(
         context: MetalContext? = nil,
         factory: any GenerationStageFactory = ProductionStageFactory(),
-        attemptMetalFallback: Bool = true
+        attemptMetalFallback: Bool = true,
+        checkpointStore: CheckpointStore? = nil
     ) {
         self.factory = factory
+        self.checkpointStore = checkpointStore
         if let context {
             self.context = context
         } else if attemptMetalFallback {
@@ -74,6 +80,10 @@ final class GenerationCoordinator: ObservableObject {
         } else {
             // Test seam: simulate an environment with no Metal device.
             self.context = nil
+        }
+        // Cold launch: a valid persisted checkpoint is offered for resume.
+        if let checkpointStore {
+            latestCheckpoint = checkpointStore.load()
         }
     }
 
@@ -91,9 +101,13 @@ final class GenerationCoordinator: ObservableObject {
     }
 
     var canResume: Bool {
-        if case .idle = state, latestCheckpoint != nil { return true }
-        if case .cancelled = state, latestCheckpoint != nil { return true }
-        return false
+        guard let checkpoint = latestCheckpoint else { return false }
+        switch state {
+        case .idle, .cancelled:
+            return checkpoint.step >= 1 && checkpoint.step <= ModelConstants.samplerSteps
+        default:
+            return false
+        }
     }
 
     var completedSteps: Int? {
@@ -115,6 +129,7 @@ final class GenerationCoordinator: ObservableObject {
         }
         // A fresh generation supersedes any previous checkpoint.
         latestCheckpoint = nil
+        checkpointStore?.remove()
         // Enter the generating state synchronously so a second `generate`
         // call (even on the same runloop tick) is rejected.
         state = .tokenizing
@@ -125,22 +140,41 @@ final class GenerationCoordinator: ObservableObject {
 
     /// Resumes from the latest completed diffusion step checkpoint.
     /// Reconstructs conditioning (tokenization + Qwen + adapter), then starts
-    /// diffusion at `checkpoint.step`.
+    /// diffusion at `checkpoint.step`. Rejects incompatible checkpoints
+    /// (prompt/seed/resolution/model-hash mismatch) as a recoverable error.
     func resume(
         prompt: String,
         seed: UInt64,
         models: ResolvedModels,
         noise: MTLBuffer? = nil
     ) {
-        guard !isGenerating, let checkpoint = latestCheckpoint else { return }
+        guard !isGenerating else { return }
+        guard let checkpoint = latestCheckpoint else { return }
         guard let context else {
             state = .failed(GenerationError.metal("Metal device unavailable").localizedDescription)
             return
         }
+        do {
+            let hashes = try ModelManifest.productionHashes()
+            let store = try checkpointStore ?? CheckpointStore()
+            _ = try store.validate(
+                checkpoint, prompt: prompt, seed: seed,
+                resolution: (512, 512), modelHashes: hashes)
+        } catch {
+            // Incompatible or corrupt: drop it and surface a recoverable error.
+            discardCheckpoint()
+            state = .failed(error.localizedDescription)
+            return
+        }
+        guard let latent = try? checkpoint.latentValues() else {
+            discardCheckpoint()
+            state = .failed("checkpoint latent is corrupt")
+            return
+        }
         let buffer = context.device.makeBuffer(
-            length: checkpoint.latent.count * 4, options: .storageModeShared)!
+            length: latent.count * 4, options: .storageModeShared)!
         buffer.contents().copyMemory(
-            from: checkpoint.latent, byteCount: checkpoint.latent.count * 4)
+            from: latent, byteCount: latent.count * 4)
         state = .tokenizing
         run(engine: GenerationEngine(context: context, factory: factory),
             prompt: prompt, seed: seed, models: models,
@@ -157,6 +191,7 @@ final class GenerationCoordinator: ObservableObject {
     /// Drops the retained checkpoint (e.g. incompatible models after resume).
     func discardCheckpoint() {
         latestCheckpoint = nil
+        checkpointStore?.remove()
         if case .cancelled = state { state = .idle }
     }
 
@@ -185,10 +220,24 @@ final class GenerationCoordinator: ObservableObject {
                             self?.state = snapshot
                         }
                     },
-                    checkpoint: { step, latent in
-                        let values = latent
+                    checkpoint: { completedStep, latent in
+                        // Persist the full-metadata checkpoint immediately so
+                        // cancel/background/memory-warning can always resume
+                        // from the last fully completed step (I004 §6.3).
+                        let nextStep = completedStep + 1
+                        guard let checkpoint = try? GenerationCheckpoint(
+                            latent: latent, step: nextStep,
+                            prompt: prompt, seed: seed,
+                            width: ModelConstants.imageSize,
+                            height: ModelConstants.imageSize,
+                            modelHashes: try ModelManifest.productionHashes()) else {
+                            return
+                        }
                         Task { @MainActor [weak self] in
-                            self?.latestCheckpoint = (step + 1, values)
+                            self?.latestCheckpoint = checkpoint
+                            if let store = self?.checkpointStore {
+                                try? store.save(checkpoint)
+                            }
                         }
                     })
                 guard !Task.isCancelled else {
