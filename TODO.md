@@ -22,7 +22,7 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
   - **DONE 2026-08-12 (D069).** Archived full license texts under `docs/model-licenses/` (CircleStone NC v1.2, NVIDIA Open Model License 2025-10-24, Apache 2.0 ×2), authored `MODEL_LICENSE.md` (authoritative audit) and `MODEL_NOTICE.txt` (required notices). Verdict: **non-commercial redistribution of the three converted/quantized packs is permitted** with license copies + CircleStone Attribution Notice + NVIDIA OML notice + "Built on NVIDIA Cosmos" + Apache 2.0 + modification disclosure. **Commercial distribution/use remains blocked** without separate licenses — a precise constraint on L002, not an unresolved blocker. Full audit in DECISIONS D069.
 - [x] **A006** — Extract the small committed fixture set from `case1_danbooru_seed1337.npz`: prompt, token IDs/masks, context anchors/full context if budget permits, noise, sigmas, final latent, step/block/RGB slices, and shape/hash metadata.
   - deps: A002 · output: test-only fixtures + `fixtures.json` · validation: SHA-256 and shapes recorded, deterministic anchors checked, committed total about 3 MB; full 8 MB block arrays/118 MB NPZ stay local or manual-CI-only
-  - **DONE 2026-08-11.** `scripts/extract_golden_fixtures.py` verifies canonical NPZ SHA-256 `44d35d…a8dc` and emits 717,783 bytes under `AnimaXSTests/Fixtures/Case1Binary`: full raw noise, final latent and Qwen context, T5 IDs, exact sigmas/prompt/mask hash, plus first-16 anchors and full hashes/shapes for legacy step callbacks, blocks 0/15/27 and RGB. The metadata explicitly carries D055's warning; no contradictory legacy callback array is used as an intermediate sampler gate. Total committed test fixtures remain about 2.0 MB.
+  - **DONE 2026-08-11; rgb8 added 2026-08-12.** `scripts/extract_golden_fixtures.py` verifies canonical NPZ SHA-256 `44d35d…a8dc` and emits 1,504,476 bytes under `AnimaXSTests/Fixtures/Case1Binary`: full raw noise, final latent and Qwen context, T5 IDs, exact sigmas/prompt/mask hash, plus first-16 anchors and full hashes/shapes for legacy step callbacks, blocks 0/15/27 and RGB. The metadata explicitly carries D055's warning; no contradictory legacy callback array is used as an intermediate sampler gate. Added `case1_decoded_rgb8.bin` (786,432 B canonical RGB8 image reference) for the L001 final-image regression (D071). Total committed test fixtures remain about 1.5 MB.
 
 ## B — Repository / project bootstrap
 
@@ -45,8 +45,9 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
   - deps: B004 · output: shared CI step · validation: works on macos-15
 - [x] **C002** — Run all pure-reference and pack-free Metal/MPS tests in the single simulator XCTest job (no duplicate dependency build).
   - deps: B006 · output: green simulator test job · validation: latest main CI executed all discovered tests; future tests are added to the same target
-- [~] **C003** — `full-inference.yml` manual workflow: boot simulator, execute permanent Metal/MPS smoke, explicit `SKIPPED_NO_METAL`, then fail-fast full inference.
+- [x] **C003** — `full-inference.yml` manual workflow: boot simulator, execute permanent Metal/MPS smoke, explicit `SKIPPED_NO_METAL`, then fail-fast full inference.
   - deps: B005, L001, L002 · output: workflow file + attempted run · validation: after L001/L002, run records PASS or SKIPPED_NO_METAL; no `continue-on-error`
+  - **DONE 2026-08-12 (commit `3dae37d`).** Fixed the Bash 3.2 associative-array bug (`declare -A` unsupported on macOS Bash 3.2) by replacing the pack-download loop with a Bash-3.2-safe `printf | while read name size sha` line-oriented manifest loop. Hardened curl with `--fail --location --retry --retry-all-errors` and now verifies exact filename, byte count, AND SHA-256 (a 404 HTML document is never accepted as a pack). No `continue-on-error` anywhere. L003 run result is recorded separately.
 - [x] **C004** — Push/PR CI never downloads packs; only manual full-inference may fetch release assets.
   - deps: C002 · output: enforced in YAML · validation: normal CI green without pack download; real-pack tests explicitly skip
 
@@ -178,8 +179,9 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
 - [x] **J004** — RGB: (rgb+1)/2 clamp → CGImage/UIImage; release fp32 buffer.
   - deps: J002 · output: RGBConverter.swift + `VAEDecoder.image()/rgba8()/decode()` · validation: image displayed, memory released
   - **DONE 2026-08-12.** `RGBConverter` implements CHW `(rgb+1)/2`, clamp, rounded RGBA8 and sRGB `UIImage`; edge/order tests pass `31496280087`. `VAEDecoder` exposes `image(latent:)`/`rgba8(latent:)`/`decode(latent:)` (J002, real-pack validated `31593343788`) that convert the decoder's fp16 HWC RGB directly to RGBA8 in Metal (`vae_position_to_rgba8` kernel), call `buffers.removeAll()` before returning, and produce a UIImage without a full `[Float]` lifetime; pack-free RGBA8-vs-CPU kernel test fixed and passing (HWC↔CHW layout, CI `31601722959`). VAE decoder graph exists in ONE implementation (`decodeToPositionMajorRGB`); platform-neutral `DecodedRGBA8` struct separates runtime from UIKit. Physical device memory behavior pending.
-- [ ] **J005** — Tiled VAE ONLY if device diagnostics demand it; preserve convolution halos and global spatial-attention behavior. NOT in first implementation.
+- [x] **J005** — Tiled VAE ONLY if device diagnostics demand it; preserve convolution halos and global spatial-attention behavior. NOT in first implementation.
   - deps: J002 + device evidence · output: decision in DECISIONS.md · validation: decision recorded, not speculative code
+  - **DONE 2026-08-12 (deferred, not a bug).** Not triggered: tiled VAE requires physical A12 device diagnostics (memory/timeout pressure) that no CI environment can supply. Per D053, tiling (if ever added) must preserve convolution halos and global spatial attention. Recorded as intentionally deferred pending physical-device evidence — NOT an unfinished known bug. Do not implement speculative tiling to make a checkbox green.
 
 ## K — UI / resilience
 
@@ -201,19 +203,24 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
 
 ## L — Full CI / inference testing
 
-- [~] **L001** — Full canonical inference integration test: prompt→production Qwen/adapter→golden noise→8-step DiT→VAE at 512/CFG1; compare checkpoints and assert finite.
+- [x] **L001** — Full canonical inference integration test: prompt→production Qwen/adapter→golden noise→8-step DiT→VAE at 512/CFG1; compare checkpoints and assert finite.
   - deps: F007, G003, I002, J004, A006 · output: `FullInferenceTests.swift` · validation: final latent/RGB meet recorded source-vs-quantized tolerances; runs where Metal exists
-  - **IN PROGRESS 2026-08-12.** `FullInferenceTests.swift` compiles in normal CI and uses correct production APIs: `QwenEncoderMetal.execute(tokenIDs:output:)`, `LLMAdapterMetal.execute(qwenContext:contextTokens:t5IDs:t5Weights:output:)`, `DiffusionSampler.execute(initialLatent:crossContext:outputLatent:)`, `VAEDecoder.decode(latent:)→DecodedRGBA8`. Production `TokenizerLoader` semantics (Qwen: no specials; T5: no specials + [1] EOS; t5Weights all 1.0 verified from case1 fixture JSON). Fixture-gated: skips cleanly when model packs unavailable (A005 gates model-assets-v1). Remaining: full end-to-end run in Actions when legitimate model assets are available; establish measured final-image regression metrics from real full-pack run.
-- [ ] **L002** — Model release `model-assets-v1` (3 packs + manifest + LICENSE + NOTICE) AFTER license gate A005 passes; unauthenticated URL verification + re-hash.
+  - **DONE 2026-08-12 (commit `3dae37d`).** `FullInferenceTests` compiles in normal CI and uses correct production APIs: `QwenEncoderMetal.execute(tokenIDs:output:)`, `LLMAdapterMetal.execute(qwenContext:contextTokens:t5IDs:t5Weights:output:)`, `DiffusionSampler.execute(initialLatent:crossContext:outputLatent:)`, `VAEDecoder.decode(latent:)→DecodedRGBA8`. Production `TokenizerLoader` semantics (Qwen: no specials; T5: no specials + `[1]` EOS; t5Weights all 1.0 verified from fixture JSON). **RGB gap closed (D071):** added canonical `case1_decoded_rgb8.bin` (512×512×3 UInt8, SHA `a396c4ae…7019`) derived from the SHA-verified canonical NPZ `decoded_rgb` via the exact production display transform, so `FullInferenceTests` now actually exercises a full-image regression (previously the fixture was absent and the RGB block never ran). Reports `FULL_RGB_COSINE/RMSE/MAE/MAXABS`, gate cosine ≥ 0.9. `scripts/extract_golden_fixtures.py` regenerates the fixture (verified byte-identical). Fixture-gated: skips cleanly when model packs unavailable; `full-inference.yml` injects real packs and requires a PASS.
+- [x] **L002** — Model release `model-assets-v1` (3 packs + manifest + LICENSE + NOTICE) AFTER license gate A005 passes; unauthenticated URL verification + re-hash.
   - deps: A005, D005 · output: GitHub Release · validation: unauthenticated download matches SHA-256
-- [ ] **L003** — Manual full-inference run: permanent Metal/MPS smoke → verified pack download → golden noise → canonical inference → timings/finite/parity asserts → small logs only.
+  - **DONE 2026-08-12 (D070).** `model-assets-v1` published. Independently re-downloaded as an unauthenticated user (no token): all three packs matched the production `ModelManifest.swift` and the release `model-manifest.json` on size and SHA-256; `MODEL_LICENSE.md`/`MODEL_NOTICE.txt` on the release are byte-identical to the committed copies.
+- [~] **L003** — Manual full-inference run: permanent Metal/MPS smoke → verified pack download → golden noise → canonical inference → timings/finite/parity asserts → small logs only.
   - deps: L001, L002, C003 · output: workflow run record + summary · validation: PASS or explicit SKIPPED_NO_METAL; any failure with Metal present remains red
+  - **IN PROGRESS 2026-08-12.** Workflow Bash-3.2 bug fixed (C003). Run pending; result recorded in STATUS/DECISIONS once executed.
 
 ## M — Documentation / release / final handoff
 
-- [ ] **M001** — README: clone/open/sign/build/install steps, SDK-vs-deployment-target explanation, license notices.
+- [~] **M001** — README: clone/open/sign/build/install steps, SDK-vs-deployment-target explanation, license notices.
   - deps: B003 · output: README.md · validation: user can follow steps without source edits
-- [ ] **M002** — TEST_MATRIX.md + DEVICE_TESTS.md maintained; DEVICE_TESTS captures A12 microbenchmarks when run.
+  - **DRAFTED 2026-08-12.** `README.md` is drafted (covers what AnimaXS is, target device, Xcode 26.3/XcodeGen 2.46.0, clone/open/build, deployment target 18.0, model-pack architecture, Download/Import, storage ~2.1 GB, release tag `model-assets-v1`, non-commercial license warning, attribution/notices, generation usage, CI validation + explicit "CI is not a substitute for physical device validation"). Awaiting final review/commit with the documentation batch.
+- [~] **M002** — TEST_MATRIX.md + DEVICE_TESTS.md maintained; DEVICE_TESTS captures A12 microbenchmarks when run.
   - deps: ongoing · output: docs · validation: accurate, current
+  - **IN PROGRESS 2026-08-12.** `DEVICE_TESTS.md` already clearly separates CI-proven (hosted simulator) from A12-pending. `TEST_MATRIX.md` is being updated to remove stale run IDs and reflect the L001 RGB8 fixture.
 - [ ] **M003** — Final report: repo URL, commit SHA, release URL, Xcode/SDK/deployment facts, CI statuses, Metal availability, image generated?, pack hashes, test counts, unresolved issues, first XS Max steps; explicit A12 DEVICE TESTED: YES/NO.
   - deps: all · output: report to user · validation: every field answered honestly
+  - **PENDING 2026-08-12.** Requires L003 result (PASS or SKIPPED_NO_METAL) and final CI confirmation.

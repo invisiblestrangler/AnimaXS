@@ -84,7 +84,7 @@ Env: `CI-sim` = GitHub Actions standard `macos-15` arm64 iOS Simulator · `CI-de
 | I002 | 8 post-step latents finite + final latent parity | PASS: 224 blocks, eight finite states in 107.92 s; callback cosines 0.9670→0.8665; final W4-vs-source-BF16 cosine `0.6919` ≥ `0.65` floor, maxAbs 4.2050, rmse 0.9756 (dedicated `I002 diffusion parity` `31497208620`; D057/D059). `step_latents` remains invalid as intermediate gate (D055). | CI-sim pack-backed |
 | J002 | VAE RGB ≈ decoded_rgb | Oracle (Lane B, same-pack): cosine `0.9999872`, RMSE `0.003258`, PSNR `97.87 dB`, maxAbs `0.2179` vs canonical RGB with identity latent input (D060) | local real pack |
 | J002 (Swift/Metal) | full-frame decoder vs same-pack oracle | Real pack run `31593343788`: cosine `0.99981`, RMSE `0.01333`, maxAbs `0.04272` in 37.06 s; all 19 stage stats match oracle (D061) | vae-parity workflow |
-| L001 | full canonical final latent | pending | CI-sim/A12 |
+| L001 | full canonical final latent + final-image RGB8 regression | fixture `case1_decoded_rgb8.bin` committed (SHA `a396c4ae…7019`); test gated on real packs, full run pending L003 | CI-sim/A12 |
 
 ## Build gates
 | Gate | Status | Env |
@@ -92,5 +92,5 @@ Env: `CI-sim` = GitHub Actions standard `macos-15` arm64 iOS Simulator · `CI-de
 | Xcode 26.3 generic iOS build PASS | RAN with DiT preparation/I001 (`31493950011`) | CI-dev |
 | deployment target 18.0 | RAN (static) | — |
 | Metal shaders compile | RAN with DiT preparation/I001 (`31493950011`) | CI-dev/CI-sim |
-| simulator unit tests PASS | 92 tests, 11 expected fixture/real-pack skips, 0 failures (`31496280087`) | CI-sim |
+| simulator unit tests PASS | 151 tests, 13 expected fixture/real-pack skips, 0 failures (`31634877232`) | CI-sim |
 | xcodegen 2.46.0 checksum + clean regeneration | PASS (`31496280087`) | CI-sim |

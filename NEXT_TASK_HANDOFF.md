@@ -1,40 +1,43 @@
 # AnimaXS — Next Execution Agent Handoff
 
-Updated 2026-08-12 after J004 refactor, K002 GenerationCoordinator, and L001 FullInferenceTests repair.
+Updated 2026-08-12 (final completion stage: L002 verified, L003 workflow fixed, docs reconciled).
 
 ## Repository state
 
 ```
 branch: main
-HEAD: 9e2393c (chore: regenerate AnimaXS.xcodeproj from project.yml)
-origin/main: 9e2393c
-working-tree: clean (except untracked scripts/oracle_out/block0/ — do not commit)
+HEAD: bbf5cc1 (chore: regenerate AnimaXS.xcodeproj from project.yml)
+origin/main: bbf5cc1
+parent source commit: 3dae37d (fix(L001/L003): Bash-3.2-safe pack download loop + RGB8 fixture)
+working-tree: clean except untracked README.md (M001) and scripts/oracle_out/block0/ (gitignored oracle artifacts — do not commit)
 ```
 
 ## Last known green CI
 
 ```
-CI run: 31601722959 (refactor: share validated VAE decode path, fix RGBA8 test)
+Normal CI (workflow_dispatch on bbf5cc1): run 31634877232 SUCCESS
   ✓ project-consistency
   ✓ iphone-build
-  ✓ simulator-tests (106 tests, 12 skipped, 0 failures)
+  ✓ simulator-tests (151 tests, 13 expected fixture-gated skips, 0 failures)
+The run 31633790701 (on 3dae37d) failed ONLY project-consistency because the
+xcodeproj had not yet been regenerated to include the new case1_decoded_rgb8.bin
+fixture; the bootstrap-project run 31633797289 regenerated it and pushed bbf5cc1.
+Run 31633936959 failed ONLY DiagnosticsTests pack-validation (environmental
+flake — leftover packs in runner simulator Application Support; D072); clean
+re-run 31634877232 passed.
 ```
 
-K002 and L001 commits (`6e7f042`, `594a04b`) were pushed after; CI triggered by `workflow_dispatch` is run `31602869235` (check status). Bootstrap was run to regenerate xcodeproj for new files.
+## Completed work this stage
 
-## Completed work this phase
-
-1. **Commit `ddcf409`** — `fix: restore J004 iOS build` — UIKit import fix for VAEDecoder compile failure.
-2. **Commit `1a32112`** — `refactor: share validated VAE decode path, fix RGBA8 test` — Extracted `decodeToPositionMajorRGB(latent:)` shared method; both `execute(latent:rgb:)` and `rgba8(latent:)` call it. Added `DecodedRGBA8` struct and `decode(latent:)` method. Fixed `testPositionToRGBA8MatchesCPUReference` (HWC↔CHW layout bug). CI green `31601722959`.
-3. **Commit `594a04b`** — `test: repair full inference integration scaffold (L001)` — Rewrote `FullInferenceTests.swift` with correct production APIs, `TokenizerLoader` semantics, fixture gating.
-4. **Commit `6e7f042`** — `feat: add generation coordinator (K002)` — `GenerationCoordinator.swift` + `ContentView` wired. Stage-scoped lifetime, `GenerationState` enum, `Task.checkCancellation()`.
+1. **L002 (commit none needed — verification only):** `model-assets-v1` release independently verified as an unauthenticated user: all three packs downloaded (one at a time) and SHA-256 matched the production `ModelManifest.swift` and the release `model-manifest.json`; LICENSE/NOTICE byte-identical to committed copies. Evidence in DECISIONS D070.
+2. **Commit `3dae37d`** — `fix(L001/L003)`: full-inference.yml Bash 3.2 associative-array bug fixed (macOS Bash 3.2 has no `declare -A`); replaced with a `printf | while read` line-oriented loop and hardened curl (`--fail --location --retry --retry-all-errors`), verifying exact filename + byte count + SHA-256.
+3. **Commit `3dae37d` (RGB gap, L001):** added canonical `case1_decoded_rgb8.bin` (512×512×3 UInt8, SHA `a396c4ae…7019`) derived from the canonical NPZ `decoded_rgb` via the exact production display transform; `FullInferenceTests` now computes FULL_RGB_COSINE/RMSE/MAE/MAXABS with a cosine ≥ 0.9 gate; `scripts/extract_golden_fixtures.py` regenerates it. Evidence in DECISIONS D071.
+4. **Commit `bbf5cc1` (bot):** regenerated `AnimaXS.xcodeproj` to include `case1_decoded_rgb8.bin` as a test resource.
 
 ## Key architecture decisions
 
-- **One VAE decoder graph**: `decodeToPositionMajorRGB(latent:)` is the single implementation. RGB and RGBA8 outputs are thin adapters.
-- **Platform-neutral output**: `DecodedRGBA8` struct keeps UIKit out of the VAE runtime. `image(latent:)` is a thin UI adapter.
-- **Stage-scoped ownership**: `GenerationCoordinator.generate()` creates and releases all heavy model objects (Qwen, adapter, sampler, VAE + AnimapkFile mmaps) within the method body.
-- **L001 fixture gating**: `FullInferenceTests` skips cleanly when model packs are unavailable (A005 gates `model-assets-v1`).
+- **Three production packs** (K002): qwen text encoder, DiT (serves BOTH adapter and sampler), VAE. No separate adapter pack in production inference.
+- **L001 RGB regression**: `case1_decoded_rgb8.bin` is the canonical final-image reference; both production RGBA8 and the reference go through the identical `(v+1)*0.5→*255→round` display transform, so the cosine/RMSE/MAE/maxAbs comparison is apples-to-apples. Gate: cosine ≥ 0.9 (DECISIONS D071).
 
 ## What cannot be proven in this phase
 
@@ -53,11 +56,11 @@ Progress files say: **CI-validated; physical A12 acceptance pending.**
 
 ## Remaining tasks (ordered by dependency)
 
-1. **A005** — Resolve license review (CircleStone + NVIDIA Cosmos) to unblock `model-assets-v1`.
-2. **L001 full run** — When A005 resolves and model packs are available, run `full-inference.yml` workflow to execute end-to-end inference in Actions. Establish measured final-image regression metrics from the real full-pack run.
-3. **K003** — Cancellation at safe boundaries (stop scheduling, finish safe work, checkpoint, release).
-4. **K004** — Memory warning handler (checkpoint + graceful cancel + free buffers).
-5. **Physical A12 acceptance** — Build in Xcode, install on iPhone XS Max, record stage timings, peak memory, second-generation stability, thermal behavior. Tune VAE tile size only if device measurements justify it.
+1. **L003** — Run the `full-inference` workflow (`gh workflow run full-inference.yml --ref main`) and record PASS or explicit `SKIPPED_NO_METAL` + metrics (commit SHA, run ID, runner image, Xcode, Metal smoke, 3-pack verification, model load, 8 diffusion steps, final latent cosine/RMSE, RGB parity metrics, image-health, timings, overall result).
+2. **M001 README** — `README.md` is drafted (untracked); review/commit it.
+3. **M002** — Update `TEST_MATRIX.md` (remove stale run IDs) and confirm `DEVICE_TESTS.md` still clearly separates CI-proven vs A12-pending.
+4. **M003** — Final report with the required fields.
+5. **Physical A12 acceptance** — Build in Xcode, install on iPhone XS Max, record stage timings, peak memory, second-generation stability, thermal behavior. Tune VAE tile size (J005) only if device measurements justify it.
 
 ## First command for next agent
 
@@ -65,6 +68,7 @@ Progress files say: **CI-validated; physical A12 acceptance pending.**
 cd /root/AnimaXS
 git pull --rebase origin main
 gh run list --limit 5
-# Verify CI is green on the latest commit
-# If A005 is resolved, run: gh workflow run full-inference.yml
+# Confirm normal CI is green on the latest commit, then:
+gh workflow run full-inference.yml --ref main   # L003
+# Collect the run's FULL_INFERENCE result + metrics from the log/job summary.
 ```
