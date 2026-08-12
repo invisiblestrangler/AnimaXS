@@ -691,3 +691,237 @@ kernel void unpatchify_velocity16(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Wan VAE T=1 kernels (D052/D053/D060).
+// Activations are position-major [height*width, channels] fp16 (channels
+// contiguous), matching the decoder's internal HWC layout. All reductions
+// accumulate in fp32. Convolution is implemented by the host as tiled
+// im2col + MPS GEMM; these kernels cover norm/activation/upsample/elementwise
+// work only.
+// ---------------------------------------------------------------------------
+
+// Channel-wise Wan RMS norm: F.normalize over C at each position, x sqrt(C),
+// x learned gamma. Input/output HWC fp16 [positions, channels].
+kernel void vae_channel_rmsnorm_half(
+    device const half  *input     [[buffer(0)]],
+    device const half  *gamma     [[buffer(1)]],
+    device half        *output    [[buffer(2)]],
+    constant uint      &positions [[buffer(3)]],
+    constant uint      &channels  [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= positions) return;
+    const uint base = gid * channels;
+    float sum = 0.0f;
+    for (uint c = 0; c < channels; ++c) {
+        float v = float(input[base + c]);
+        sum += v * v;
+    }
+    float inverse = 1.0f / max(sqrt(sum), 1e-12f);
+    float scale = sqrt(float(channels));
+    for (uint c = 0; c < channels; ++c) {
+        float v = float(input[base + c]);
+        output[base + c] = half(v * inverse * scale * float(gamma[c]));
+    }
+}
+
+// SiLU on fp16 element buffer (identical math to the fp32 `silu` kernel).
+kernel void silu_half(
+    device const half *input  [[buffer(0)]],
+    device half       *output [[buffer(1)]],
+    constant uint     &count  [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) return;
+    float x = float(input[gid]);
+    output[gid] = half(x / (1.0f + exp(-x)));
+}
+
+// Nearest-exact 2x upsample of a position-major HWC fp16 tensor.
+// [H,W,C] -> [2H,2W,C]; out(y,x,c) = in(y/2, x/2, c).
+kernel void vae_nearest_exact_2x_half(
+    device const half  *input  [[buffer(0)]],
+    device half        *output [[buffer(1)]],
+    constant uint      &height [[buffer(2)]],
+    constant uint      &width  [[buffer(3)]],
+    constant uint      &channels [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])  // gid.x = output pixel, gid.y = channel
+{
+    const uint outPixels = height * 2 * width * 2;
+    const uint pixel = gid.x;
+    if (pixel >= outPixels || gid.y >= channels) return;
+    const uint outWidth = width * 2;
+    const uint outY = pixel / outWidth;
+    const uint outX = pixel % outWidth;
+    const uint inY = outY / 2;
+    const uint inX = outX / 2;
+    output[pixel * channels + gid.y] = input[(inY * width + inX) * channels + gid.y];
+}
+
+// Fused nearest-exact 2x + 3x3 im2col gather: builds one output-position tile
+// for a padded 3x3 convolution whose INPUT is the nearest-exact upsample of a
+// source tensor. Reads source directly (no enlarged temporary), with zero
+// padding applied in the upsample coordinate space.
+//   source  HWC fp16 [srcH*srcW, channels]
+//   output  fp16 [tileRows, channels*9] in PyTorch im2col order
+//           (channel-major: (c*3+ky)*3+kx)
+// Each thread produces one row (one output pixel) fully: loop over 9 taps.
+kernel void vae_im2col_upsample3x3_half(
+    device const half  *source   [[buffer(0)]],
+    device half        *output   [[buffer(1)]],
+    constant uint      &srcH     [[buffer(2)]],
+    constant uint      &srcW     [[buffer(3)]],
+    constant uint      &channels [[buffer(4)]],
+    constant uint      &outH     [[buffer(5)]],
+    constant uint      &outW     [[buffer(6)]],
+    constant uint      &tileRows [[buffer(7)]],
+    constant uint      &tileBase [[buffer(8)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= tileRows) return;
+    const uint outPixel = tileBase + gid;
+    if (outPixel >= outH * outW) return;
+    const uint outY = outPixel / outW;
+    const uint outX = outPixel % outW;
+    const uint rowBase = gid * channels * 9;
+    for (uint ky = 0; ky < 3; ++ky) {
+        for (uint kx = 0; kx < 3; ++kx) {
+            // Convolution input coordinate in the UPSCALED space.
+            const int inY = int(outY) + int(ky) - 1;
+            const int inX = int(outX) + int(kx) - 1;
+            // Zero padding at the upscaled-image border.
+            if (inY < 0 || inX < 0 || inY >= int(outH) || inX >= int(outW)) {
+                for (uint c = 0; c < channels; ++c) {
+                    output[rowBase + (c * 3 + ky) * 3 + kx] = 0.0h;
+                }
+            } else {
+                const uint srcY = uint(inY) / 2;
+                const uint srcX = uint(inX) / 2;
+                const uint srcBase = (srcY * srcW + srcX) * channels;
+                for (uint c = 0; c < channels; ++c) {
+                    output[rowBase + (c * 3 + ky) * 3 + kx] = source[srcBase + c];
+                }
+            }
+        }
+    }
+}
+
+// Plain 3x3 im2col gather (no upsample) for position-major HWC fp16 input.
+kernel void vae_im2col3x3_half(
+    device const half  *input    [[buffer(0)]],
+    device half        *output   [[buffer(1)]],
+    constant uint      &height   [[buffer(2)]],
+    constant uint      &width    [[buffer(3)]],
+    constant uint      &channels [[buffer(4)]],
+    constant uint      &tileRows [[buffer(5)]],
+    constant uint      &tileBase [[buffer(6)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= tileRows) return;
+    const uint pixel = tileBase + gid;
+    if (pixel >= height * width) return;
+    const uint y = pixel / width;
+    const uint x = pixel % width;
+    const uint rowBase = gid * channels * 9;
+    for (uint ky = 0; ky < 3; ++ky) {
+        for (uint kx = 0; kx < 3; ++kx) {
+            const int inY = int(y) + int(ky) - 1;
+            const int inX = int(x) + int(kx) - 1;
+            if (inY < 0 || inX < 0 || inY >= int(height) || inX >= int(width)) {
+                for (uint c = 0; c < channels; ++c) {
+                    output[rowBase + (c * 3 + ky) * 3 + kx] = 0.0h;
+                }
+            } else {
+                const uint srcBase = (uint(inY) * width + uint(inX)) * channels;
+                for (uint c = 0; c < channels; ++c) {
+                    output[rowBase + (c * 3 + ky) * 3 + kx] = input[srcBase + c];
+                }
+            }
+        }
+    }
+}
+
+// Elementwise add of two HWC fp16 buffers into a third (residual add / identity).
+kernel void vae_add_half(
+    device const half *lhs  [[buffer(0)]],
+    device const half *rhs  [[buffer(1)]],
+    device half       *out  [[buffer(2)]],
+    constant uint     &count [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) return;
+    out[gid] = half(float(lhs[gid]) + float(rhs[gid]));
+}
+
+// Copy fp16 buffer (used when a stage output must survive a scratch swap).
+kernel void copy_half(
+    device const half *input  [[buffer(0)]],
+    device half       *output [[buffer(1)]],
+    constant uint     &count  [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) return;
+    output[gid] = input[gid];
+}
+
+// Fold a conv weight into row-padded fp16 scratch for the MPS GEMM path.
+// Source is PyTorch layout [Cout, Cin, (KT,) KH, KW] fp16 contiguous. For rank-5
+// causal weights, only the FINAL temporal slice (index KT-1) is used (D052).
+// Output row o,c is written at scratch[(o*outStride) + (c*KH+ky)*KW+kx], so the
+// im2col column order (c-major, then ky, then kx) matches exactly.
+kernel void vae_fold_weight_half(
+    device const half  *source     [[buffer(0)]],
+    device half        *output     [[buffer(1)]],
+    constant uint      &channelsIn [[buffer(2)]],
+    constant uint      &channelsOut [[buffer(3)]],
+    constant uint      &kh         [[buffer(4)]],
+    constant uint      &kw         [[buffer(5)]],
+    constant uint      &kt         [[buffer(6)]],   // temporal kernel size (1 = rank-4)
+    constant uint      &outStride  [[buffer(7)]],
+    uint gid [[thread_position_in_grid]])
+{
+    const uint kernelElements = kh * kw;
+    const uint total = channelsOut * channelsIn * kernelElements;
+    if (gid >= total) return;
+    const uint k = gid % kernelElements;          // (ky*kw + kx)
+    const uint c = (gid / kernelElements) % channelsIn;
+    const uint o = gid / (kernelElements * channelsIn);
+    const uint ky = k / kw, kx = k % kw;
+    // Final temporal slice offset within each (o,c) plane: (KT-1)*KH*KW.
+    const uint temporalSkip = (kt > 1) ? (kt - 1) * kernelElements : 0;
+    const uint srcIndex = ((o * channelsIn + c) * kt * kernelElements) + temporalSkip + k;
+    const uint dstIndex = o * outStride + (c * kh + ky) * kw + kx;
+    output[dstIndex] = source[srcIndex];
+}
+
+// Latent [C,H,W] fp32 (channel-major) -> position-major fp16 [H*W, C].
+// D060: the sampler's final latent is consumed unchanged (no mean/std denorm).
+kernel void vae_latent_to_position_half(
+    device const float *latent  [[buffer(0)]],
+    device half        *output  [[buffer(1)]],
+    constant uint      &height  [[buffer(2)]],
+    constant uint      &width   [[buffer(3)]],
+    constant uint      &channels [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])  // gid.x = pixel, gid.y = channel
+{
+    const uint pixels = height * width;
+    if (gid.x >= pixels || gid.y >= channels) return;
+    const uint y = gid.x / width, x = gid.x % width;
+    output[gid.x * channels + gid.y] = half(latent[gid.y * pixels + y * width + x]);
+}
+
+// Position-major fp16 [H*W, C] -> fp32 channel-major [C,H,W] (final RGB).
+kernel void vae_position_to_rgb_f32(
+    device const half *positioned [[buffer(0)]],
+    device float      *output     [[buffer(1)]],
+    constant uint     &height     [[buffer(2)]],
+    constant uint     &width      [[buffer(3)]],
+    constant uint     &channels   [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])  // gid.x = pixel, gid.y = channel
+{
+    const uint pixels = height * width;
+    if (gid.x >= pixels || gid.y >= channels) return;
+    const uint y = gid.x / width, x = gid.x % width;
+    output[gid.y * pixels + y * width + x] = float(positioned[gid.x * channels + gid.y]);
+}

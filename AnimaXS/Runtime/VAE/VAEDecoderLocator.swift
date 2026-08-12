@@ -1,29 +1,5 @@
 import Foundation
 
-/// Prevalidated fp16 weight descriptors for one VAE convolution.
-struct VAEConvWeight {
-    let name: String
-    /// Logical shape AFTER the T=1 fold: rank-2 `[Cout, Cin]` for 1x1 or
-    /// rank-4 `[Cout, Cin, KH, KW]` for the executed 2-D convolution.
-    let shape: [Int]
-    let weight: AnimapkRelativeSpan
-    let bias: AnimapkRelativeSpan?
-    let storage: StorageDtype
-
-    var outputChannels: Int { shape[0] }
-    var inputChannels: Int { shape[1] }
-
-    /// True when the weight is a rank-5 causal tensor folded to its final slice.
-    let foldedFromRank5: Bool
-}
-
-/// One gamma vector (Wan channel RMS norm parameter), fp16.
-struct VAEGamma {
-    let name: String
-    let span: AnimapkRelativeSpan
-    let channels: Int
-}
-
 /// Validated streaming groups for the fixed Wan T=1 decoder architecture.
 ///
 /// Mirrors `DiTPreparationLocator`/`DiTFinalLayerLocator`: the pack's physical
