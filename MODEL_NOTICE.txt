@@ -1,0 +1,75 @@
+AnimaXS — MODEL NOTICE
+=======================
+
+AnimaXS bundles (for download or user import) three model packs converted to
+the `.animapk` format and quantized (W4/W8) from their source releases. The
+following license notices are required and reproduced verbatim as applicable.
+
+--------------------------------------------------------------------------
+1. DiT + adapter pack — anima-turbo-v1.0-xsmax-w4.animapk
+   Source: Anima (CircleStone Labs), a Derivative Model of
+           NVIDIA Cosmos-Predict2-2B-Text2Image
+--------------------------------------------------------------------------
+
+CircleStone Labs Non-Commercial License (v1.2) — the model and its derivatives
+are licensed for NON-COMMERCIAL purposes only. Full text:
+  docs/model-licenses/CircleStone-NC-1.2.md
+
+Attribution notice (required):
+
+  "The CircleStone Model is licensed by CircleStone Labs LLC under the
+  CircleStone Non-Commercial License. Copyright CircleStone Labs LLC.
+  IN NO EVENT SHALL CIRCLESTONE LABS LLC BE LIABLE FOR ANY CLAIM, DAMAGES OR
+  OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+  FROM, OUT OF OR IN CONNECTION WITH USE OF THIS MODEL."
+
+Modification disclosure: the `.animapk` pack is a converted and quantized (W4)
+derivative of the Anima source model; it is not an official CircleStone product.
+
+NVIDIA Open Model License (version 2025-10-24) — full text:
+  docs/model-licenses/NVIDIA-Open-Model-License.txt
+
+NVIDIA notice (required):
+
+  "Licensed by NVIDIA Corporation under the NVIDIA Open Model License"
+
+Because the DiT pack is a derivative of a NVIDIA Cosmos Model, this product
+includes the following attribution (required):
+
+  "Built on NVIDIA Cosmos"
+
+--------------------------------------------------------------------------
+2. Qwen3 text encoder — qwen3-0.6b-xsmax-w8.animapk
+   Source: Qwen (Alibaba) Qwen3-0.6B
+--------------------------------------------------------------------------
+
+Licensed under the Apache License, Version 2.0. Full text:
+  docs/model-licenses/Apache-2.0.txt
+
+Modification disclosure: the `.animapk` pack is a converted and quantized (W8)
+derivative of the Qwen3-0.6B model; it is not an official Qwen product.
+
+--------------------------------------------------------------------------
+3. Qwen-Image VAE — qwen-image-vae-xsmax-fp16.animapk
+   Source: Qwen (Alibaba) Qwen-Image
+--------------------------------------------------------------------------
+
+Licensed under the Apache License, Version 2.0. Full text:
+  docs/model-licenses/Apache-2.0-qwen-image.txt
+
+Modification disclosure: the `.animapk` pack is a converted fp16 derivative of
+the Qwen-Image VAE; it is not an official Qwen product.
+
+--------------------------------------------------------------------------
+USE RESTRICTION
+--------------------------------------------------------------------------
+
+The DiT/adapter pack is licensed under the CircleStone Non-Commercial License.
+You may use AnimaXS and its bundled models ONLY for non-commercial purposes
+(personal research, experimentation, and testing). Commercial, production, or
+revenue-generating use — or training/fine-tuning models for commercial use —
+is NOT permitted without a separate license from CircleStone Labs LLC (and,
+where applicable, NVIDIA).
+
+The software (SwiftUI app and inference engine) is the code of AnimaXS; its
+license is distinct from the model-weight licenses above.
