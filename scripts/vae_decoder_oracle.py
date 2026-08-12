@@ -261,7 +261,9 @@ def main():
     # ---- head: RMS norm -> SiLU -> 3x3 conv 96->3 ----
     x = channel_rms_norm(x, t["decoder.head.0.gamma"])
     x = silu(x)
-    rgb = conv2d(x, fold2d(t["decoder.head.2.weight"], True), t["decoder.head.2.bias"])
+    x = conv2d(x, fold2d(t["decoder.head.2.weight"], True), t["decoder.head.2.bias"])
+    dump_intermediate("head_rgb", x)
+    rgb = x
     print("decoded rgb  min/max", float(rgb.min()), float(rgb.max()))
 
     ref = ref_rgb.reshape(3, 512, 512).astype(np.float32)

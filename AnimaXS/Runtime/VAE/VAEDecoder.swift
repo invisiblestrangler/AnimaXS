@@ -174,6 +174,7 @@ final class VAEDecoder {
         try await encodeHead(groupIndex: 20, input: x, output: headRGB,
                              height: Self.outputSize, width: Self.outputSize)
         #if DEBUG
+        dumpStage(headRGB, name: "head_rgb", height: Self.outputSize, width: Self.outputSize, channels: Self.outputChannels)
         stage("head")
         #endif
         try await encodeRGBToChannelMajor(input: headRGB, output: rgb,
