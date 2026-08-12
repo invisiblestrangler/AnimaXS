@@ -8,5 +8,6 @@
     "psnr": 97.87115494701801,
     "cosine": 0.9999872446060181
   },
-  "decoded_rgb_source_sha256": "d8a9c237c7e69ca02559cd69b564017af6ad053081d2dcb25d7cadec3ab7f1fd"
+  "decoded_rgb_source_sha256": "d8a9c237c7e69ca02559cd69b564017af6ad053081d2dcb25d7cadec3ab7f1fd",
+  "same_pack_rgb_sha256": "f98678fef628189133ff59fbc2c114db4d0272edf9e1a92fc288d97ff954255e"
 }

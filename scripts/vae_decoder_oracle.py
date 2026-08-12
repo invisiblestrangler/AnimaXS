@@ -155,6 +155,7 @@ def main():
     ap.add_argument("--latent", default="/root/AnimaXS/AnimaXSTests/Fixtures/Case1Binary/case1_final_latent.f32")
     ap.add_argument("--golden", default="/root/anima-xsmax/results/goldens/case1_danbooru_seed1337.npz")
     ap.add_argument("--scale-factor", type=float, default=0.0, help="latent decode scale factor (0=identity, or 0.5/1.0 mean-std denorm)")
+    ap.add_argument("--emit-lane-a", dest="emit_lane_a", help="write the same-pack decoded RGB to this .f32 path")
     ap.add_argument("--json", dest="json_path")
     args = ap.parse_args()
 
@@ -252,15 +253,24 @@ def main():
     }
     print("scale_factor", sf, "metrics", {k: round(v, 6) for k, v in metrics.items()})
 
+    # Lane A reference: the same-pack decoded RGB in fp32 channel-major
+    # [3,512,512], emitted for the Swift/Metal decoder parity test.
+    lane_a = np.ascontiguousarray(rgb, dtype=np.float32)
+    lane_a_sha = hashlib.sha256(lane_a.tobytes()).hexdigest()
+
     result = {
         "pinned_commit": PINNED_COMMIT, "pack_sha256": pack_sha,
         "scale_factor": sf, "metrics": metrics,
         "decoded_rgb_source_sha256": hashlib.sha256(ref.astype(np.float32).tobytes()).hexdigest(),
+        "same_pack_rgb_sha256": lane_a_sha,
     }
     if args.json_path:
         os.makedirs(os.path.dirname(args.json_path) or ".", exist_ok=True)
         with open(args.json_path, "w") as fh:
             json.dump(result, fh, indent=2)
+    if args.emit_lane_a:
+        lane_a.tofile(args.emit_lane_a)
+        print("wrote lane_a rgb", lane_a.shape, lane_a_sha, "->", args.emit_lane_a)
     print(json.dumps(result, indent=2))
 
 

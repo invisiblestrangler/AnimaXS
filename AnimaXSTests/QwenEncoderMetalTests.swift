@@ -185,6 +185,47 @@ final class QwenEncoderMetalTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(finalMetric.cosine, 0.65)
     }
 
+    /// J002: full-frame T=1 Wan VAE decode of the canonical final latent.
+    /// Fixture-gated: requires the real fp16 VAE pack and the Lane A same-pack
+    /// decoded RGB via ANIMAXS_VAE_ORACLE_DIR (see scripts/vae_decoder_oracle.py
+    /// --emit-lane-a). Compares the Metal decoder against the Python same-pack
+    /// decoder — both execute the identical fp16 pack, so this is the tight
+    /// Lane A gate (D060). The canonical source RGB comparison is observational.
+    func testRealW4VAEDecodeParity() async throws {
+        guard let packURL = ProcessInfo.processInfo.environment["ANIMAXS_VAE_PACK"]
+            .map(URL.init(fileURLWithPath:)) else {
+            throw XCTSkip("real VAE pack not available")
+        }
+        guard let directory = ProcessInfo.processInfo.environment["ANIMAXS_VAE_ORACLE_DIR"]
+            .map(URL.init(fileURLWithPath:)) else {
+            throw XCTSkip("VAE Lane A oracle fixture not available")
+        }
+        guard let context = MetalContext() else {
+            throw XCTSkip("SKIPPED_NO_METAL: default Metal device/library unavailable")
+        }
+        let latentValues = try floats("vae_latent.f32", in: directory)
+        let expectedRGB = try floats("vae_lane_a_rgb.f32", in: directory)
+        XCTAssertEqual(latentValues.count, 16 * 64 * 64)
+        XCTAssertEqual(expectedRGB.count, 3 * 512 * 512)
+        let latent = makeBuffer(latentValues, context: context)
+        let rgb = try XCTUnwrap(context.device.makeBuffer(
+            length: 3 * 512 * 512 * 4, options: .storageModeShared))
+        let start = Date()
+        try await VAEDecoder(
+            context: context,
+            file: AnimapkFile(url: packURL)).execute(latent: latent, rgb: rgb)
+        let seconds = Date().timeIntervalSince(start)
+        let metric = metrics(rgb, expectedRGB)
+        print("VAE_DECODE_FINAL maxAbs=\(metric.maxAbs) rmse=\(metric.rmse) "
+            + "cosine=\(metric.cosine) seconds=\(seconds)")
+        XCTAssertTrue(metric.finite)
+        // Lane A: Swift/Metal on the same fp16 pack vs the Python same-pack
+        // decoder. fp16 MPS accumulation tolerances; any graph/layout error
+        // shows up far beyond this.
+        XCTAssertGreaterThanOrEqual(metric.cosine, 0.99)
+        XCTAssertLessThanOrEqual(metric.rmse, 0.05)
+    }
+
     private func metrics(
         _ buffer: MTLBuffer, _ expected: [Float]
     ) -> (maxAbs: Double, rmse: Double, cosine: Double, finite: Bool) {
