@@ -55,12 +55,22 @@ final class VAEDecoder {
             throw AnimapkError.validation("VAE decoder input or output buffer is too small")
         }
         context.refreshDiagnostics()
+        #if DEBUG
+        var stageStart = Date()
+        func stage(_ name: String) {
+            print("VAE_STAGE \(name) t=\(String(format: "%.2f", Date().timeIntervalSince(stageStart)))s allocated=\(context.device.currentAllocatedSize)")
+            stageStart = Date()
+        }
+        #endif
 
         // 1) latent fp32 [16,64,64] -> position-major fp16 [4096, 16]
         let inputPositions = Self.latentSize * Self.latentSize
         let positioned = activation(key: "vae.activation.a", positions: inputPositions, channels: Self.latentChannels)
         try await encodeLatentToPosition(latent: latent, output: positioned,
                                          positions: inputPositions, channels: Self.latentChannels)
+        #if DEBUG
+        stage("latent")
+        #endif
 
         // 2) conv2: 1x1 16->16 (group 0)
         var x = positioned
@@ -68,22 +78,37 @@ final class VAEDecoder {
                                   inputChannels: Self.latentChannels,
                                   outputChannels: Self.latentChannels,
                                   key: "vae.activation.b")
+        #if DEBUG
+        stage("conv2")
+        #endif
 
         // 3) decoder.conv1: final-slice 3x3 16->384 @64 (group 1)
         x = try await run3x3Group(groupIndex: 1, input: x, height: Self.latentSize,
                                   width: Self.latentSize, inputChannels: Self.latentChannels,
                                   outputChannels: 384, key: "vae.activation.a")
+        #if DEBUG
+        stage("conv1")
+        #endif
 
         // 4) middle: residual(2) -> attention(3) -> residual(4), all 384 @64
         x = try await runResidualGroup(groupIndex: 2, input: x, height: Self.latentSize,
                                        width: Self.latentSize, inChannels: 384, outChannels: 384,
                                        key: "vae.activation.b")
+        #if DEBUG
+        stage("middle_res0")
+        #endif
         x = try await runAttentionGroup(groupIndex: 3, input: x, height: Self.latentSize,
                                         width: Self.latentSize, channels: 384,
                                         key: "vae.activation.a")
+        #if DEBUG
+        stage("middle_attn")
+        #endif
         x = try await runResidualGroup(groupIndex: 4, input: x, height: Self.latentSize,
                                        width: Self.latentSize, inChannels: 384, outChannels: 384,
                                        key: "vae.activation.b")
+        #if DEBUG
+        stage("middle_res1")
+        #endif
 
         // 5) upsample modules 0...14. Group index = 5 + module.
         //    Resample modules are 3, 7, 11; module 4 is the 192->384
@@ -124,6 +149,9 @@ final class VAEDecoder {
                                           key: nextKey, hasShortcut: hasShortcut)
                 xInA.toggle()
             }
+            #if DEBUG
+            stage("upsample\(module)")
+            #endif
         }
 
         // 6) head (group 20): RMS norm(96) -> SiLU -> 3x3 conv 96->3 @512
@@ -131,6 +159,9 @@ final class VAEDecoder {
                                  channels: Self.outputChannels)
         try await encodeHead(groupIndex: 20, input: x, output: headRGB,
                              height: Self.outputSize, width: Self.outputSize)
+        #if DEBUG
+        stage("head")
+        #endif
         try await encodeRGBToChannelMajor(input: headRGB, output: rgb,
                                           positions: Self.outputSize * Self.outputSize,
                                           channels: Self.outputChannels)
