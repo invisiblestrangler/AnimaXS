@@ -16,7 +16,9 @@ final class ModelStoreTests: XCTestCase {
             url: URL(string: "https://example.invalid/\(filename)")!, component: component)
     }
 
-    /// Fresh temporary store with an injected downloader/capacity.
+    /// Fresh temporary store with an injected downloader/capacity. `secureInstalls`
+    /// is disabled so test files remain removable (complete-until-first-auth
+    /// protection would make the temp dir undeletable in the simulator).
     private func makeStore(
         root: URL,
         downloader: @escaping ModelStore.Downloader,
@@ -24,7 +26,7 @@ final class ModelStoreTests: XCTestCase {
     ) throws -> ModelStore {
         try ModelStore(
             directory: root.appendingPathComponent("models", isDirectory: true),
-            downloader: downloader, availableCapacity: capacity)
+            downloader: downloader, availableCapacity: capacity, secureInstalls: false)
     }
 
     // MARK: - Cold launch: valid existing file
@@ -32,7 +34,7 @@ final class ModelStoreTests: XCTestCase {
     func testValidExistingFileDiscoveredAfterFreshInit() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { try? FileManager.default.removeItem(at: root.appendingPathComponent("models")); try? FileManager.default.removeItem(at: root) }
         let content = Data("existing valid pack".utf8)
         let entry = makeEntry(content: content)
         let modelsDir = root.appendingPathComponent("models", isDirectory: true)
@@ -54,7 +56,7 @@ final class ModelStoreTests: XCTestCase {
     func testCorruptExistingFileBecomesFailedNotReady() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { try? FileManager.default.removeItem(at: root.appendingPathComponent("models")); try? FileManager.default.removeItem(at: root) }
         let entry = makeEntry(content: Data("abc".utf8))
         let modelsDir = root.appendingPathComponent("models", isDirectory: true)
         try FileManager.default.createDirectory(at: modelsDir, withIntermediateDirectories: true)
@@ -78,7 +80,7 @@ final class ModelStoreTests: XCTestCase {
     func testRepairRemovesCorruptFileAndReinstalls() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { try? FileManager.default.removeItem(at: root.appendingPathComponent("models")); try? FileManager.default.removeItem(at: root) }
         let good = Data("the correct pack".utf8)
         let entry = makeEntry(content: good)
         let modelsDir = root.appendingPathComponent("models", isDirectory: true)
@@ -102,7 +104,7 @@ final class ModelStoreTests: XCTestCase {
     func testWrongSizeDownloadFailsNoFakeReadyFile() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { try? FileManager.default.removeItem(at: root.appendingPathComponent("models")); try? FileManager.default.removeItem(at: root) }
         let entry = makeEntry(content: Data("abc".utf8))  // expects size 3
         let bad = root.appendingPathComponent("bad.animapk")
         try Data("wrong size".utf8).write(to: bad)
@@ -123,7 +125,7 @@ final class ModelStoreTests: XCTestCase {
     func testInsufficientDiskRejected() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { try? FileManager.default.removeItem(at: root.appendingPathComponent("models")); try? FileManager.default.removeItem(at: root) }
         let content = Data(repeating: 0xAB, count: 1024)
         let entry = makeEntry(content: content)
         let downloaded = root.appendingPathComponent("d.animapk")
@@ -142,7 +144,7 @@ final class ModelStoreTests: XCTestCase {
     func testFailedDownloadLeavesFailedState() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { try? FileManager.default.removeItem(at: root.appendingPathComponent("models")); try? FileManager.default.removeItem(at: root) }
         let entry = makeEntry(content: Data("abc".utf8))
         struct DownloadError: Error {}
         let store = try makeStore(root: root, downloader: { _ in throw DownloadError() })
@@ -163,7 +165,7 @@ final class ModelStoreTests: XCTestCase {
     func testRepeatedPrepareIsIdempotent() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { try? FileManager.default.removeItem(at: root.appendingPathComponent("models")); try? FileManager.default.removeItem(at: root) }
         let content = Data("abc".utf8)
         let entry = makeEntry(content: content)
         let downloaded = root.appendingPathComponent("d.animapk")
@@ -182,7 +184,7 @@ final class ModelStoreTests: XCTestCase {
     func testResolvedModelsExposeExactlyThreeURLs() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { try? FileManager.default.removeItem(at: root.appendingPathComponent("models")); try? FileManager.default.removeItem(at: root) }
         // Three tiny synthetic packs, one per production component. The DiT
         // pack serves the adapter and sampler (ResolvedModels has no adapter
         // field), so the resolved set is exactly three URLs.
@@ -221,7 +223,7 @@ final class ModelStoreTests: XCTestCase {
     func testImportVerifiesAndInstalls() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { try? FileManager.default.removeItem(at: root.appendingPathComponent("models")); try? FileManager.default.removeItem(at: root) }
         let content = Data("imported pack bytes".utf8)
         let entry = makeEntry(content: content)
         let source = root.appendingPathComponent("user-import.animapk")
@@ -237,7 +239,7 @@ final class ModelStoreTests: XCTestCase {
     func testImportRejectsMismatchedFile() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        defer { try? FileManager.default.removeItem(at: root.appendingPathComponent("models")); try? FileManager.default.removeItem(at: root) }
         let entry = makeEntry(content: Data("expected".utf8))
         let source = root.appendingPathComponent("user-import.animapk")
         try Data("not the expected pack".utf8).write(to: source)

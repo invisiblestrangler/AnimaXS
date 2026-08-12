@@ -21,14 +21,17 @@ actor ModelStore {
     private let directory: URL
     private let downloader: Downloader
     private let availableCapacity: CapacityProvider
+    private let secureInstalls: Bool
     private var states: [ModelComponent: State] = [:]
     private static let diskReserve: Int64 = 256 * 1_024 * 1_024
 
     init(
         directory: URL? = nil,
         downloader: Downloader? = nil,
-        availableCapacity: CapacityProvider? = nil
+        availableCapacity: CapacityProvider? = nil,
+        secureInstalls: Bool = true
     ) throws {
+        self.secureInstalls = secureInstalls
         if let directory {
             self.directory = directory
         } else {
@@ -167,7 +170,9 @@ actor ModelStore {
             ".\\(entry.filename).staging-\\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: staging) }
         try FileManager.default.copyItem(at: source, to: staging)
-        try secure(staging)
+        if secureInstalls {
+            try secure(staging)
+        }
         try FileManager.default.moveItem(at: staging, to: destination)
     }
 
