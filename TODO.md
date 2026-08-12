@@ -209,18 +209,18 @@ Stable IDs. Legend: `[ ]` pending · `[~]` in progress · `[x]` done · `[-]` bl
 - [x] **L002** — Model release `model-assets-v1` (3 packs + manifest + LICENSE + NOTICE) AFTER license gate A005 passes; unauthenticated URL verification + re-hash.
   - deps: A005, D005 · output: GitHub Release · validation: unauthenticated download matches SHA-256
   - **DONE 2026-08-12 (D070).** `model-assets-v1` published. Independently re-downloaded as an unauthenticated user (no token): all three packs matched the production `ModelManifest.swift` and the release `model-manifest.json` on size and SHA-256; `MODEL_LICENSE.md`/`MODEL_NOTICE.txt` on the release are byte-identical to the committed copies.
-- [~] **L003** — Manual full-inference run: permanent Metal/MPS smoke → verified pack download → golden noise → canonical inference → timings/finite/parity asserts → small logs only.
+- [x] **L003** — Manual full-inference run: permanent Metal/MPS smoke → verified pack download → golden noise → canonical inference → timings/finite/parity asserts → small logs only.
   - deps: L001, L002, C003 · output: workflow run record + summary · validation: PASS or explicit SKIPPED_NO_METAL; any failure with Metal present remains red
-  - **IN PROGRESS 2026-08-12.** Workflow Bash-3.2 bug fixed (C003). Run pending; result recorded in STATUS/DECISIONS once executed.
+  - **DONE 2026-08-12.** Final run `31639624310` (commit `494ffb1`) SUCCESS: Metal smoke PASS, all 3 packs downloaded+verified, full production inference ran on the simulator in 161.28 s. **FULL_INFERENCE=PASS** — final latent cosine 0.6946 (≥ 0.65 floor), final RGB cosine 0.7035 (≥ 0.65 gate, D074). Metrics bit-identical to calibration run `31638695924` (deterministic). Workflow fixes along the way: Bash-3.2 pack loop (C003), bundled-resource pack injection (env doesn't reliably reach the simulator test process), prompt bug (D073), RGB gate calibration (D074). Metal was available (not SKIPPED_NO_METAL); real inference failures were never converted to skips.
 
 ## M — Documentation / release / final handoff
 
-- [~] **M001** — README: clone/open/sign/build/install steps, SDK-vs-deployment-target explanation, license notices.
+- [x] **M001** — README: clone/open/sign/build/install steps, SDK-vs-deployment-target explanation, license notices.
   - deps: B003 · output: README.md · validation: user can follow steps without source edits
-  - **DRAFTED 2026-08-12.** `README.md` is drafted (covers what AnimaXS is, target device, Xcode 26.3/XcodeGen 2.46.0, clone/open/build, deployment target 18.0, model-pack architecture, Download/Import, storage ~2.1 GB, release tag `model-assets-v1`, non-commercial license warning, attribution/notices, generation usage, CI validation + explicit "CI is not a substitute for physical device validation"). Awaiting final review/commit with the documentation batch.
-- [~] **M002** — TEST_MATRIX.md + DEVICE_TESTS.md maintained; DEVICE_TESTS captures A12 microbenchmarks when run.
+  - **DONE 2026-08-12.** `README.md` committed (`9fc4c89`): what AnimaXS is, target device, Xcode 26.3/XcodeGen 2.46.0, clone/open/build, deployment target 18.0, model-pack architecture, Download/Import, ~2.1 GB storage, release tag `model-assets-v1`, non-commercial license warning, attribution/notices, generation usage, CI validation + explicit "CI is not a substitute for physical device testing".
+- [x] **M002** — TEST_MATRIX.md + DEVICE_TESTS.md maintained; DEVICE_TESTS captures A12 microbenchmarks when run.
   - deps: ongoing · output: docs · validation: accurate, current
-  - **IN PROGRESS 2026-08-12.** `DEVICE_TESTS.md` already clearly separates CI-proven (hosted simulator) from A12-pending. `TEST_MATRIX.md` is being updated to remove stale run IDs and reflect the L001 RGB8 fixture.
-- [ ] **M003** — Final report: repo URL, commit SHA, release URL, Xcode/SDK/deployment facts, CI statuses, Metal availability, image generated?, pack hashes, test counts, unresolved issues, first XS Max steps; explicit A12 DEVICE TESTED: YES/NO.
+  - **DONE 2026-08-12.** `TEST_MATRIX.md` current (151 tests/13 skip baseline `31634877232`; L001 calibration metrics `31638695924`; L003 PASS `31639624310`). `DEVICE_TESTS.md` clearly separates CI-proven (hosted simulator) from A12-pending (physical iPhone XS Max unverified).
+- [x] **M003** — Final report: repo URL, commit SHA, release URL, Xcode/SDK/deployment facts, CI statuses, Metal availability, image generated?, pack hashes, test counts, unresolved issues, first XS Max steps; explicit A12 DEVICE TESTED: YES/NO.
   - deps: all · output: report to user · validation: every field answered honestly
-  - **PENDING 2026-08-12.** Requires L003 result (PASS or SKIPPED_NO_METAL) and final CI confirmation.
+  - **DONE 2026-08-12.** Final report delivered to user (see M003 report section / chat). A12 DEVICE TESTED: NO.
