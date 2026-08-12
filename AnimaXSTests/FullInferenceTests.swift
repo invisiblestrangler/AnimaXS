@@ -165,21 +165,39 @@ final class FullInferenceTests: XCTestCase {
                              "image must have meaningful dynamic range")
 
         // ---- Final RGB regression ----
-        // A measured RGB tolerance (cosine/RMSE/PSNR/maxAbs) is established from
-        // the first real full-pack run and recorded in DECISIONS (guide §15).
-        // Until then we assert image health only; the workflow's FULL_INFERENCE=PASS
-        // gate requires the real run to have produced a sensible non-degenerate image.
-        if let rgbReference = bundledFixture(named: "case1_decoded_rgb.f32") {
-            let refRGB = try floats(from: rgbReference)
-            if refRGB.count == image.bytes.count / 4 * 3 {
-                let rgbValues = image.bytes.enumerated()
-                    .filter { $0.offset % 4 != 3 }
-                    .map { Float($0.element) / 255.0 * 2.0 - 1.0 }
+        // Canonical image-space reference: `case1_decoded_rgb8.bin` (512×512×3
+        // UInt8, per-pixel RGB interleave) derived from the authoritative
+        // case1_danbooru_seed1337.npz `decoded_rgb` via the EXACT production
+        // display transform (AnimaKernels.metal `vae_position_to_rgba8`):
+        //   byte = (uchar)(clamp((v+1)*0.5,0,1)*255 + 0.5)
+        // Production RGBA8 is decoded to RGB8 (drop alpha) and BOTH sides are
+        // mapped back to [-1,1] via /255*2-1, so the comparison is an
+        // apples-to-apples UInt8↔UInt8 regression of the final image.
+        // Metrics: FULL_RGB_COSINE / FULL_RGB_RMSE / FULL_RGB_MAE / FULL_RGB_MAXABS.
+        // Regression gate: cosine ≥ 0.9 (documented in DECISIONS; derived from
+        // the J002 decoder-only cosine 0.99981 prior plus the D057 final-latent
+        // floor 0.65 — the decoded image smooths latent drift, so a ≥0.9 image
+        // cosine is a conservative, defensible floor).
+        if let rgbRefURL = bundledFixture(named: "case1_decoded_rgb8.bin") {
+            let refBytes = try Data(contentsOf: rgbRefURL)
+            let refRGB = refBytes.map { Float($0) / 255.0 * 2.0 - 1.0 }
+            let rgbBytes = image.bytes.enumerated()
+                .filter { $0.offset % 4 != 3 }
+                .map { $0.element }
+            if rgbBytes.count == refRGB.count && refRGB.count == 512 * 512 * 3 {
+                let rgbValues = rgbBytes.map { Float($0) / 255.0 * 2.0 - 1.0 }
                 let cosine = cosineSimilarity(rgbValues, refRGB)
+                let rmse = rmse(rgbValues, refRGB)
+                let mae = mae(rgbValues, refRGB)
+                let maxAbs = maxAbsolute(rgbValues, refRGB)
                 print("FULL_RGB_COSINE=\(cosine)")
-                // PSNR ≥ 30 dB equivalent (J002 gate); assert when reference present.
+                print("FULL_RGB_RMSE=\(rmse)")
+                print("FULL_RGB_MAE=\(mae)")
+                print("FULL_RGB_MAXABS=\(maxAbs)")
                 XCTAssertGreaterThanOrEqual(cosine, 0.9,
-                                            "final RGB cosine must be high vs reference")
+                                            "final RGB cosine must meet the 0.9 regression floor")
+            } else {
+                XCTFail("RGB8 reference byte count mismatch (got \(rgbBytes.count), ref \(refRGB.count))")
             }
         }
 
@@ -273,6 +291,14 @@ final class FullInferenceTests: XCTestCase {
         var m = 0.0
         for i in 0..<n { m = max(m, abs(Double(a[i] - b[i]))) }
         return m
+    }
+
+    private func mae(_ a: [Float], _ b: [Float]) -> Double {
+        let n = min(a.count, b.count)
+        guard n > 0 else { return 0 }
+        var sum = 0.0
+        for i in 0..<n { sum += abs(Double(a[i] - b[i])) }
+        return sum / Double(n)
     }
 
     private func isMonochrome(_ bytes: [UInt8]) -> Bool {

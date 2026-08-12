@@ -154,6 +154,17 @@
         1024
       ]
     },
+    "decoded_rgb8": {
+      "bytes": 786432,
+      "dtype": "uint8",
+      "file": "case1_decoded_rgb8.bin",
+      "sha256": "a396c4aeb99bed1ac8fa44cfd20fdfdbd7c664833f8577c8ea8899d8f3c57019",
+      "shape": [
+        512,
+        512,
+        3
+      ]
+    },
     "final_latent": {
       "bytes": 262144,
       "dtype": "float32",

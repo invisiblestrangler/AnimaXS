@@ -94,24 +94,35 @@ jobs:
           mkdir -p "$MODEL_DIR"
           TAG="${{ inputs.release }}"
           BASE="https://github.com/invisiblestrangler/AnimaXS/releases/download/$TAG"
-          declare -A PACKS=(
-            [qwen3-0.6b-xsmax-w8.animapk]=ba59e4d1797de5f6512aeafcecf3f38e1f62a47313a2a400b949c9018d84ceab
-            [anima-turbo-v1.0-xsmax-w4.animapk]=ba1ce615f03665812f05088f9239f0cb23591a0811067d57fa51773abf6f0d25
-            [qwen-image-vae-xsmax-fp16.animapk]=10171af0b826927b75fecf4482aaa0e268254874e694a0788ebdd8c4254fc447
-          )
-          for name in "${!PACKS[@]}"; do
-            url="$BASE/$name"
-            dest="$MODEL_DIR/$name"
-            echo "Downloading $name ..."
-            curl -sSL -o "$dest" "$url"
-            [ -f "$dest" ] || { echo "::error::download failed: $name"; exit 1; }
-            ACTUAL=$(shasum -a 256 "$dest" | awk '{print $1}')
-            if [ "$ACTUAL" != "${PACKS[$name]}" ]; then
-              echo "::error::SHA-256 mismatch for $name: got $ACTUAL"
-              exit 1
-            fi
-            echo "$name verified (size $(wc -c < "$dest") bytes)"
-          done
+          # Bash 3.2 (macOS default) has NO associative arrays — use a
+          # line-oriented manifest loop (name expected_size expected_sha).
+          # curl flags are hardened: --fail (a 404 HTML doc is never a pack),
+          # --location, --retry, --retry-all-errors.
+          printf '%s\n' \
+            "qwen3-0.6b-xsmax-w8.animapk 635305984 ba59e4d1797de5f6512aeafcecf3f38e1f62a47313a2a400b949c9018d84ceab" \
+            "anima-turbo-v1.0-xsmax-w4.animapk 1179435008 ba1ce615f03665812f05088f9239f0cb23591a0811067d57fa51773abf6f0d25" \
+            "qwen-image-vae-xsmax-fp16.animapk 256163840 10171af0b826927b75fecf4482aaa0e268254874e694a0788ebdd8c4254fc447" \
+            | while read -r name expected_size expected_sha; do
+              [ -n "$name" ] || continue
+              url="$BASE/$name"
+              dest="$MODEL_DIR/$name"
+              echo "Downloading $name ..."
+              curl --fail --location --retry 3 --retry-all-errors -sS -o "$dest" "$url"
+              [ -f "$dest" ] || { echo "::error::download failed: $name"; exit 1; }
+              actual_size="$(wc -c < "$dest" | tr -d ' ')"
+              actual_sha="$(shasum -a 256 "$dest" | awk '{print $1}')"
+              printf 'name=%s expected_size=%s actual_size=%s\n' "$name" "$expected_size" "$actual_size"
+              printf 'name=%s expected_sha=%s actual_sha=%s\n' "$name" "$expected_sha" "$actual_sha"
+              if [ "$actual_size" != "$expected_size" ]; then
+                echo "::error::size mismatch for $name (expected $expected_size, got $actual_size)"
+                exit 1
+              fi
+              if [ "$actual_sha" != "$expected_sha" ]; then
+                echo "::error::SHA-256 mismatch for $name"
+                exit 1
+              fi
+              echo "$name verified"
+            done
           echo "All three packs downloaded and verified."
           df -h
 
