@@ -136,7 +136,7 @@ final class VAEPrimitiveTests: XCTestCase {
                     expected += Float(input[row * cin + ic]) * Float(weight[oc * cin + ic])
                 }
                 XCTAssertEqual(actual[row * cout + oc], expected, accuracy: 0.01,
-                               "1x1 row \\(row) out \\(oc)")
+                               "1x1 row \(row) out \(oc)")
             }
         }
         print("VAE_1X1_CONV=PASS")
@@ -189,7 +189,7 @@ final class VAEPrimitiveTests: XCTestCase {
             bias: bias.map { Float($0) })
         for i in 0..<expected.count {
             XCTAssertEqual(actual[i], expected[i], accuracy: 0.02,
-                           "3x3 position \\(i / cout) channel \\(i % cout)")
+                           "3x3 position \(i / cout) channel \(i % cout)")
         }
         print("VAE_3X3_CONV=PASS")
     }
@@ -235,7 +235,7 @@ extension VAEPrimitiveTests {
             weight: folded, outputChannels: cout)
         for i in 0..<expected.count {
             XCTAssertEqual(actual[i], expected[i], accuracy: 0.02,
-                           "folded rank-5 position \\(i / cout) channel \\(i % cout)")
+                           "folded rank-5 position \(i / cout) channel \(i % cout)")
         }
 
         // Prove the fold kernel itself picks the FINAL slice: a weight whose
@@ -323,7 +323,7 @@ extension VAEPrimitiveTests {
         let actual = readHalf(outputBuffer, count: upHeight * upWidth * cout)
         for i in 0..<expected.count {
             XCTAssertEqual(actual[i], expected[i], accuracy: 0.03,
-                           "fused upsample position \\(i / cout) channel \\(i % cout)")
+                           "fused upsample position \(i / cout) channel \(i % cout)")
         }
         print("VAE_FUSED_UPSAMPLE_CONV=PASS")
     }
@@ -368,7 +368,7 @@ extension VAEPrimitiveTests {
             for c in 0..<channels {
                 let expected = Float(input[p * channels + c]) * inverse * scale * Float(gamma[c])
                 XCTAssertEqual(actual[p * channels + c], expected, accuracy: 0.01,
-                               "RMS position \\(p) channel \\(c)")
+                               "RMS position \(p) channel \(c)")
             }
         }
         print("VAE_CHANNEL_RMS=PASS")
@@ -403,7 +403,7 @@ extension VAEPrimitiveTests {
         for i in 0..<input.count {
             let x = Float(input[i])
             let expected = x / (1 + exp(-x))
-            XCTAssertEqual(actual[i], expected, accuracy: 0.01, "SiLU \\(i)")
+            XCTAssertEqual(actual[i], expected, accuracy: 0.01, "SiLU \(i)")
         }
         print("VAE_SILU_HALF=PASS")
     }
@@ -471,7 +471,7 @@ extension VAEPrimitiveTests {
                 var expected = 0.0
                 for j in 0..<positions { expected += (weights[j] / total) * Double(v[j][c]) }
                 XCTAssertEqual(Float(actual[i * channels + c]), Float(expected), accuracy: 0.02,
-                               "attention query \\(i) channel \\(c)")
+                               "attention query \(i) channel \(c)")
             }
         }
         print("VAE_ATTENTION_SPLIT=PASS")
