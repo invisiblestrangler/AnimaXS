@@ -465,23 +465,27 @@ extension VAEDecoder {
                              positions: positions, channels: 96)
         try encodeSiluHalf(command: command, input: normalized, output: normalized,
                            count: positions * 96)
+        try await commit(command)
         #if DEBUG
         dumpStage(normalized, name: "head_preconv", height: height, width: width, channels: 96)
         #endif
+        guard let command2 = context.commandQueue.makeCommandBuffer() else {
+            throw AnimapkError.validation("failed to create VAE head conv command buffer")
+        }
         let weight = try requireTensorSpan(group.range, suffix: ".head.2.weight")
         let bias = try requireTensorSpan(group.range, suffix: ".head.2.bias")
         let columns = 96 * 9
         let rowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: columns, dataType: .float16)
         let folded = try convolution.encodeFoldWeight(
-            commandBuffer: command, source: streamer.ring,
+            commandBuffer: command2, source: streamer.ring,
             sourceOffset: Int(weight.data.offset), shape: weight.tensor.shape,
             outputRowStrideElements: rowBytes / 2, scratchKey: "vae.weight.head")
         try convolution.encode3x3(
-            commandBuffer: command, input: normalized, weight: folded, weightOffset: 0,
+            commandBuffer: command2, input: normalized, weight: folded, weightOffset: 0,
             bias: streamer.ring, biasOffset: Int(bias.data.offset),
             output: output, inputHeight: height, inputWidth: width,
             outputChannels: 3, inputChannels: 96)
-        try await commit(command)
+        try await commit(command2)
     }
 }
 
