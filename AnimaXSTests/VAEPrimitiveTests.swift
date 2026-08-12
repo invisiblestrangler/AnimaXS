@@ -233,7 +233,7 @@ extension VAEPrimitiveTests {
         let actual = readHalf(outputBuffer, count: height * width * cout)
         let expected = referenceConv(
             input.map { Float($0) }, height: height, width: width, inputChannels: cin,
-            weight: folded, weightOffset: 0, outputChannels: cout)
+            weight: folded, outputChannels: cout)
         for i in 0..<expected.count {
             XCTAssertEqual(actual[i], expected[i], accuracy: 0.02,
                            "folded rank-5 position \(i / cout) channel \(i % cout)")
