@@ -40,19 +40,26 @@ def main() -> int:
     if os.path.isfile(manifest_path):
         with open(manifest_path, "r") as fh:
             manifest = json.load(fh)
-        # Schema varies by Xcode version (dict {id: entry} or list of
-        # entries). Handle both and be tolerant of key names: within each
-        # entry, the exported file is any string ending in .png/.txt, and the
-        # suggested name is any sibling string that starts with a target
-        # prefix.
-        entries = manifest.values() if isinstance(manifest, dict) else manifest
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            strings = [v for v in entry.values() if isinstance(v, str)]
-            fname = next((s for s in strings if s.endswith((".png", ".txt"))), "")
+        # Schema varies by Xcode version. Observed (Xcode 26.3): a list of
+        # objects each with an `attachments` array; each attachment is a dict
+        # with exportedFileName + suggestedHumanReadableName. Older versions
+        # may use a flat dict {id: entry} or a flat list of entries. Walk all
+        # nested dicts and collect every exported-file/suggested-name pair.
+        exported_by_suggested = {}
+        stack = [manifest]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, dict):
+                stack.extend(node.values())
+                fname = node.get("exportedFileName") or node.get("filename") or ""
+                sname = node.get("suggestedHumanReadableName") or node.get("suggestedName") or ""
+                if fname and sname:
+                    exported_by_suggested[sname] = fname
+            elif isinstance(node, list):
+                stack.extend(node)
+        for sname, fname in exported_by_suggested.items():
             for prefix, canonical in targets.items():
-                if any(s.startswith(prefix) for s in strings) and fname and canonical not in found:
+                if sname.startswith(prefix) and canonical not in found:
                     found[canonical] = fname
 
     # Fallback: match by file content where possible. metrics.txt is the only
