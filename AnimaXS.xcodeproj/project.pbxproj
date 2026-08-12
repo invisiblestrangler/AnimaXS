@@ -23,6 +23,7 @@
 		22A697C29A4FE1F67A25D118 /* DitForward.swift in Sources */ = {isa = PBXBuildFile; fileRef = E29ABBFCD1EDD87F59CA9008 /* DitForward.swift */; };
 		24E784492B6C7FD49E64D227 /* LinearExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9346A85EC2056315DFCE66D /* LinearExecutor.swift */; };
 		263D4D4D7FB4D3766DF07296 /* LLMAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94BC4122B33299CE60424C44 /* LLMAdapter.swift */; };
+		2880011FD933427AFBD8F0C1 /* ModelStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9821619B19E4168905FA0A1F /* ModelStoreTests.swift */; };
 		2AB966E0818F8C5953CC0DB0 /* DiTFinalLayerExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D7829F4398EB3A23033ECD8 /* DiTFinalLayerExecutorTests.swift */; };
 		2BB3F23123E300162C938052 /* Hub in Frameworks */ = {isa = PBXBuildFile; productRef = A3FB76126987D0B653947E56 /* Hub */; };
 		2F02983AD55700559562DA54 /* qwen_tokenizer.json in Resources */ = {isa = PBXBuildFile; fileRef = F28A65A79E0706DF0F0D5AB2 /* qwen_tokenizer.json */; };
@@ -161,6 +162,7 @@
 		929D59E59198EBA4F4C291AC /* case1_danbooru_seed1337_fixture.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = case1_danbooru_seed1337_fixture.json; sourceTree = "<group>"; };
 		94B18038F06B899E8A619F95 /* VAEPrimitiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VAEPrimitiveTests.swift; sourceTree = "<group>"; };
 		94BC4122B33299CE60424C44 /* LLMAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMAdapter.swift; sourceTree = "<group>"; };
+		9821619B19E4168905FA0A1F /* ModelStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelStoreTests.swift; sourceTree = "<group>"; };
 		99DD442C7A3CCB6E47D0F488 /* EulerSampler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EulerSampler.swift; sourceTree = "<group>"; };
 		9D7829F4398EB3A23033ECD8 /* DiTFinalLayerExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTFinalLayerExecutorTests.swift; sourceTree = "<group>"; };
 		9DA452A409BF52C73769318E /* MappedFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MappedFile.swift; sourceTree = "<group>"; };
@@ -431,6 +433,7 @@
 				E00F7AC0D57A13E91CB5F434 /* LinearExecutorTests.swift */,
 				C509546307CB21BE0D1A9146 /* LLMAdapterTests.swift */,
 				3DE378A333F7F589CD183A9A /* MetalExecutionTests.swift */,
+				9821619B19E4168905FA0A1F /* ModelStoreTests.swift */,
 				14DA44DE36980DC498AB4B99 /* ModulationTests.swift */,
 				2ED51EC9A960D08D2A6835BB /* QuantDecoderTests.swift */,
 				63A581535AFB0BECB025A73F /* QwenEncoderMetalTests.swift */,
@@ -579,6 +582,7 @@
 				7DB2CBB89F9ABC72D09B6089 /* LLMAdapterTests.swift in Sources */,
 				36DCBB069B8AE8C6D90A5115 /* LinearExecutorTests.swift in Sources */,
 				E97696F3A4744A08C6A895BF /* MetalExecutionTests.swift in Sources */,
+				2880011FD933427AFBD8F0C1 /* ModelStoreTests.swift in Sources */,
 				7387F6A165EC6A2781B76716 /* ModulationTests.swift in Sources */,
 				89975ACE65D7BB793965DA7B /* QuantDecoderTests.swift in Sources */,
 				ACF5E6ADE5026984036BFFEC /* QwenEncoderMetalTests.swift in Sources */,
