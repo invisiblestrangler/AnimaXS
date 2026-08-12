@@ -250,7 +250,7 @@ struct DiagnosticsEngine {
             return .init(name: "MPS precision", status: .fail, detail: "command setup failed")
         }
         let mul = MPSMatrixMultiplication(
-            device: context.device, transposeLeft: false, transposeRight: true,
+            device: context.device, transposeLeft: false, transposeRight: false,
             resultRows: rows, resultColumns: columns, interiorColumns: inner, alpha: 1, beta: 0)
         mul.encode(commandBuffer: queue,
                    leftMatrix: MPSMatrix(buffer: left, descriptor: descriptor),
