@@ -95,6 +95,16 @@ struct ContentView: View {
             ) { _ in
                 coordinator.appWillEnterForeground()
             }
+            .onReceive(
+                NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)
+            ) { _ in
+                coordinator.handleMemoryWarning()
+            }
+            .onReceive(
+                Timer.publish(every: 5, on: .main, in: .common).autoconnect()
+            ) { _ in
+                coordinator.handleThermalState(ProcessInfo.processInfo.thermalState)
+            }
         }
     }
 

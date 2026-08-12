@@ -214,6 +214,35 @@ final class GenerationCoordinator: ObservableObject {
         // Resume availability is derived from `latestCheckpoint` on demand.
     }
 
+    // MARK: - Resource policy (K004)
+
+    /// A memory warning arrived during generation: cancel at the nearest safe
+    /// boundary, preserve the last completed-step checkpoint, and surface a
+    /// recoverable message. Never try to "free random buffers" that an active
+    /// Metal command still owns.
+    func handleMemoryWarning() {
+        guard isGenerating else { return }
+        cancel()
+        // The engine stops cooperatively; the checkpoint is already persisted.
+        state = .cancelled
+    }
+
+    /// Thermal policy (documented in DECISIONS.md D0xx): nominal/fair →
+    /// continue; serious/critical → stop safely and preserve resume state.
+    func handleThermalState(_ state: ProcessInfo.ThermalState) {
+        switch state {
+        case .nominal, .fair:
+            return // continue generation
+        case .serious, .critical:
+            if isGenerating {
+                cancel()
+                self.state = .cancelled
+            }
+        @unknown default:
+            return
+        }
+    }
+
     // MARK: - Private
 
     private func run(
