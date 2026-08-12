@@ -43,18 +43,29 @@ final class DiffusionSampler {
         self.rope = rope
     }
 
-    /// Runs all eight model evaluations and writes the final fp32 latent.
+    /// Runs the eight model evaluations (or the remaining ones when resuming
+    /// from a checkpoint) and writes the final fp32 latent.
     /// `stepCompleted` is called after each finite post-Euler latent and is the
     /// checkpoint boundary. Its buffers remain valid only for the callback.
+    ///
+    /// - Parameter startStep: Number of Euler steps already completed
+    ///   (I004 resume semantics). `0` = begin at step 0; `8` = all steps
+    ///   complete — the checkpoint latent is copied straight to output.
+    /// - Precondition: `0 <= startStep <= 8`.
     func execute(
         initialLatent: MTLBuffer,
         crossContext: MTLBuffer,
         outputLatent: MTLBuffer,
+        startStep: Int = 0,
         blockProgress: BlockProgress? = nil,
         stepCompleted: StepCompleted? = nil
     ) async throws {
         try beginRun()
         defer { endRun() }
+        guard (0...ModelConstants.samplerSteps).contains(startStep) else {
+            throw AnimapkError.validation(
+                "startStep \\(startStep) out of range 0...\\(ModelConstants.samplerSteps)")
+        }
         let bytes = Self.latentElements * 4
         guard initialLatent.length >= bytes, outputLatent.length >= bytes,
               crossContext.length >= 512 * 1_024 * 4 else {
@@ -80,7 +91,9 @@ final class DiffusionSampler {
             key: "diffusion.cross-context.f16", bytes: 512 * 1_024 * 2)
         try await convertToHalf(crossContext, output: crossHalf, count: 512 * 1_024)
 
-        for step in 0..<EulerSampler.sigmas.count - 1 {
+        // Resume: the checkpoint latent already contains the result of steps
+        // [0, startStep); only execute the remaining sigma transitions.
+        for step in startStep..<EulerSampler.sigmas.count - 1 {
             let sigma = EulerSampler.sigmas[step]
             let nextSigma = EulerSampler.sigmas[step + 1]
             try await preparation.execute(
@@ -101,7 +114,7 @@ final class DiffusionSampler {
                 latent: latent, denoised: denoised, output: next,
                 sigma: sigma, nextSigma: nextSigma, count: Self.latentElements)
             guard isFinite(next, count: Self.latentElements) else {
-                throw AnimapkError.validation("non-finite diffusion latent after step \(step)")
+                throw AnimapkError.validation("non-finite diffusion latent after step \\(step)")
             }
             try stepCompleted?(step, sigma, nextSigma, denoised, next)
             swap(&latent, &next)
