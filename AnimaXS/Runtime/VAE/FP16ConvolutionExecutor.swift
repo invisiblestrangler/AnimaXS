@@ -226,7 +226,7 @@ final class FP16ConvolutionExecutor {
             try encodeCopyRows(
                 commandBuffer: commandBuffer,
                 source: resultScratch, sourceOffset: 0, sourceRowStride: outputRowBytes / half,
-                destination: output, destinationOffset: outputOffset + rowStart * outputRowBytes,
+                destination: output, destinationOffset: outputOffset + rowStart * outputChannels * half,
                 destinationRowStride: outputChannels,
                 columns: outputChannels, rows: rowsThisTile)
             rowStart += rowsThisTile
