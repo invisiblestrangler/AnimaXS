@@ -1,6 +1,9 @@
 import Foundation
 import Metal
 import MetalPerformanceShaders
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// Full-frame streamed Wan T=1 VAE decoder (J002).
 ///
