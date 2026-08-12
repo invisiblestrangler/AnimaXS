@@ -213,7 +213,7 @@ final class ResumeEquivalenceTests: XCTestCase {
         width: Int = 512, height: Int = 512,
         hashes: ModelHashes? = nil
     ) throws -> GenerationCheckpoint {
-        let count = 16 * 64 * 64
+        let count = ModelConstants.ditLatentChannels * (width / 8) * (height / 8)
         let latent = (0..<count).map { Float($0 % 5) - 2 }
         return try GenerationCheckpoint(
             latent: latent, step: step, prompt: prompt, seed: seed,
