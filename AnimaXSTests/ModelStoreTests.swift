@@ -104,6 +104,7 @@ final class ModelStoreTests: XCTestCase {
     func testWrongSizeDownloadFailsNoFakeReadyFile() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { Self.cleanup(root) }
         let entry = makeEntry(content: Data("abc".utf8))  // expects size 3
         let bad = root.appendingPathComponent("bad.animapk")
@@ -125,6 +126,7 @@ final class ModelStoreTests: XCTestCase {
     func testInsufficientDiskRejected() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { Self.cleanup(root) }
         let content = Data(repeating: 0xAB, count: 1024)
         let entry = makeEntry(content: content)
@@ -165,6 +167,7 @@ final class ModelStoreTests: XCTestCase {
     func testRepeatedPrepareIsIdempotent() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { Self.cleanup(root) }
         let content = Data("abc".utf8)
         let entry = makeEntry(content: content)
