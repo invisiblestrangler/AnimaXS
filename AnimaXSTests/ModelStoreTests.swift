@@ -138,7 +138,7 @@ final class ModelStoreTests: XCTestCase {
             _ = try await store.prepare(entry)
             XCTFail("insufficient disk must be rejected")
         } catch {
-            XCTAssertTrue(error.localizedDescription.contains("disk"),
+            XCTAssertTrue(String(describing: error).contains("disk"),
                           "expected disk error, got \(error)")
         }
     }
