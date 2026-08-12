@@ -8,6 +8,32 @@ import Metal
 /// for the real executors.
 final class GenerationCoordinatorTests: XCTestCase {
 
+    // MARK: - Default-store isolation
+
+    /// Redirect the coordinator's *default* persistent store to a per-test temp
+    /// directory so tests that wire a coordinator with no explicit store never
+    /// read or write the real Application Support checkpoint (keeps the suite
+    /// hermetic and deterministic, like `ModelStore.secureInstalls`).
+    private var defaultStoreDir: URL?
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-defaultstore-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        GenerationCoordinator.defaultCheckpointStoreDirectoryOverride = dir
+        defaultStoreDir = dir
+    }
+
+    override func tearDownWithError() throws {
+        GenerationCoordinator.defaultCheckpointStoreDirectoryOverride = nil
+        if let dir = defaultStoreDir {
+            try? FileManager.default.removeItem(at: dir)
+        }
+        defaultStoreDir = nil
+        try super.tearDownWithError()
+    }
+
     // MARK: - Probe infrastructure
 
     private protocol DeinitReporting: AnyObject {
@@ -503,6 +529,47 @@ final class GenerationCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.completedSteps, 1,
                        "exactly one completed step retained")
         XCTAssertTrue(store.hasCheckpoint, "checkpoint persisted on disk")
+    }
+
+    @MainActor
+    func testProductionDefaultWiringPersistsAcrossColdLaunch() async throws {
+        let context = try makeContext()
+        let factory = LifecycleFactory()
+
+        // Production wiring: construct the coordinator with NO explicit store,
+        // exactly as ContentView does. The default must resolve to a persistent
+        // CheckpointStore (not nil), so a completed step is written to disk.
+        let coordinator = GenerationCoordinator(context: context, factory: factory)
+        coordinator.generate(prompt: "cold-launch", seed: 77, models: testModels())
+        for _ in 0..<250 {
+            if factory.sampler?.completedSteps ?? 0 >= 1 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        coordinator.cancel()
+        for _ in 0..<250 {
+            if !coordinator.isGenerating { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        // The persistence save is enqueued on the main actor; wait for it.
+        for _ in 0..<100 {
+            if coordinator.canResume { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(coordinator.canResume, "default-wired coordinator retained a checkpoint")
+        XCTAssertEqual(coordinator.completedSteps, 1)
+
+        // A file must actually exist on disk at the default store's location.
+        let defaultURL = try XCTUnwrap(GenerationCoordinator.defaultCheckpointStoreDirectoryOverride)
+            .appendingPathComponent("generation-checkpoint.json")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: defaultURL.path),
+                      "default wiring must persist the checkpoint file to disk")
+
+        // "Cold launch": a FRESH coordinator (same default wiring, no explicit
+        // store) must reload the persisted checkpoint on init — proving
+        // recovery from disk, not from an in-memory object that no longer exists.
+        let fresh = GenerationCoordinator(context: context, factory: LifecycleFactory())
+        XCTAssertTrue(fresh.canResume, "cold launch must reload the persisted checkpoint")
+        XCTAssertEqual(fresh.completedSteps, 1, "cold launch reloads the completed step")
     }
 
     @MainActor

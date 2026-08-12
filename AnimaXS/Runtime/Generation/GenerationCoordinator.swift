@@ -64,6 +64,23 @@ final class GenerationCoordinator: ObservableObject {
     private var generationTask: Task<Void, Never>?
     private var latestCheckpoint: GenerationCheckpoint?
 
+    /// Test seam (mirrors `ModelStore.secureInstalls`): when set, the *default*
+    /// persistent store (used when a coordinator is wired with no explicit
+    /// `checkpointStore`, exactly as production `ContentView` does) is created
+    /// under this directory. Production leaves this `nil` so the default store
+    /// uses the real persistent Application Support location. Tests that need
+    /// to prove the default wiring provides cold-launch recovery set this to an
+    /// isolated temp directory and reset it afterward.
+    static nonisolated(unsafe) var defaultCheckpointStoreDirectoryOverride: URL?
+
+    @MainActor
+    private static func makeDefaultCheckpointStore() -> CheckpointStore? {
+        if let override = defaultCheckpointStoreDirectoryOverride {
+            return try? CheckpointStore(directory: override)
+        }
+        return try? CheckpointStore()
+    }
+
     init(
         context: MetalContext? = nil,
         factory: any GenerationStageFactory = ProductionStageFactory(),
@@ -71,7 +88,12 @@ final class GenerationCoordinator: ObservableObject {
         checkpointStore: CheckpointStore? = nil
     ) {
         self.factory = factory
-        self.checkpointStore = checkpointStore
+        // Production (default) wiring must persist checkpoints across cold
+        // launches so Resume works after the app is killed. `nil` here means
+        // "use the normal persistent store"; tests inject an isolated store
+        // (or leave nil and rely on `defaultCheckpointStoreDirectoryOverride`
+        // for isolation).
+        self.checkpointStore = checkpointStore ?? Self.makeDefaultCheckpointStore()
         if let context {
             self.context = context
         } else if attemptMetalFallback {
@@ -82,7 +104,7 @@ final class GenerationCoordinator: ObservableObject {
             self.context = nil
         }
         // Cold launch: a valid persisted checkpoint is offered for resume.
-        if let checkpointStore {
+        if let checkpointStore = self.checkpointStore {
             latestCheckpoint = checkpointStore.load()
         }
     }

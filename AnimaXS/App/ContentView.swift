@@ -46,6 +46,15 @@ struct ContentView: View {
             .onReceive(
                 NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)
             ) { _ in coordinator.handleMemoryWarning() }
+            .onReceive(
+                // K004 thermal policy: surface system thermal-state changes to
+                // the coordinator so a serious/critical condition stops a
+                // running generation (preserving resume) and nominal/fair
+                // continue normally. Uses the proper system notification
+                // (available on the iOS 18 deployment target) rather than
+                // polling.
+                NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
+            ) { _ in coordinator.handleThermalState(ProcessInfo.processInfo.thermalState) }
             .fileImporter(
                 isPresented: $showingImporter,
                 allowedContentTypes: [.data],
@@ -193,6 +202,14 @@ struct ContentView: View {
             return
         }
         guard let seed = UInt64(seedText) else {
+            return
+        }
+        // K004 thermal policy: do not begin a generation while the device is
+        // already in a serious/critical thermal state (same policy the running
+        // handler applies). Otherwise a fresh generation would ignore an
+        // already-serious condition.
+        let thermal = ProcessInfo.processInfo.thermalState
+        if thermal == .serious || thermal == .critical {
             return
         }
         generationStart = Date()
