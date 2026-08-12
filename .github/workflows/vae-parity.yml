@@ -43,7 +43,19 @@ jobs:
         run: |
           test -n "$RELEASE" || { echo "::error::VAE_PARITY_RELEASE repo variable not set"; exit 1; }
           mkdir -p "$RUNNER_TEMP/vae" AnimaXSTests/Fixtures/VAEParity
-          gh release download "$RELEASE" --dir "$RUNNER_TEMP/vae"
+          # Direct-URL downloads are more reliable than gh release download for
+          # the 260 MB pack (which hits the GitHub API for metadata first).
+          BASE="https://github.com/invisiblestrangler/AnimaXS/releases/download/$RELEASE"
+          for i in 1 2 3; do
+            curl --fail --location --retry 3 --retry-all-errors \
+              -o "$RUNNER_TEMP/vae/qwen-image-vae-xsmax-fp16.animapk" \
+              "$BASE/qwen-image-vae-xsmax-fp16.animapk" && break
+            echo "retry $i after failure"; sleep 5
+          done
+          curl --fail --location -o "$RUNNER_TEMP/vae/vae_latent.f32" \
+            "$BASE/vae_latent.f32"
+          curl --fail --location -o "$RUNNER_TEMP/vae/vae_lane_a_rgb.f32" \
+            "$BASE/vae_lane_a_rgb.f32"
           cp "$RUNNER_TEMP/vae/qwen-image-vae-xsmax-fp16.animapk" AnimaXSTests/Fixtures/VAEParity/
           cp "$RUNNER_TEMP/vae/vae_latent.f32" AnimaXSTests/Fixtures/VAEParity/
           cp "$RUNNER_TEMP/vae/vae_lane_a_rgb.f32" AnimaXSTests/Fixtures/VAEParity/
