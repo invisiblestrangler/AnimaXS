@@ -454,6 +454,185 @@ final class GenerationCoordinatorTests: XCTestCase {
         }
     }
 
+    // MARK: - K003 lifecycle: background cancel retains checkpoint
+
+    @MainActor
+    func testBackgroundTransitionCancelsAndRetainsCheckpoint() async throws {
+        let context = try makeContext()
+        let factory = LifecycleFactory()
+        let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-lifecycle-\\(UUID().uuidString)", isDirectory: true))
+        defer { store.remove() }
+        let coordinator = GenerationCoordinator(
+            context: context, factory: factory, checkpointStore: store)
+
+        coordinator.generate(prompt: "lifecycle", seed: 11, models: testModels())
+        XCTAssertTrue(coordinator.isGenerating)
+
+        // Wait until at least one step completed (checkpoint exists) and the
+        // sampler is mid-step-1 where it will observe cancellation.
+        for _ in 0..<250 {
+            if factory.sampler?.completedSteps ?? 0 >= 1 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertGreaterThanOrEqual(factory.sampler?.completedSteps ?? 0, 1,
+                                    "sampler reached step 1")
+
+        // Simulate the app moving to background.
+        coordinator.appDidEnterBackground()
+
+        // The engine must stop at the next block boundary (cooperative), the
+        // checkpoint must be retained, and state must become cancelled.
+        for _ in 0..<250 {
+            if !coordinator.isGenerating { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertFalse(coordinator.isGenerating, "generation stopped after background")
+        if case .cancelled = coordinator.state {
+            // expected
+        } else {
+            XCTFail("expected cancelled after background, got \\(coordinator.state)")
+        }
+        // The checkpoint Task persists asynchronously on the main actor; wait
+        // for the coordinator to observe it.
+        for _ in 0..<100 {
+            if coordinator.canResume { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(coordinator.canResume, "checkpoint retained for resume")
+        XCTAssertEqual(coordinator.completedSteps, 1,
+                       "exactly one completed step retained")
+        XCTAssertTrue(store.hasCheckpoint, "checkpoint persisted on disk")
+    }
+
+    @MainActor
+    func testForegroundOffersResumeWhenCheckpointCompatible() async throws {
+        let context = try makeContext()
+        let factory = LifecycleFactory()
+        let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-lifecycle-\\(UUID().uuidString)", isDirectory: true))
+        defer { store.remove() }
+        let coordinator = GenerationCoordinator(
+            context: context, factory: factory, checkpointStore: store)
+
+        coordinator.generate(prompt: "lifecycle", seed: 11, models: testModels())
+        for _ in 0..<250 {
+            if factory.sampler?.completedSteps ?? 0 >= 1 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        coordinator.appDidEnterBackground()
+        for _ in 0..<250 {
+            if !coordinator.isGenerating { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        // Foreground: the checkpoint is still offered (no auto-discard).
+        coordinator.appWillEnterForeground()
+        for _ in 0..<100 {
+            if coordinator.canResume { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(coordinator.canResume)
+        XCTAssertEqual(coordinator.completedSteps, 1)
+
+        // Resuming continues from step 1 and completes.
+        coordinator.resume(prompt: "lifecycle", seed: 11, models: testModels())
+        for _ in 0..<250 {
+            if !coordinator.isGenerating { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertFalse(coordinator.isGenerating)
+        if case .completed = coordinator.state {
+            // expected
+        } else {
+            XCTFail("expected completed after resume, got \\(coordinator.state)")
+        }
+    }
+
+    @MainActor
+    func testResumeRejectsIncompatibleCheckpoint() async throws {
+        let context = try makeContext()
+        let factory = LifecycleFactory()
+        let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-lifecycle-\\(UUID().uuidString)", isDirectory: true))
+        defer { store.remove() }
+        let coordinator = GenerationCoordinator(
+            context: context, factory: factory, checkpointStore: store)
+
+        coordinator.generate(prompt: "lifecycle", seed: 11, models: testModels())
+        for _ in 0..<250 {
+            if factory.sampler?.completedSteps ?? 0 >= 1 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        coordinator.appDidEnterBackground()
+        for _ in 0..<250 {
+            if !coordinator.isGenerating { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(coordinator.canResume)
+
+        // Different seed → checkpoint must be rejected and discarded.
+        coordinator.resume(prompt: "lifecycle", seed: 99, models: testModels())
+        if case .failed(let message) = coordinator.state {
+            XCTAssertTrue(message.contains("seed"), "expected seed mismatch, got \\(message)")
+        } else {
+            XCTFail("expected failed state, got \\(coordinator.state)")
+        }
+        XCTAssertFalse(coordinator.canResume, "incompatible checkpoint discarded")
+        XCTAssertFalse(store.hasCheckpoint, "incompatible checkpoint removed from disk")
+    }
+
+    /// Sampler that completes one step then suspends until cancellation, so a
+    /// background/cancel request lands deterministically: `Task.sleep` is a
+    /// cancellation point and throws `CancellationError` when the task is
+    /// cancelled. On resume (startStep >= 1) it runs all remaining steps.
+    private final class LifecycleSampler: DiffusionStage {
+        private(set) var completedSteps = 0
+        func execute(
+            initialLatent: MTLBuffer,
+            crossContext: MTLBuffer,
+            outputLatent: MTLBuffer,
+            startStep: Int,
+            blockProgress: ((Int, Int) throws -> Void)?,
+            stepCompleted: ((Int, Float, Float, MTLBuffer, MTLBuffer) throws -> Void)?
+        ) async throws {
+            let count = initialLatent.length / 4
+            let out = outputLatent.contents().bindMemory(to: Float.self, capacity: count)
+            for step in startStep..<8 {
+                for block in 0..<28 {
+                    try Task.checkCancellation()
+                    try blockProgress?(step, block)
+                }
+                for i in 0..<count { out[i] = Float(step + 1) }
+                completedSteps += 1
+                try stepCompleted?(step, 1.0, 0.5, outputLatent, outputLatent)
+                if step == 0 && startStep == 0 {
+                    // Deterministic pause: suspend until cancelled. Throws
+                    // CancellationError when the coordinator cancels the task.
+                    try await Task.sleep(nanoseconds: 60_000_000_000)
+                }
+            }
+        }
+    }
+
+    private final class LifecycleFactory: GenerationStageFactory {
+        var sampler: LifecycleSampler?
+        func makePromptEncoder(context: MetalContext, fileURL: URL) throws -> PromptEncoderStage {
+            ProbeEncoder()
+        }
+        func makeContextAdapter(context: MetalContext, fileURL: URL) throws -> ContextAdapterStage {
+            ProbeAdapter()
+        }
+        func makeDiffusion(context: MetalContext, fileURL: URL) throws -> DiffusionStage {
+            let sampler = LifecycleSampler()
+            self.sampler = sampler
+            return sampler
+        }
+        func makeVAE(context: MetalContext, fileURL: URL) throws -> VAEDecodeStage {
+            ProbeVAE()
+        }
+    }
+
     // MARK: - Stage lifetime release
 
     func testHeavyStageObjectsAreReleasedAfterTheirStage() async throws {

@@ -195,6 +195,25 @@ final class GenerationCoordinator: ObservableObject {
         if case .cancelled = state { state = .idle }
     }
 
+    // MARK: - App lifecycle (K003)
+
+    /// App moved to background while generating: request safe cancellation,
+    /// retain the latest completed-step checkpoint, and release the heavy
+    /// generation stage. Do not promise unrestricted background GPU inference.
+    func appDidEnterBackground() {
+        guard isGenerating else { return }
+        // Cooperative cancellation: the engine stops at the next safe block
+        // boundary; when the cancel lands, state becomes .cancelled and the
+        // checkpoint remains available for Resume.
+        cancel()
+    }
+
+    /// App returned to foreground: nothing to do — a compatible checkpoint is
+    /// already surfaced through `canResume`/`completedSteps`.
+    func appWillEnterForeground() {
+        // Resume availability is derived from `latestCheckpoint` on demand.
+    }
+
     // MARK: - Private
 
     private func run(

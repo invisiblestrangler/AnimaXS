@@ -85,6 +85,16 @@ struct ContentView: View {
             .task {
                 await resolveModels()
             }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .animaXSAppDidEnterBackground)
+            ) { _ in
+                coordinator.appDidEnterBackground()
+            }
+            .onReceive(
+                NotificationCenter.default.publisher(for: .animaXSAppWillEnterForeground)
+            ) { _ in
+                coordinator.appWillEnterForeground()
+            }
         }
     }
 
