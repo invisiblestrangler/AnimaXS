@@ -104,8 +104,20 @@ final class FP16ConvolutionExecutor {
             let rowsThisTile = min(tileRows, rows - rowStart)
             let resultScratch = buffers.buffer(
                 key: "vae.conv1x1.result", bytes: try checkedProduct(rowsThisTile, outputRowBytes))
+            // MPS requires rowBytes padded to a 16-byte multiple; the tight
+            // activation rows may not be. Re-stage each tile into a padded
+            // scratch (LinearExecutor does the same for its left matrix).
+            let inputScratch = buffers.buffer(
+                key: "vae.conv1x1.input", bytes: try checkedProduct(rowsThisTile, inputRowBytes))
+            try encodeCopyRows(
+                commandBuffer: commandBuffer,
+                source: input, sourceOffset: inputOffset + rowStart * inputChannels * half,
+                sourceRowStride: inputChannels,
+                destination: inputScratch, destinationOffset: 0,
+                destinationRowStride: inputRowBytes / half,
+                columns: inputChannels, rows: rowsThisTile)
             let inputMatrix = MPSMatrix(
-                buffer: input, offset: inputOffset + rowStart * inputRowBytes,
+                buffer: inputScratch,
                 descriptor: MPSMatrixDescriptor(
                     rows: rowsThisTile, columns: inputChannels,
                     rowBytes: inputRowBytes, dataType: .float16))
