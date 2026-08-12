@@ -55,7 +55,7 @@ final class VAEDecoderLocatorTests: XCTestCase {
 
         // Unexecuted time_conv tensors exist in the pack but never appear in a
         // streaming group.
-        let groupNames = Set(locator.groups.flatMap { $0.range.tensors.map(\.tensor\.name) })
+        let groupNames = Set(locator.groups.flatMap { $0.range.tensors.map(\.tensor.name) })
         XCTAssertFalse(groupNames.contains("decoder.upsamples.3.time_conv.weight"))
         XCTAssertFalse(groupNames.contains("decoder.upsamples.7.time_conv.weight"))
 
@@ -63,7 +63,7 @@ final class VAEDecoderLocatorTests: XCTestCase {
         // stage-0 first residual.
         let attention = try locator.group(3)
         XCTAssertEqual(
-            Set(attention.range.tensors.map(\.tensor\.name)),
+            Set(attention.range.tensors.map(\.tensor.name)),
             Set(["decoder.middle.1.norm.gamma", "decoder.middle.1.to_qkv.weight",
                  "decoder.middle.1.to_qkv.bias", "decoder.middle.1.proj.weight",
                  "decoder.middle.1.proj.bias"]))
