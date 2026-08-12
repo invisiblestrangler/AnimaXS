@@ -61,6 +61,7 @@
 		8F07F57A8F85D199B51B2F3C /* AnimapkRangeLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C22C2203066EFC03BF7FB83 /* AnimapkRangeLocator.swift */; };
 		914187C1B6254DDCA7ED3C32 /* QwenNumerics.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0EFD572B87262AE5AAEB996 /* QwenNumerics.swift */; };
 		938A4049C06BE05E39F6BCC1 /* MetalContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F6A1853CF522E32A3743ACB /* MetalContext.swift */; };
+		959382291D4CE941AC176BEC /* StageConformances.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3E243B29F63E716A7FA5916 /* StageConformances.swift */; };
 		ACF5E6ADE5026984036BFFEC /* QwenEncoderMetalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63A581535AFB0BECB025A73F /* QwenEncoderMetalTests.swift */; };
 		AD481E2836797AA5BE0359AA /* WeightStreamer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B8E57358726DCBA4B39C22A /* WeightStreamer.swift */; };
 		AF5BAAFDACD2451A4B01C9E4 /* DitRoPETests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38E139072D28862327122F48 /* DitRoPETests.swift */; };
@@ -79,6 +80,7 @@
 		D2CEA1830C6E17E0AB682B09 /* Checkpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFC5EBDAD72F3E1ECBEB3947 /* Checkpoint.swift */; };
 		D49309A80BBD9F702F9E71A8 /* TimestepEmbedder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D7DEF4C7D7998D60A743925 /* TimestepEmbedder.swift */; };
 		D66CA83A712868A0FDAF7595 /* case1_final_latent.f32 in Resources */ = {isa = PBXBuildFile; fileRef = 0A37396ACF4F39FE78041309 /* case1_final_latent.f32 */; };
+		D7BF749539EBEF04781FBDE2 /* GenerationEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4347B31599A3D35830186731 /* GenerationEngine.swift */; };
 		E03432114D1256677B254408 /* EulerSampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 99DD442C7A3CCB6E47D0F488 /* EulerSampler.swift */; };
 		E4237CF411C2158613158D83 /* DiTBlockExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F14B5397CD1B2C4DE3D41CB /* DiTBlockExecutorTests.swift */; };
 		E8B287C14227EAB23ED6D5DB /* QwenEncoderCPU.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8094627F9958515821CFE276 /* QwenEncoderCPU.swift */; };
@@ -88,6 +90,7 @@
 		EED314EA6D67446AAFE181EC /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 220DB7AE4DC9E7B009A9C5DF /* README.md */; };
 		F4CE56E349DC9E6BD2599127 /* VAEDecoderLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F93DCAAE4B32EEDADD9FE44F /* VAEDecoderLocator.swift */; };
 		FC52DE8FE0010D498F008967 /* AnimapkFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = D576867ECC53CBF14CC30F79 /* AnimapkFile.swift */; };
+		FD6BD88253F6B09E884AEB25 /* GenerationCoordinatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 607907C1088D17DCE300B330 /* GenerationCoordinatorTests.swift */; };
 		FDCF7054E59D7EA8DBA41BBF /* ModelStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22A56ABD92C60AEA6C10526C /* ModelStore.swift */; };
 /* End PBXBuildFile section */
 
@@ -127,6 +130,7 @@
 		3DE378A333F7F589CD183A9A /* MetalExecutionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalExecutionTests.swift; sourceTree = "<group>"; };
 		3F14B5397CD1B2C4DE3D41CB /* DiTBlockExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTBlockExecutorTests.swift; sourceTree = "<group>"; };
 		3F6A1853CF522E32A3743ACB /* MetalContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalContext.swift; sourceTree = "<group>"; };
+		4347B31599A3D35830186731 /* GenerationEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationEngine.swift; sourceTree = "<group>"; };
 		43FB54A2EC11428E9AFC19A4 /* Crc32.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Crc32.swift; sourceTree = "<group>"; };
 		4C7A6A2DAA97C767D88AE25B /* AnimaKernels.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = AnimaKernels.metal; sourceTree = "<group>"; };
 		4C8E968875980A2C9ACC94E5 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -135,6 +139,7 @@
 		4E9210A1BDCCB8F59CE8B971 /* VAEDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VAEDecoder.swift; sourceTree = "<group>"; };
 		507AD044478BA9533EE6512E /* VAEDecoderLocatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VAEDecoderLocatorTests.swift; sourceTree = "<group>"; };
 		52E7305B1912F5357ACCAEE5 /* Modulation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Modulation.swift; sourceTree = "<group>"; };
+		607907C1088D17DCE300B330 /* GenerationCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationCoordinatorTests.swift; sourceTree = "<group>"; };
 		63A581535AFB0BECB025A73F /* QwenEncoderMetalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenEncoderMetalTests.swift; sourceTree = "<group>"; };
 		63D78F224C62E12AE65A076F /* DitRoPE.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DitRoPE.swift; sourceTree = "<group>"; };
 		67B56E4FB7D12CC1F63A52F9 /* t5_special_tokens_map.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = t5_special_tokens_map.json; sourceTree = "<group>"; };
@@ -163,6 +168,7 @@
 		B55416DCCBC54FD863B0137D /* case1_noise.f32 */ = {isa = PBXFileReference; path = case1_noise.f32; sourceTree = "<group>"; };
 		BE9A7C6882C9A11F40FD3816 /* RGBConverter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RGBConverter.swift; sourceTree = "<group>"; };
 		BF7F7DDF80FF8FC3729F608B /* SeededRNG.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeededRNG.swift; sourceTree = "<group>"; };
+		C3E243B29F63E716A7FA5916 /* StageConformances.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StageConformances.swift; sourceTree = "<group>"; };
 		C416E0528D650EED48130A92 /* AnimapkTensor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkTensor.swift; sourceTree = "<group>"; };
 		C509546307CB21BE0D1A9146 /* LLMAdapterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LLMAdapterTests.swift; sourceTree = "<group>"; };
 		C95BB4598F972757555839F3 /* case1_t5_ids.i64 */ = {isa = PBXFileReference; path = case1_t5_ids.i64; sourceTree = "<group>"; };
@@ -331,7 +337,9 @@
 			children = (
 				DFC5EBDAD72F3E1ECBEB3947 /* Checkpoint.swift */,
 				A6F117CCE3CBBF4E5ECAF4B1 /* GenerationCoordinator.swift */,
+				4347B31599A3D35830186731 /* GenerationEngine.swift */,
 				684C63379028C718819607CA /* ModelConstants.swift */,
+				C3E243B29F63E716A7FA5916 /* StageConformances.swift */,
 			);
 			path = Generation;
 			sourceTree = "<group>";
@@ -413,6 +421,7 @@
 				28C2E8E80AFBE05DB0577977 /* DiTInputTests.swift */,
 				38E139072D28862327122F48 /* DitRoPETests.swift */,
 				82B32CF88BF83EC3BF4BB22B /* FullInferenceTests.swift */,
+				607907C1088D17DCE300B330 /* GenerationCoordinatorTests.swift */,
 				D2D891A141A49EBC60BDB3DA /* GqaHeadMappingTests.swift */,
 				E00F7AC0D57A13E91CB5F434 /* LinearExecutorTests.swift */,
 				C509546307CB21BE0D1A9146 /* LLMAdapterTests.swift */,
@@ -559,6 +568,7 @@
 				774F60C7B433299EA6C55C9B /* DiTInputTests.swift in Sources */,
 				AF5BAAFDACD2451A4B01C9E4 /* DitRoPETests.swift in Sources */,
 				81DF10FC8BD278FEC6C92E2A /* FullInferenceTests.swift in Sources */,
+				FD6BD88253F6B09E884AEB25 /* GenerationCoordinatorTests.swift in Sources */,
 				8E5DA5D7D9950B728513D3E5 /* GqaHeadMappingTests.swift in Sources */,
 				7DB2CBB89F9ABC72D09B6089 /* LLMAdapterTests.swift in Sources */,
 				36DCBB069B8AE8C6D90A5115 /* LinearExecutorTests.swift in Sources */,
@@ -604,6 +614,7 @@
 				E03432114D1256677B254408 /* EulerSampler.swift in Sources */,
 				EAE908C32F123350E9B89844 /* FP16ConvolutionExecutor.swift in Sources */,
 				624C64646074B2239B939623 /* GenerationCoordinator.swift in Sources */,
+				D7BF749539EBEF04781FBDE2 /* GenerationEngine.swift in Sources */,
 				263D4D4D7FB4D3766DF07296 /* LLMAdapter.swift in Sources */,
 				10ECAB707F0D3BF55B5F9884 /* LLMAdapterMetal.swift in Sources */,
 				24E784492B6C7FD49E64D227 /* LinearExecutor.swift in Sources */,
@@ -619,6 +630,7 @@
 				914187C1B6254DDCA7ED3C32 /* QwenNumerics.swift in Sources */,
 				D070CCF52D5CF0088DF0495E /* RGBConverter.swift in Sources */,
 				0A5B012A2059A0FD9091D3CA /* SeededRNG.swift in Sources */,
+				959382291D4CE941AC176BEC /* StageConformances.swift in Sources */,
 				D49309A80BBD9F702F9E71A8 /* TimestepEmbedder.swift in Sources */,
 				027A9C7FE57956074F77229D /* TokenizerLoader.swift in Sources */,
 				BAF9A2818173640D2EB16C94 /* VAEDecoder.swift in Sources */,
