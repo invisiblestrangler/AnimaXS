@@ -89,6 +89,7 @@ final class VAEDecoder {
                                   width: Self.latentSize, inputChannels: Self.latentChannels,
                                   outputChannels: 384, key: "vae.activation.a")
         #if DEBUG
+        dumpStage(x, name: "conv1", height: Self.latentSize, width: Self.latentSize, channels: 384)
         stage("conv1")
         #endif
 
@@ -97,18 +98,21 @@ final class VAEDecoder {
                                        width: Self.latentSize, inChannels: 384, outChannels: 384,
                                        key: "vae.activation.b")
         #if DEBUG
+        dumpStage(x, name: "middle_res0", height: Self.latentSize, width: Self.latentSize, channels: 384)
         stage("middle_res0")
         #endif
         x = try await runAttentionGroup(groupIndex: 3, input: x, height: Self.latentSize,
                                         width: Self.latentSize, channels: 384,
                                         key: "vae.activation.a")
         #if DEBUG
+        dumpStage(x, name: "middle_attn", height: Self.latentSize, width: Self.latentSize, channels: 384)
         stage("middle_attn")
         #endif
         x = try await runResidualGroup(groupIndex: 4, input: x, height: Self.latentSize,
                                        width: Self.latentSize, inChannels: 384, outChannels: 384,
                                        key: "vae.activation.b")
         #if DEBUG
+        dumpStage(x, name: "middle_res1", height: Self.latentSize, width: Self.latentSize, channels: 384)
         stage("middle_res1")
         #endif
 
@@ -678,5 +682,25 @@ extension VAEDecoder {
     /// Buffers grow on demand and are reused across stages (bounded memory).
     private func activation(key: String, positions: Int, channels: Int) -> MTLBuffer {
         buffers.buffer(key: key, bytes: positions * channels * MemoryLayout<Float16>.stride)
+    }
+
+    /// Summary statistics of a position-major fp16 stage output, for
+    /// layer-by-layer comparison against the Python oracle (no file I/O).
+    private func dumpStage(_ buffer: MTLBuffer, name: String,
+                           height: Int, width: Int, channels: Int) {
+        let count = height * width * channels
+        let pointer = buffer.contents().bindMemory(to: Float16.self, capacity: count)
+        var sum: Double = 0, sumSq: Double = 0, minV = Double.infinity, maxV = -Double.infinity
+        for i in 0..<count {
+            let v = Double(pointer[i])
+            sum += v; sumSq += v * v
+            minV = min(minV, v); maxV = max(maxV, v)
+        }
+        let mean = sum / Double(count)
+        let std = sqrt(sumSq / Double(count) - mean * mean)
+        print("VAE_DUMP \(name) shape=[\(height),\(width),\(channels)] "
+            + "min=\(String(format: "%.6f", minV)) max=\(String(format: "%.6f", maxV)) "
+            + "mean=\(String(format: "%.6f", mean)) std=\(String(format: "%.6f", std)) "
+            + "first8=\(Array((0..<min(8, count)).map { Float(pointer[$0]) }).map { String(format: "%.4f", $0) }.joined(separator: ","))")
     }
 }

@@ -83,6 +83,16 @@ def silu(x):
     return x / (1.0 + np.exp(-np.asarray(x, np.float32)))
 
 
+def dump_intermediate(name, x):
+    """Print summary stats matching Swift VAEDecoder.dumpStage output."""
+    c, h, w = x.shape
+    f = np.asarray(x, np.float32)
+    print(f"VAE_DUMP {name} shape=[{h},{w},{c}] "
+          f"min={np.min(f):.6f} max={np.max(f):.6f} "
+          f"mean={np.mean(f):.6f} std={np.std(f):.6f} "
+          f"first8={','.join(f'{v:.4f}' for v in f.reshape(-1)[:8])}")
+
+
 def nearest_exact_2x(x):
     c, h, w = x.shape
     return np.repeat(np.repeat(x, 2, axis=1), 2, axis=2)
@@ -188,19 +198,23 @@ def main():
     x = conv2d(z, fold2d(t["conv2.weight"], True), t["conv2.bias"])
     # ---- decoder.conv1 (final-slice 3x3, 16->384) ----
     x = conv2d(x, fold2d(t["decoder.conv1.weight"], True), t["decoder.conv1.bias"])
+    dump_intermediate("conv1", x)
     # ---- middle ----
     mid0 = lambda n: f"decoder.middle.0.residual.{n}"
     mid2 = lambda n: f"decoder.middle.2.residual.{n}"
     x = residual_block(x, {
         "g0": t[mid0("0.gamma")], "w2": t[mid0("2.weight")], "b2": t[mid0("2.bias")],
         "g3": t[mid0("3.gamma")], "w6": t[mid0("6.weight")], "b6": t[mid0("6.bias")]})
+    dump_intermediate("middle_res0", x)
     x = attention_block(x, {
         "norm_gamma": t["decoder.middle.1.norm.gamma"],
         "to_qkv": t["decoder.middle.1.to_qkv.weight"], "to_qkv_b": t["decoder.middle.1.to_qkv.bias"],
         "proj": t["decoder.middle.1.proj.weight"], "proj_b": t["decoder.middle.1.proj.bias"]})
+    dump_intermediate("middle_attn", x)
     x = residual_block(x, {
         "g0": t[mid2("0.gamma")], "w2": t[mid2("2.weight")], "b2": t[mid2("2.bias")],
         "g3": t[mid2("3.gamma")], "w6": t[mid2("6.weight")], "b6": t[mid2("6.bias")]})
+    dump_intermediate("middle_res1", x)
 
     # ---- upsample stages ----
     # stage 0 (384@64): 3 residuals, resample 384->192 @128
