@@ -40,13 +40,19 @@ def main() -> int:
     if os.path.isfile(manifest_path):
         with open(manifest_path, "r") as fh:
             manifest = json.load(fh)
-        for entry in manifest.values():
+        # Schema varies by Xcode version (dict {id: entry} or list of
+        # entries). Handle both and be tolerant of key names: within each
+        # entry, the exported file is any string ending in .png/.txt, and the
+        # suggested name is any sibling string that starts with a target
+        # prefix.
+        entries = manifest.values() if isinstance(manifest, dict) else manifest
+        for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            fname = entry.get("exportedFileName") or entry.get("filename") or ""
-            sname = entry.get("suggestedHumanReadableName") or entry.get("suggestedName") or fname
+            strings = [v for v in entry.values() if isinstance(v, str)]
+            fname = next((s for s in strings if s.endswith((".png", ".txt"))), "")
             for prefix, canonical in targets.items():
-                if sname.startswith(prefix) and fname and canonical not in found:
+                if any(s.startswith(prefix) for s in strings) and fname and canonical not in found:
                     found[canonical] = fname
 
     # Fallback: match by file content where possible. metrics.txt is the only
