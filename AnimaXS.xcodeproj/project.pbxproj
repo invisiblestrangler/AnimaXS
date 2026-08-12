@@ -63,6 +63,7 @@
 		AF5BAAFDACD2451A4B01C9E4 /* DitRoPETests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38E139072D28862327122F48 /* DitRoPETests.swift */; };
 		B1F8396CD4627BF03101D935 /* case1_danbooru_seed1337_fixture.json in Resources */ = {isa = PBXBuildFile; fileRef = 929D59E59198EBA4F4C291AC /* case1_danbooru_seed1337_fixture.json */; };
 		B31B0A2D248ABF6D51FE0F55 /* AnimapkRangeLocatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7EEF412C70729BC71E9544B8 /* AnimapkRangeLocatorTests.swift */; };
+		BAF9A2818173640D2EB16C94 /* VAEDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E9210A1BDCCB8F59CE8B971 /* VAEDecoder.swift */; };
 		BD81C9C99347181C9AB1E4B2 /* DiTBlockCPU.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1BA93420FE0BF5285E6DBB6D /* DiTBlockCPU.swift */; };
 		BD9A6D2D28B30592F306DBA2 /* ModelManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2065AFCA0431940F828D9427 /* ModelManifest.swift */; };
 		BF1511FA336984DB3696C3E4 /* t5_tokenizer_config.json in Resources */ = {isa = PBXBuildFile; fileRef = FA4C64A421E46C82C2311767 /* t5_tokenizer_config.json */; };
@@ -79,6 +80,7 @@
 		E4237CF411C2158613158D83 /* DiTBlockExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F14B5397CD1B2C4DE3D41CB /* DiTBlockExecutorTests.swift */; };
 		E8B287C14227EAB23ED6D5DB /* QwenEncoderCPU.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8094627F9958515821CFE276 /* QwenEncoderCPU.swift */; };
 		E97696F3A4744A08C6A895BF /* MetalExecutionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DE378A333F7F589CD183A9A /* MetalExecutionTests.swift */; };
+		EAE908C32F123350E9B89844 /* FP16ConvolutionExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C8ECADAF128C534D8C999BA /* FP16ConvolutionExecutor.swift */; };
 		EEB3C16094E91013C9ABB9CA /* MappedFile.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DA452A409BF52C73769318E /* MappedFile.swift */; };
 		EED314EA6D67446AAFE181EC /* README.md in Resources */ = {isa = PBXBuildFile; fileRef = 220DB7AE4DC9E7B009A9C5DF /* README.md */; };
 		F4CE56E349DC9E6BD2599127 /* VAEDecoderLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = F93DCAAE4B32EEDADD9FE44F /* VAEDecoderLocator.swift */; };
@@ -125,7 +127,9 @@
 		43FB54A2EC11428E9AFC19A4 /* Crc32.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Crc32.swift; sourceTree = "<group>"; };
 		4C7A6A2DAA97C767D88AE25B /* AnimaKernels.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = AnimaKernels.metal; sourceTree = "<group>"; };
 		4C8E968875980A2C9ACC94E5 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		4C8ECADAF128C534D8C999BA /* FP16ConvolutionExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FP16ConvolutionExecutor.swift; sourceTree = "<group>"; };
 		4D8B417D7B9040B477BC8CA5 /* DiTWeights.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTWeights.swift; sourceTree = "<group>"; };
+		4E9210A1BDCCB8F59CE8B971 /* VAEDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VAEDecoder.swift; sourceTree = "<group>"; };
 		507AD044478BA9533EE6512E /* VAEDecoderLocatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VAEDecoderLocatorTests.swift; sourceTree = "<group>"; };
 		52E7305B1912F5357ACCAEE5 /* Modulation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Modulation.swift; sourceTree = "<group>"; };
 		63A581535AFB0BECB025A73F /* QwenEncoderMetalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenEncoderMetalTests.swift; sourceTree = "<group>"; };
@@ -295,7 +299,9 @@
 		8D3DE64B17A16A1684F9FB81 /* VAE */ = {
 			isa = PBXGroup;
 			children = (
+				4C8ECADAF128C534D8C999BA /* FP16ConvolutionExecutor.swift */,
 				BE9A7C6882C9A11F40FD3816 /* RGBConverter.swift */,
+				4E9210A1BDCCB8F59CE8B971 /* VAEDecoder.swift */,
 				F93DCAAE4B32EEDADD9FE44F /* VAEDecoderLocator.swift */,
 				81791F763E08B204F5010697 /* VAENumerics.swift */,
 			);
@@ -585,6 +591,7 @@
 				22A697C29A4FE1F67A25D118 /* DitForward.swift in Sources */,
 				4CF42C1FB7991B03E9360B0D /* DitRoPE.swift in Sources */,
 				E03432114D1256677B254408 /* EulerSampler.swift in Sources */,
+				EAE908C32F123350E9B89844 /* FP16ConvolutionExecutor.swift in Sources */,
 				263D4D4D7FB4D3766DF07296 /* LLMAdapter.swift in Sources */,
 				10ECAB707F0D3BF55B5F9884 /* LLMAdapterMetal.swift in Sources */,
 				24E784492B6C7FD49E64D227 /* LinearExecutor.swift in Sources */,
@@ -602,6 +609,7 @@
 				0A5B012A2059A0FD9091D3CA /* SeededRNG.swift in Sources */,
 				D49309A80BBD9F702F9E71A8 /* TimestepEmbedder.swift in Sources */,
 				027A9C7FE57956074F77229D /* TokenizerLoader.swift in Sources */,
+				BAF9A2818173640D2EB16C94 /* VAEDecoder.swift in Sources */,
 				F4CE56E349DC9E6BD2599127 /* VAEDecoderLocator.swift in Sources */,
 				39E8DABEEFA3A6A90A676118 /* VAENumerics.swift in Sources */,
 				AD481E2836797AA5BE0359AA /* WeightStreamer.swift in Sources */,
