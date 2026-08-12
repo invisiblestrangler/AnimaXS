@@ -113,7 +113,7 @@ final class FullInferenceTests: XCTestCase {
             stepCompleted: { step, _, _, _, latent in
                 stepSeconds.append(Date().timeIntervalSince(diffusionStart))
                 completedSteps += 1
-                stepLatents.append(read(latent))
+                stepLatents.append(self.read(latent))
                 print("FULL_DIFFUSION_STEP_\(step)_SECONDS=\(String(format: "%.2f", stepSeconds[step]))")
             })
         let diffusionSeconds = Date().timeIntervalSince(diffusionStart)
