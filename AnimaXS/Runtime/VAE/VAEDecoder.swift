@@ -331,15 +331,20 @@ extension VAEDecoder {
         try encodeAddBias(command: command, output: qkv,
                           bias: streamer.ring, biasOffset: Int(toQKVBias.data.offset),
                           channels: channels * 3, count: positions * channels * 3)
+        // Split interleaved [positions, 3C] into contiguous Q/K/V blocks.
+        let splitQKV = activation(key: "vae.attention.qkv.split",
+                                  positions: positions * 3, channels: channels)
+        try encodeSplitQKV(command: command, qkv: qkv, split: splitQKV,
+                           positions: positions, channels: channels)
         try await commit(command)
 
         // Attention: single head, rows=positions, keyCount=positions, headDim=channels.
-        // Q/K/V are contiguous [positions, channels] slices inside the qkv buffer.
+        // Q/K/V are contiguous [positions, channels] blocks inside splitQKV.
         let half = MemoryLayout<Float16>.stride
         try await attention.execute(
-            query: qkv, queryOffset: 0,
-            key: qkv, keyOffset: positions * channels * half,
-            value: qkv, valueOffset: positions * channels * 2 * half,
+            query: splitQKV, queryOffset: 0,
+            key: splitQKV, keyOffset: positions * channels * half,
+            value: splitQKV, valueOffset: positions * channels * 2 * half,
             output: projected,
             heads: 1, queryCount: positions, keyCount: positions,
             headDim: channels, causal: false)
@@ -576,6 +581,27 @@ extension VAEDecoder {
         encoder.setBytes(&countU, length: 4, index: 3)
         encoder.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: min(64, count), height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    /// Split interleaved [positions, 3*channels] to_qkv output into contiguous
+    /// Q/K/V blocks for the attention executor's [heads, rows, headDim] layout.
+    private func encodeSplitQKV(
+        command: MTLCommandBuffer, qkv: MTLBuffer, split: MTLBuffer,
+        positions: Int, channels: Int
+    ) throws {
+        let pipeline = try context.pipeline(named: "vae_split_qkv_half")
+        guard let encoder = command.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create VAE QKV split encoder")
+        }
+        var positionsU = UInt32(positions), channelsU = UInt32(channels)
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(qkv, offset: 0, index: 0)
+        encoder.setBuffer(split, offset: 0, index: 1)
+        encoder.setBytes(&positionsU, length: 4, index: 2)
+        encoder.setBytes(&channelsU, length: 4, index: 3)
+        encoder.dispatchThreads(MTLSize(width: positions, height: channels, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
         encoder.endEncoding()
     }
 

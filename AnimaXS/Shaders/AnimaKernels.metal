@@ -777,6 +777,7 @@ kernel void vae_im2col_upsample3x3_half(
     constant uint      &outW     [[buffer(6)]],
     constant uint      &tileRows [[buffer(7)]],
     constant uint      &tileBase [[buffer(8)]],
+    constant uint      &outStride [[buffer(9)]],
     uint gid [[thread_position_in_grid]])
 {
     if (gid >= tileRows) return;
@@ -784,7 +785,7 @@ kernel void vae_im2col_upsample3x3_half(
     if (outPixel >= outH * outW) return;
     const uint outY = outPixel / outW;
     const uint outX = outPixel % outW;
-    const uint rowBase = gid * channels * 9;
+    const uint rowBase = gid * outStride;
     for (uint ky = 0; ky < 3; ++ky) {
         for (uint kx = 0; kx < 3; ++kx) {
             // Convolution input coordinate in the UPSCALED space.
@@ -816,6 +817,7 @@ kernel void vae_im2col3x3_half(
     constant uint      &channels [[buffer(4)]],
     constant uint      &tileRows [[buffer(5)]],
     constant uint      &tileBase [[buffer(6)]],
+    constant uint      &outStride [[buffer(7)]],
     uint gid [[thread_position_in_grid]])
 {
     if (gid >= tileRows) return;
@@ -823,7 +825,7 @@ kernel void vae_im2col3x3_half(
     if (pixel >= height * width) return;
     const uint y = pixel / width;
     const uint x = pixel % width;
-    const uint rowBase = gid * channels * 9;
+    const uint rowBase = gid * outStride;
     for (uint ky = 0; ky < 3; ++ky) {
         for (uint kx = 0; kx < 3; ++kx) {
             const int inY = int(y) + int(ky) - 1;
@@ -924,4 +926,24 @@ kernel void vae_position_to_rgb_f32(
     if (gid.x >= pixels || gid.y >= channels) return;
     const uint y = gid.x / width, x = gid.x % width;
     output[gid.y * pixels + y * width + x] = float(positioned[gid.x * channels + gid.y]);
+}
+
+// Split an interleaved position-major [positions, 3C] fp16 buffer (the 1x1
+// to_qkv output) into three contiguous [positions, C] blocks so the
+// AttentionExecutor's [heads, rows, headDim] layout can address Q/K/V directly.
+// gid.x = position, gid.y = channel; output block b starts at b*positions*C.
+kernel void vae_split_qkv_half(
+    device const half *qkv   [[buffer(0)]],
+    device half       *split [[buffer(1)]],
+    constant uint     &positions [[buffer(2)]],
+    constant uint     &channels  [[buffer(3)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= positions || gid.y >= channels) return;
+    const half q = qkv[gid.x * channels * 3 + gid.y];
+    const half k = qkv[gid.x * channels * 3 + channels + gid.y];
+    const half v = qkv[gid.x * channels * 3 + 2 * channels + gid.y];
+    split[gid.x * channels + gid.y] = q;
+    split[positions * channels + gid.x * channels + gid.y] = k;
+    split[2 * positions * channels + gid.x * channels + gid.y] = v;
 }

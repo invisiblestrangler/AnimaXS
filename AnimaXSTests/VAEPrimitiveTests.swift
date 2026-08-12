@@ -414,22 +414,22 @@ extension VAEPrimitiveTests {
     // MARK: - VAE attention QKV-split wiring
 
     /// The VAE middle attention stores Q, K, V as contiguous [positions, C]
-    /// slices inside one [positions, 3C] fp16 buffer. Prove AttentionExecutor
-    /// with heads=1 reads those offsets and computes the same single-head
-    /// spatial attention as a CPU reference.
+    /// blocks inside one [3*positions, C] fp16 buffer (vae_split_qkv_half
+    /// output). Prove AttentionExecutor with heads=1 reads those offsets and
+    /// computes the same single-head spatial attention as a CPU reference.
     func testAttentionQKVSplitWiring() async throws {
         let context = try requireContext()
         let executor = AttentionExecutor(context: context)
         let positions = 3, channels = 4
         let half = MemoryLayout<Float16>.stride
 
-        // qkv buffer: [positions, 3*channels]; fill with distinct values.
+        // splitQKV buffer: three contiguous [positions, C] blocks (Q, K, V).
         var qkv = [Float16](repeating: 0, count: positions * channels * 3)
         for p in 0..<positions {
             for c in 0..<channels {
-                qkv[p * channels * 3 + c] = Float16(Float(p * 100 + c + 1) / 8)      // Q
-                qkv[p * channels * 3 + channels + c] = Float16(Float(p * 10 + c + 1) / 16)  // K
-                qkv[p * channels * 3 + 2 * channels + c] = Float16(Float(p + c) / 4)       // V
+                qkv[p * channels + c] = Float16(Float(p * 100 + c + 1) / 8)      // Q
+                qkv[positions * channels + p * channels + c] = Float16(Float(p * 10 + c + 1) / 16)  // K
+                qkv[2 * positions * channels + p * channels + c] = Float16(Float(p + c) / 4)  // V
             }
         }
         let qkvBuffer = makeBuffer(qkv, on: context.device)
@@ -450,9 +450,9 @@ extension VAEPrimitiveTests {
         var v = [[Float]](repeating: [Float](repeating: 0, count: channels), count: positions)
         for p in 0..<positions {
             for c in 0..<channels {
-                q[p][c] = Float(qkv[p * channels * 3 + c])
-                k[p][c] = Float(qkv[p * channels * 3 + channels + c])
-                v[p][c] = Float(qkv[p * channels * 3 + 2 * channels + c])
+                q[p][c] = Float(qkv[p * channels + c])
+                k[p][c] = Float(qkv[positions * channels + p * channels + c])
+                v[p][c] = Float(qkv[2 * positions * channels + p * channels + c])
             }
         }
         let scale = 1 / sqrt(Double(channels))

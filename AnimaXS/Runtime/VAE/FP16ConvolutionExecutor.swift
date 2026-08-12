@@ -277,8 +277,13 @@ final class FP16ConvolutionExecutor {
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw AnimapkError.validation("failed to create VAE im2col encoder")
         }
+        // MPS GEMM requires padded rowBytes; the im2col kernel must write rows
+        // with the same stride or every row after the first misaligns.
+        let outStrideElements = MPSMatrixDescriptor.rowBytes(
+            fromColumns: channels * 9, dataType: .float16) / MemoryLayout<Float16>.stride
         var height = UInt32(inputHeight), width = UInt32(inputWidth)
         var channelsU = UInt32(channels), rows = UInt32(tileRows), base = UInt32(tileBase)
+        var outStride = UInt32(outStrideElements)
         if upsample2x {
             var outH = UInt32(inputHeight * 2), outW = UInt32(inputWidth * 2)
             encoder.setComputePipelineState(pipeline)
@@ -291,6 +296,7 @@ final class FP16ConvolutionExecutor {
             encoder.setBytes(&outW, length: 4, index: 6)
             encoder.setBytes(&rows, length: 4, index: 7)
             encoder.setBytes(&base, length: 4, index: 8)
+            encoder.setBytes(&outStride, length: 4, index: 9)
         } else {
             encoder.setComputePipelineState(pipeline)
             encoder.setBuffer(input, offset: inputOffset, index: 0)
@@ -300,6 +306,7 @@ final class FP16ConvolutionExecutor {
             encoder.setBytes(&channelsU, length: 4, index: 4)
             encoder.setBytes(&rows, length: 4, index: 5)
             encoder.setBytes(&base, length: 4, index: 6)
+            encoder.setBytes(&outStride, length: 4, index: 7)
         }
         encoder.dispatchThreads(MTLSize(width: tileRows, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
