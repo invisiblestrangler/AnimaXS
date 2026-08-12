@@ -40,6 +40,7 @@
 		6047DFE4E9621A2084E5679B /* AnimapkHeader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F9C4BE87CB32EE0326FB3E4 /* AnimapkHeader.swift */; };
 		6145717FE3945CB7AA4DFBD5 /* VAEDecoderLocatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 507AD044478BA9533EE6512E /* VAEDecoderLocatorTests.swift */; };
 		616ED86BCC3FCAA28CC25561 /* QwenEncoderMetal.swift in Sources */ = {isa = PBXBuildFile; fileRef = A109D17B6E3524E405A9B85B /* QwenEncoderMetal.swift */; };
+		624C64646074B2239B939623 /* GenerationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A6F117CCE3CBBF4E5ECAF4B1 /* GenerationCoordinator.swift */; };
 		6534C4B5076F415D14D07AA2 /* TimestepEmbedderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D08BB48D952EAD6537D49B5E /* TimestepEmbedderTests.swift */; };
 		6D864BF6B82F42F15C6E5A25 /* case1_noise.f32 in Resources */ = {isa = PBXBuildFile; fileRef = B55416DCCBC54FD863B0137D /* case1_noise.f32 */; };
 		71B669F9AF60FB45E4842F57 /* t5_special_tokens_map.json in Resources */ = {isa = PBXBuildFile; fileRef = 67B56E4FB7D12CC1F63A52F9 /* t5_special_tokens_map.json */; };
@@ -157,6 +158,7 @@
 		9D7829F4398EB3A23033ECD8 /* DiTFinalLayerExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTFinalLayerExecutorTests.swift; sourceTree = "<group>"; };
 		9DA452A409BF52C73769318E /* MappedFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MappedFile.swift; sourceTree = "<group>"; };
 		A109D17B6E3524E405A9B85B /* QwenEncoderMetal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenEncoderMetal.swift; sourceTree = "<group>"; };
+		A6F117CCE3CBBF4E5ECAF4B1 /* GenerationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationCoordinator.swift; sourceTree = "<group>"; };
 		A9346A85EC2056315DFCE66D /* LinearExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinearExecutor.swift; sourceTree = "<group>"; };
 		B55416DCCBC54FD863B0137D /* case1_noise.f32 */ = {isa = PBXFileReference; path = case1_noise.f32; sourceTree = "<group>"; };
 		BE9A7C6882C9A11F40FD3816 /* RGBConverter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RGBConverter.swift; sourceTree = "<group>"; };
@@ -328,6 +330,7 @@
 			isa = PBXGroup;
 			children = (
 				DFC5EBDAD72F3E1ECBEB3947 /* Checkpoint.swift */,
+				A6F117CCE3CBBF4E5ECAF4B1 /* GenerationCoordinator.swift */,
 				684C63379028C718819607CA /* ModelConstants.swift */,
 			);
 			path = Generation;
@@ -600,6 +603,7 @@
 				4CF42C1FB7991B03E9360B0D /* DitRoPE.swift in Sources */,
 				E03432114D1256677B254408 /* EulerSampler.swift in Sources */,
 				EAE908C32F123350E9B89844 /* FP16ConvolutionExecutor.swift in Sources */,
+				624C64646074B2239B939623 /* GenerationCoordinator.swift in Sources */,
 				263D4D4D7FB4D3766DF07296 /* LLMAdapter.swift in Sources */,
 				10ECAB707F0D3BF55B5F9884 /* LLMAdapterMetal.swift in Sources */,
 				24E784492B6C7FD49E64D227 /* LinearExecutor.swift in Sources */,
