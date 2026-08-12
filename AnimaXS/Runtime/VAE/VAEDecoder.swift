@@ -602,7 +602,7 @@ extension VAEDecoder {
     private func requireTensorSpan(
         _ group: AnimapkExecutionRange, suffix: String
     ) throws -> AnimapkTensorSpans {
-        guard let item = try tensorSpan(group.range, suffix: suffix) else {
+        guard let item = try tensorSpan(group, suffix: suffix) else {
             throw AnimapkError.validation(
                 "VAE decoder group \(group.logicalIndex) is missing tensor \(suffix)")
         }
