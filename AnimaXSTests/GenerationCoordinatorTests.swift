@@ -603,7 +603,7 @@ final class GenerationCoordinatorTests: XCTestCase {
         // Memory warning during generation → recoverable cancelled state with
         // a retained checkpoint (can Resume).
         coordinator.handleMemoryWarning()
-        for _ in 0..<100 {
+        for _ in 0..<250 {
             if !coordinator.isGenerating { break }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
@@ -611,10 +611,10 @@ final class GenerationCoordinatorTests: XCTestCase {
         if case .cancelled = coordinator.state {
             // expected
         } else {
-            XCTFail("expected cancelled after memory warning, got \\(coordinator.state)")
+            XCTFail("expected cancelled after memory warning, got \(coordinator.state)")
         }
-        for _ in 0..<100 {
-            if coordinator.canResume { break }
+        for _ in 0..<250 {
+            if coordinator.canResume && store.hasCheckpoint { break }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
         XCTAssertTrue(coordinator.canResume, "memory warning preserves resume state")

@@ -220,24 +220,23 @@ final class GenerationCoordinator: ObservableObject {
     /// boundary, preserve the last completed-step checkpoint, and surface a
     /// recoverable message. Never try to "free random buffers" that an active
     /// Metal command still owns.
+    ///
+    /// The engine's natural cancellation path persists the checkpoint (the
+    /// step-completed callback enqueues the write on the main actor) and then
+    /// transitions to `.cancelled`; we only request the cooperative cancel.
     func handleMemoryWarning() {
         guard isGenerating else { return }
         cancel()
-        // The engine stops cooperatively; the checkpoint is already persisted.
-        state = .cancelled
     }
 
-    /// Thermal policy (documented in DECISIONS.md D0xx): nominal/fair →
-    /// continue; serious/critical → stop safely and preserve resume state.
+    /// Thermal policy (documented in DECISIONS.md): nominal/fair → continue;
+    /// serious/critical → stop safely and preserve resume state.
     func handleThermalState(_ state: ProcessInfo.ThermalState) {
         switch state {
         case .nominal, .fair:
             return // continue generation
         case .serious, .critical:
-            if isGenerating {
-                cancel()
-                self.state = .cancelled
-            }
+            if isGenerating { cancel() }
         @unknown default:
             return
         }
