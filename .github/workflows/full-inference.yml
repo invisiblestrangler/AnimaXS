@@ -199,12 +199,12 @@ jobs:
             --output-path "$RUNNER_TEMP/exported" 2>&1 | tee export.log
           echo "--- exported dir ---"
           ls -la "$RUNNER_TEMP/exported"
-          # Normalize to canonical names regardless of any ID prefix the
-          # tool adds: match by filename substring.
-          find "$RUNNER_TEMP/exported" -type f \( -name '*generated*.png' \) -exec cp {} "$RUNNER_TEMP/artifacts/generated.png" \;
-          find "$RUNNER_TEMP/exported" -type f \( -name '*reference*.png' \) -exec cp {} "$RUNNER_TEMP/artifacts/reference.png" \;
-          find "$RUNNER_TEMP/exported" -type f \( -name '*comparison*.png' \) -exec cp {} "$RUNNER_TEMP/artifacts/comparison.png" \;
-          find "$RUNNER_TEMP/exported" -type f \( -name '*metrics*.txt' \) -exec cp {} "$RUNNER_TEMP/artifacts/metrics.txt" \;
+          echo "--- manifest ---"
+          cat "$RUNNER_TEMP/exported/manifest.json" || true
+          # Normalize UUID-named exports to canonical artifact names using the
+          # suggested names recorded in manifest.json.
+          python3 scripts/export_full_inference_attachments.py \
+            "$RUNNER_TEMP/exported" "$RUNNER_TEMP/artifacts"
           ls -la "$RUNNER_TEMP/artifacts"
           # Fill the workflow-injected fields in metrics.txt.
           if [ -f "$RUNNER_TEMP/artifacts/metrics.txt" ]; then
