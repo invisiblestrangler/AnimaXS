@@ -65,6 +65,7 @@
 		914187C1B6254DDCA7ED3C32 /* QwenNumerics.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0EFD572B87262AE5AAEB996 /* QwenNumerics.swift */; };
 		938A4049C06BE05E39F6BCC1 /* MetalContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F6A1853CF522E32A3743ACB /* MetalContext.swift */; };
 		959382291D4CE941AC176BEC /* StageConformances.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3E243B29F63E716A7FA5916 /* StageConformances.swift */; };
+		96A3E7AC0E8DAFE6CAF9490A /* case1_decoded_rgb8.bin in Resources */ = {isa = PBXBuildFile; fileRef = 5679855EA2DD29C171356B8B /* case1_decoded_rgb8.bin */; };
 		ACF5E6ADE5026984036BFFEC /* QwenEncoderMetalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63A581535AFB0BECB025A73F /* QwenEncoderMetalTests.swift */; };
 		AD481E2836797AA5BE0359AA /* WeightStreamer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B8E57358726DCBA4B39C22A /* WeightStreamer.swift */; };
 		AF5BAAFDACD2451A4B01C9E4 /* DitRoPETests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38E139072D28862327122F48 /* DitRoPETests.swift */; };
@@ -145,6 +146,7 @@
 		4E9210A1BDCCB8F59CE8B971 /* VAEDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VAEDecoder.swift; sourceTree = "<group>"; };
 		507AD044478BA9533EE6512E /* VAEDecoderLocatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VAEDecoderLocatorTests.swift; sourceTree = "<group>"; };
 		52E7305B1912F5357ACCAEE5 /* Modulation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Modulation.swift; sourceTree = "<group>"; };
+		5679855EA2DD29C171356B8B /* case1_decoded_rgb8.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; path = case1_decoded_rgb8.bin; sourceTree = "<group>"; };
 		607907C1088D17DCE300B330 /* GenerationCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationCoordinatorTests.swift; sourceTree = "<group>"; };
 		63A581535AFB0BECB025A73F /* QwenEncoderMetalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenEncoderMetalTests.swift; sourceTree = "<group>"; };
 		63D78F224C62E12AE65A076F /* DitRoPE.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DitRoPE.swift; sourceTree = "<group>"; };
@@ -424,6 +426,7 @@
 			isa = PBXGroup;
 			children = (
 				FA91D9A84879D3562284E548 /* case1_cond_context.f32 */,
+				5679855EA2DD29C171356B8B /* case1_decoded_rgb8.bin */,
 				0A37396ACF4F39FE78041309 /* case1_final_latent.f32 */,
 				B55416DCCBC54FD863B0137D /* case1_noise.f32 */,
 				C95BB4598F972757555839F3 /* case1_t5_ids.i64 */,
@@ -558,6 +561,7 @@
 			files = (
 				36CD88A5B125EC98797E0F65 /* case1_cond_context.f32 in Resources */,
 				B1F8396CD4627BF03101D935 /* case1_danbooru_seed1337_fixture.json in Resources */,
+				96A3E7AC0E8DAFE6CAF9490A /* case1_decoded_rgb8.bin in Resources */,
 				D66CA83A712868A0FDAF7595 /* case1_final_latent.f32 in Resources */,
 				6D864BF6B82F42F15C6E5A25 /* case1_noise.f32 in Resources */,
 				7FC6CADDB18E526EAB4CA04E /* case1_t5_ids.i64 in Resources */,
