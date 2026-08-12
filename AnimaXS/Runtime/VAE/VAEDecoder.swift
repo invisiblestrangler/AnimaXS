@@ -58,8 +58,13 @@ final class VAEDecoder {
         }
         context.refreshDiagnostics()
         #if DEBUG
+        // Stage/dump diagnostics only fire when ANIMAXS_VAE_DEBUG is set, so
+        // normal CI logs stay clean; the vae-parity workflow set it to isolate
+        // layer-by-layer divergence.
+        let vaeDebug = ProcessInfo.processInfo.environment["ANIMAXS_VAE_DEBUG"] != nil
         var stageStart = Date()
         func stage(_ name: String) {
+            guard vaeDebug else { return }
             print("VAE_STAGE \(name) t=\(String(format: "%.2f", Date().timeIntervalSince(stageStart)))s allocated=\(context.device.currentAllocatedSize)")
             stageStart = Date()
         }
@@ -704,6 +709,7 @@ extension VAEDecoder {
     /// layer-by-layer comparison against the Python oracle (no file I/O).
     private func dumpStage(_ buffer: MTLBuffer, name: String,
                            height: Int, width: Int, channels: Int) {
+        guard ProcessInfo.processInfo.environment["ANIMAXS_VAE_DEBUG"] != nil else { return }
         let count = height * width * channels
         let pointer = buffer.contents().bindMemory(to: Float16.self, capacity: count)
         var sum: Double = 0, sumSq: Double = 0, minV = Double.infinity, maxV = -Double.infinity
