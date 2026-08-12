@@ -96,7 +96,8 @@ final class VAEDecoder {
             let groupIndex = 5 + module
             let group = try locator.group(groupIndex)
             let nextKey = xInA ? "vae.activation.b" : "vae.activation.a"
-            let isResample = try requireTensorSpan(group.range, suffix: ".resample.1.weight") != nil
+            // Resample modules (3/7/11) carry .resample.1.weight; others don't.
+            let isResample = try tensorSpan(group.range, suffix: ".resample.1.weight") != nil
             if isResample {
                 // Resample module: fused nearest-exact 2x + 3x3 Cin -> Cout.
                 let rs = try requireTensorSpan(group.range, suffix: ".resample.1.weight")
@@ -112,7 +113,8 @@ final class VAEDecoder {
                 width *= 2
             } else {
                 // Residual-only module.
-                let hasShortcut = try requireTensorSpan(group.range, suffix: ".shortcut.weight") != nil
+                // Only module 4 carries a shortcut (192->384 channel change).
+                let hasShortcut = try tensorSpan(group.range, suffix: ".shortcut.weight") != nil
                 let w2Shape = try requireTensorSpan(group.range, suffix: ".residual.2.weight").tensor.shape
                 let inC = w2Shape[1]
                 let outC = w2Shape[0]
