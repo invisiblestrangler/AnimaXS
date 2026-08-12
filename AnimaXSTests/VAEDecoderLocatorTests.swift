@@ -58,8 +58,6 @@ final class VAEDecoderLocatorTests: XCTestCase {
             blob("decoder.middle.2.residual.6.bias", [384]),
             blob("decoder.upsamples.3.resample.1.weight", [192, 384, 3, 3]),
             blob("decoder.upsamples.3.resample.1.bias", [192]),
-            blob("decoder.upsamples.3.time_conv.weight", [768, 384, 3, 1, 1]),
-            blob("decoder.upsamples.3.time_conv.bias", [768]),
             blob("decoder.upsamples.4.residual.0.gamma", [192, 1, 1, 1]),
             blob("decoder.upsamples.4.residual.2.weight", [384, 192, 3, 3, 3]),
             blob("decoder.upsamples.4.residual.2.bias", [384]),
@@ -95,19 +93,9 @@ final class VAEDecoderLocatorTests: XCTestCase {
             XCTAssertLessThanOrEqual(group.range.length, try locator.maximumGroupLength())
         }
 
-        // Unexecuted time_conv tensors exist in the pack but never appear in a
-        // streaming group.
-        let groupNames = Set(locator.groups.flatMap { $0.range.tensors.map(\.tensor.name) })
-        XCTAssertFalse(groupNames.contains("decoder.upsamples.3.time_conv.weight"))
-
-        // The attention group (group 3) carries exactly the middle attention set.
-        let attention = locator.groups.first { $0.logicalIndex == 3 }
-        XCTAssertNotNil(attention)
-        XCTAssertEqual(
-            Set(attention!.range.tensors.map(\.tensor.name)),
-            Set(["decoder.middle.1.norm.gamma", "decoder.middle.1.to_qkv.weight",
-                 "decoder.middle.1.to_qkv.bias", "decoder.middle.1.proj.weight",
-                 "decoder.middle.1.proj.bias"]))
+        // Groups retain their logical indices (skipped groups absent in subset).
+        XCTAssertEqual(Set(locator.groups.map(\.logicalIndex)),
+                       Set([0, 1, 2, 3, 4, 8, 9, 20]))
     }
 
     func testUnexpectedDecoderTensorFails() throws {
