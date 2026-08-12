@@ -42,7 +42,9 @@ final class VAEDecoder {
         self.locator = locator
         self.streamer = try WeightStreamer(device: context.device, capacity: Int(capacity))
         self.buffers = BufferPool(device: context.device)
-        self.convolution = FP16ConvolutionExecutor(context: context)
+        // Larger tiles reduce the number of small MPS GEMM calls, which matters
+        // at 512x512 where 128-row tiles would dispatch 2048 GEMMs per conv.
+        self.convolution = FP16ConvolutionExecutor(context: context, tileRows: 512)
         self.attention = AttentionExecutor(context: context)
     }
 
