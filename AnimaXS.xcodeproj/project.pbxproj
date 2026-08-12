@@ -53,6 +53,7 @@
 		7DB2CBB89F9ABC72D09B6089 /* LLMAdapterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C509546307CB21BE0D1A9146 /* LLMAdapterTests.swift */; };
 		7E991650CBABF20B20E112AE /* AnimapkTensor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C416E0528D650EED48130A92 /* AnimapkTensor.swift */; };
 		7FC6CADDB18E526EAB4CA04E /* case1_t5_ids.i64 in Resources */ = {isa = PBXBuildFile; fileRef = C95BB4598F972757555839F3 /* case1_t5_ids.i64 */; };
+		81DF10FC8BD278FEC6C92E2A /* FullInferenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82B32CF88BF83EC3BF4BB22B /* FullInferenceTests.swift */; };
 		869CE73742B23D7225305BC1 /* ModelConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 684C63379028C718819607CA /* ModelConstants.swift */; };
 		89975ACE65D7BB793965DA7B /* QuantDecoderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2ED51EC9A960D08D2A6835BB /* QuantDecoderTests.swift */; };
 		8E5DA5D7D9950B728513D3E5 /* GqaHeadMappingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2D891A141A49EBC60BDB3DA /* GqaHeadMappingTests.swift */; };
@@ -144,6 +145,7 @@
 		7EEF412C70729BC71E9544B8 /* AnimapkRangeLocatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkRangeLocatorTests.swift; sourceTree = "<group>"; };
 		8094627F9958515821CFE276 /* QwenEncoderCPU.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenEncoderCPU.swift; sourceTree = "<group>"; };
 		81791F763E08B204F5010697 /* VAENumerics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VAENumerics.swift; sourceTree = "<group>"; };
+		82B32CF88BF83EC3BF4BB22B /* FullInferenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FullInferenceTests.swift; sourceTree = "<group>"; };
 		830D15B6FF7E37A06B2C08B2 /* TestPackFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestPackFactory.swift; sourceTree = "<group>"; };
 		8CFF9A853F1AA6ED02BB86D8 /* DiTBlockExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTBlockExecutor.swift; sourceTree = "<group>"; };
 		8DBF5298EC8B0B81AF89019C /* TokenizerLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenizerLoader.swift; sourceTree = "<group>"; };
@@ -407,6 +409,7 @@
 				9D7829F4398EB3A23033ECD8 /* DiTFinalLayerExecutorTests.swift */,
 				28C2E8E80AFBE05DB0577977 /* DiTInputTests.swift */,
 				38E139072D28862327122F48 /* DitRoPETests.swift */,
+				82B32CF88BF83EC3BF4BB22B /* FullInferenceTests.swift */,
 				D2D891A141A49EBC60BDB3DA /* GqaHeadMappingTests.swift */,
 				E00F7AC0D57A13E91CB5F434 /* LinearExecutorTests.swift */,
 				C509546307CB21BE0D1A9146 /* LLMAdapterTests.swift */,
@@ -552,6 +555,7 @@
 				2AB966E0818F8C5953CC0DB0 /* DiTFinalLayerExecutorTests.swift in Sources */,
 				774F60C7B433299EA6C55C9B /* DiTInputTests.swift in Sources */,
 				AF5BAAFDACD2451A4B01C9E4 /* DitRoPETests.swift in Sources */,
+				81DF10FC8BD278FEC6C92E2A /* FullInferenceTests.swift in Sources */,
 				8E5DA5D7D9950B728513D3E5 /* GqaHeadMappingTests.swift in Sources */,
 				7DB2CBB89F9ABC72D09B6089 /* LLMAdapterTests.swift in Sources */,
 				36DCBB069B8AE8C6D90A5115 /* LinearExecutorTests.swift in Sources */,
