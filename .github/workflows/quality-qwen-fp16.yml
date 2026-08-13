@@ -311,6 +311,10 @@ jobs:
           print(f"provenance.json: commit={prov['commit']} run={prov['run_id']} "
                 f"variant={prov['variant']} dit_sha={dit_sha}")
           EOF
+          # Regenerate the Xcode project so the workflow-injected packs and
+          # provenance/config JSONs inside Fixtures/Case1Binary become bundle
+          # resources (the committed project references only committed files).
+          "$RUNNER_TEMP/xcodegen/bin/xcodegen" generate
         env:
           FIXTURE_DIR: ${{ github.workspace }}/AnimaXSTests/Fixtures/Case1Binary
           VARIANT: ${{ matrix.name }}
