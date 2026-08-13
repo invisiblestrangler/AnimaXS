@@ -58,7 +58,11 @@ def load_fixture(fixture_dir):
 def save_captures(out_dir, variant, caps):
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"caps_{variant}.npz")
-    np.savez(path, **{k: v.numpy() for k, v in caps.items()})
+    tensors = {k: v for k, v in caps.items() if isinstance(v, torch.Tensor)}
+    meta = {k: v for k, v in caps.items() if not isinstance(v, torch.Tensor)}
+    np.savez(path, **{k: v.detach().float().cpu().numpy() for k, v in tensors.items()})
+    with open(os.path.join(out_dir, f"caps_{variant}_meta.json"), "w") as fh:
+        json.dump(meta, fh, indent=2, sort_keys=True)
     return path
 
 
