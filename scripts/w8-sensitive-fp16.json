@@ -1,7 +1,7 @@
 {
   "default": "w8",
   "overrides": [
-    {"match": "model.diffusion_model.llm_adapter.embedding.weight", "storage": "w8"},
+    {"match": "model.diffusion_model.llm_adapter.embed.weight", "storage": "w8"},
     {"match": "model.diffusion_model.*", "storage": "fp16"}
   ]
 }
