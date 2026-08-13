@@ -8,8 +8,8 @@
 | HF publication | Dedicated W4/W8 model repositories | PASS; immutable revisions, sizes, SHA-256 recorded in D077 |
 | Metal | W4/W8 dequant and direct matvec | PASS; W8 K=65 direct matvec parity and full pack inference |
 | Runtime | Shared W4/W8 DiT graph | PASS; normal CI is green with 153 tests, 13 skips, 0 failures |
-| Inference | Canonical W4-v2 and W8-v2 matrix jobs | PASS; both completed 8 steps/224 blocks and captured PNGs; W4 rejected by quality floor |
-| Quality | Generated vs canonical reference images | W8-v2 selected: RGB cosine 0.7171 and visibly cleaner than legacy/W4-v2 |
+| Inference | Canonical W4-v2 and W8-v2 matrix jobs, run `31671198927` | Evidence complete; both completed 8 steps/224 blocks and captured PNGs; W8 `PASS`, W4 `FAIL` by quality floor |
+| Quality | Generated vs canonical reference images | W8-v2 selected: RGB cosine 0.7171 and visibly cleaner than legacy/W4-v2; fine grid texture remains |
 
 The historical legacy W4 RGB cosine floor is a structural regression check, not
 the image-quality acceptance criterion for this refinement cycle.
