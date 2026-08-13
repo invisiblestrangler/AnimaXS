@@ -120,8 +120,7 @@ def main():
 
     # ---- A2 / B: source-oracle transcription ----
     print("== A2/B: oracle transcription ==")
-    w_src = dso.load_weights(args.source)  # bf16 CPU
-    w_src = {k: v.to(device) for k, v in w_src.items()}
+    w_src = dso.load_weights(args.source)  # bf16 CPU (LadderDiT moves per-block)
     w_bf16 = w_src
     w_fp16 = {k: v.float().half() for k, v in w_src.items()}
 
