@@ -197,11 +197,15 @@ def adapter_rope(seq_len, head_dim=64, dtype=torch.float32):
 
 
 def apply_rotate_half(q, cos, sin):
-    """apply_rotary_pos_emb (anima/model.py:13-17), interleaved halves."""
+    """apply_rotary_pos_emb (anima/model.py:12-18): x*cos + rotate_half(x)*sin
+    with FULL-width cos/sin (head_dim long)."""
     half = q.shape[-1] // 2
     x1 = q[..., :half]
     x2 = q[..., half:]
-    return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)
+    rh = torch.cat([-x2, x1], dim=-1)
+    cos = cos.unsqueeze(1)  # [S,1,D] broadcast over heads
+    sin = sin.unsqueeze(1)
+    return q * cos + rh * sin
 
 
 # ---------------------------------------------------------------------------
@@ -426,8 +430,9 @@ class AdapterBlock:
         self.mlp2b = w[f"{p}.mlp.2.bias"]
 
     def forward(self, x, context, cos, sin, cos_ctx, sin_ctx):
+        # self-attn uses position_embeddings for BOTH q and k (context=x)
         attn = self.self_attn.forward(rms_norm(x, self.norm_s), None,
-                                      cos, sin, cos_ctx, sin_ctx)
+                                      cos, sin, cos, sin)
         x = x + attn
         attn = self.cross_attn.forward(rms_norm(x, self.norm_c), context,
                                        cos, sin, cos_ctx, sin_ctx)
