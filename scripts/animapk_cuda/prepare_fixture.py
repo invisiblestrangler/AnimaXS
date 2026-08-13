@@ -40,7 +40,7 @@ def main():
     x_in = torch.from_numpy(z["init_noise_randn"]).float()
     sigmas = [float(s) for s in z["sigmas_comfy"]]
     cond_context = torch.from_numpy(z["cond_context"]).float()  # [1,46,1024]
-    t5_ids = torch.from_numpy(z["cond_meta_t5xxl_ids"].astype(np.int64))
+    t5_ids = torch.from_numpy(z["cond_meta_t5xxl_ids"].astype(np.int64)).unsqueeze(0)  # [1,47]
     t5_weights = torch.from_numpy(z["cond_meta_t5xxl_weights"]).float()
 
     # canonical fp32 context from the source adapter
