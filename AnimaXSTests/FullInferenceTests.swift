@@ -419,12 +419,12 @@ final class FullInferenceTests: XCTestCase {
         add(textAttachment)
 
         let metadata: [String: String] = [
-            "variant": env("ANIMAXS_DIT_VARIANT") ?? "unknown",
-            "hf_repo": env("ANIMAXS_DIT_HF_REPO") ?? "unknown",
-            "hf_revision": env("ANIMAXS_DIT_HF_REVISION") ?? "unknown",
-            "sha256": env("ANIMAXS_DIT_SHA256") ?? "unknown",
-            "bytes": env("ANIMAXS_DIT_BYTES") ?? "unknown",
-            "storage": env("ANIMAXS_DIT_STORAGE") ?? "unknown",
+            "variant": packMetadataValue(envKey: "ANIMAXS_DIT_VARIANT", jsonKey: "variant"),
+            "hf_repo": packMetadataValue(envKey: "ANIMAXS_DIT_HF_REPO", jsonKey: "hf_repo"),
+            "hf_revision": packMetadataValue(envKey: "ANIMAXS_DIT_HF_REVISION", jsonKey: "hf_revision"),
+            "sha256": packMetadataValue(envKey: "ANIMAXS_DIT_SHA256", jsonKey: "sha256"),
+            "bytes": packMetadataValue(envKey: "ANIMAXS_DIT_BYTES", jsonKey: "bytes"),
+            "storage": packMetadataValue(envKey: "ANIMAXS_DIT_STORAGE", jsonKey: "storage"),
             "group": "64",
         ]
         if let data = try? JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys]),
@@ -434,6 +434,23 @@ final class FullInferenceTests: XCTestCase {
             metadataAttachment.lifetime = .keepAlways
             add(metadataAttachment)
         }
+    }
+
+    /// xcodebuild may not forward arbitrary step environment variables into
+    /// the simulator test host. The refinement workflow therefore also
+    /// injects a bundled metadata JSON beside the packs; prefer the env value
+    /// when present, but retain exact provenance in either execution mode.
+    private func packMetadataValue(envKey: String, jsonKey: String) -> String {
+        if let value = env(envKey), !value.isEmpty { return value }
+        guard let url = bundledFixture(named: "pack-metadata.json"),
+              let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dictionary = object as? [String: Any],
+              let value = dictionary[jsonKey] as? String,
+              !value.isEmpty else {
+            return "unknown"
+        }
+        return value
     }
 
     /// Encodes interleaved RGBA8 bytes into a PNG (lossless) via CoreGraphics.
