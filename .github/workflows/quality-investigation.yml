@@ -19,6 +19,7 @@ env:
 jobs:
   w8-block0-capture:
     uses: ./.github/workflows/quality-w8-latent.yml
+    secrets: inherit
 
   focused-metal:
     runs-on: macos-15

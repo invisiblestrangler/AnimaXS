@@ -49,6 +49,7 @@ LORA = 256
 EPS = 1e-6
 TOKENS = 1024
 CTX_TOKENS = 512
+LEGACY_ATTENTION = False
 
 
 # ---------------------------------------------------------------------------
@@ -131,9 +132,13 @@ def attention(q, k, v):
         qt = q[s:s + tile]                        # [T, heads, hd]
         # scores = einsum('qhd,khd->qhk', qt, k) * scale
         scores = np.einsum("qhd,khd->qhk", qt, k) * scale
+        if LEGACY_ATTENTION:
+            scores = scores.astype(np.float16).astype(np.float32)
         m = scores.max(-1, keepdims=True)
         e = np.exp(scores - m)
         p = e / e.sum(-1, keepdims=True)
+        if LEGACY_ATTENTION:
+            p = p.astype(np.float16).astype(np.float32)
         out[s:s + tile] = np.einsum("qhk,khd->qhd", p, v)
     return out
 
@@ -265,7 +270,11 @@ def main():
                     help="optional reduced-dtype branch-boundary diagnostic; default is all-fp32 Lane A")
     ap.add_argument("--residual-dtype", choices=("none", "fp16", "bf16"), default="none",
                     help="optional residual-stream quantization diagnostic; default is fp32")
+    ap.add_argument("--legacy-attention", action="store_true",
+                    help="round attention scores and probabilities through fp16 like production")
     args = ap.parse_args()
+    global LEGACY_ATTENTION
+    LEGACY_ATTENTION = args.legacy_attention
     if args.latent and args.golden_step is not None:
         ap.error("--latent and --golden-step are mutually exclusive")
     D = os.path.join(args.indir, "")
@@ -347,7 +356,7 @@ def main():
     self_q_rope = q.copy()
     self_k_rope = k.copy()
     self_attn = attention(q, k, v)                                   # [1024,16,128]
-    self_out = boundary(concat_heads(self_attn) @ self_o.T)           # [1024,2048]
+    self_out = boundary(boundary(concat_heads(self_attn)) @ self_o.T) # [1024,2048]
     x1 = residual(x + self_gate * self_out)
     print(f"x1 (after self) shape={x1.shape} (expect (1024,2048))")
 
@@ -368,7 +377,7 @@ def main():
     cross_q_norm = q.copy()
     cross_k_norm = k.copy()
     cross_attn = attention(q, k, v)                                  # [1024,16,128]
-    cross_out = boundary(concat_heads(cross_attn) @ cross_o.T)
+    cross_out = boundary(boundary(concat_heads(cross_attn)) @ cross_o.T)
     x2 = residual(x1 + cross_gate * cross_out)
     print(f"x2 (after cross) shape={x2.shape} (expect (1024,2048))")
 
