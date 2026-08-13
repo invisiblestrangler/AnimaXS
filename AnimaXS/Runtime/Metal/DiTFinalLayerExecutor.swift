@@ -96,7 +96,8 @@ final class DiTFinalLayerExecutor {
         _ command: MTLCommandBuffer, _ input: MTLBuffer,
         _ weight: QuantizedLinearWeightBuffers, _ output: MTLBuffer
     ) throws {
-        let pipeline = try context.pipeline(named: "w4_matvec_f32")
+        let pipeline = try context.pipeline(
+            named: DiTQuantizedWeightFactory.matvecKernel(for: weight.storage))
         guard let encoder = command.makeComputeCommandEncoder() else {
             throw AnimapkError.validation("failed to create final modulation encoder")
         }
@@ -257,19 +258,12 @@ private struct FinalWeights {
             }
         }
         func matrix(_ name: String, _ rows: Int, _ columns: Int) throws -> QuantizedLinearWeightBuffers {
-            guard let item = byName[name], item.tensor.shape == [rows, columns],
-                  item.tensor.storage == .w4,
-                  let scale = item.scale, let zero = item.zero,
-                  item.data.length % UInt64(rows) == 0,
-                  item.data.offset <= UInt64(Int.max), scale.offset <= UInt64(Int.max),
-                  zero.offset <= UInt64(Int.max) else {
-                throw AnimapkError.validation("invalid DiT final matrix \(name)")
+            guard let item = byName[name] else {
+                throw AnimapkError.validation("missing DiT final matrix \(name)")
             }
-            return QuantizedLinearWeightBuffers(
-                storage: .w4, packed: ring, packedOffset: Int(item.data.offset),
-                scale: ring, scaleOffset: Int(scale.offset),
-                zero: ring, zeroOffset: Int(zero.offset), rows: rows, columns: columns,
-                packedRowStride: Int(item.data.length / UInt64(rows)))
+            return try DiTQuantizedWeightFactory.makeMatrix(
+                item, ring: ring, rows: rows, columns: columns,
+                label: "DiT final \(name)")
         }
         modulation1 = try matrix("adaln_modulation.1.weight", 256, 2_048)
         modulation2 = try matrix("adaln_modulation.2.weight", 4_096, 256)

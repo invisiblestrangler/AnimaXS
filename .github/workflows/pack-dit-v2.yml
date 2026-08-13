@@ -1,0 +1,132 @@
+name: Pack DiT v2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ANIMA_SOURCE_REPO: circlestone-labs/Anima
+  ANIMA_SOURCE_REVISION: f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b
+  ANIMA_SOURCE_FILE: split_files/diffusion_models/anima-turbo-v1.0.safetensors
+  ANIMA_SOURCE_SHA256: c0b905034510750a505d21aa96c81718f4ffcc500777318421f58a88636e2174
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: w4-v2
+            quant: w4
+            output: anima-turbo-v1.0-xsmax-w4-v2.animapk
+            hf_suffix: AnimaXS-DiT-W4
+          - variant: w8-v2
+            quant: w8
+            output: anima-turbo-v1.0-xsmax-w8-v2.animapk
+            hf_suffix: AnimaXS-DiT-W8
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Initial disk report
+        run: |
+          set -euo pipefail
+          df -h
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install packing dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install numpy safetensors huggingface_hub
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Download exact source from Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "${HF_TOKEN:-}" ] || { echo "::error::HF_TOKEN secret is missing"; exit 1; }
+          source_dir="$RUNNER_TEMP/anima-source"
+          mkdir -p "$source_dir"
+          source="$source_dir/anima-turbo-v1.0.safetensors"
+          source_url="https://huggingface.co/${ANIMA_SOURCE_REPO}/resolve/${ANIMA_SOURCE_REVISION}/${ANIMA_SOURCE_FILE}?download=true"
+          echo "Downloading pinned Turbo source from ${ANIMA_SOURCE_REPO}@${ANIMA_SOURCE_REVISION}"
+          curl --fail --location --retry 3 --retry-all-errors --progress-bar \
+            -H "Authorization: Bearer ${HF_TOKEN}" \
+            -o "$source" "$source_url"
+          echo "${ANIMA_SOURCE_SHA256}  ${source}" | sha256sum --check
+          echo "SOURCE=${source}" >> "$GITHUB_ENV"
+          df -h
+          du -sh "$RUNNER_TEMP" "$HOME/.cache/huggingface" 2>/dev/null || true
+
+      - name: Dry plan
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python scripts/pack_anima.py \
+            --component dit --input "$SOURCE" --out "$RUNNER_TEMP/unused.animapk" \
+            --quant "${{ matrix.quant }}" --group 64 --w4-algorithm mseclip \
+            --report "out/${{ matrix.variant }}.dry-plan.json" --dry-plan
+
+      - name: Pack v2
+        run: |
+          set -euo pipefail
+          python scripts/pack_anima.py \
+            --component dit --input "$SOURCE" \
+            --out "out/${{ matrix.output }}" \
+            --quant "${{ matrix.quant }}" --group 64 --w4-algorithm mseclip \
+            --report "out/${{ matrix.variant }}.quant-report.json" --verify
+
+      - name: Verify pack independently
+        run: |
+          set -euo pipefail
+          python scripts/verify_animapk.py \
+            "out/${{ matrix.output }}" \
+            --report "out/${{ matrix.variant }}.verification-report.json"
+
+      - name: Write small hash evidence
+        run: |
+          set -euo pipefail
+          (
+            cd out
+            sha256sum \
+              "${{ matrix.output }}" \
+              "${{ matrix.variant }}.quant-report.json" \
+              "${{ matrix.variant }}.verification-report.json"
+          ) > out/SHA256SUMS
+
+      - name: Publish directly to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          python scripts/publish_hf_pack.py \
+            --suffix "${{ matrix.hf_suffix }}" \
+            --variant "${{ matrix.variant }}" \
+            --pack "out/${{ matrix.output }}" \
+            --report "out/${{ matrix.variant }}.quant-report.json" \
+            --verification "out/${{ matrix.variant }}.verification-report.json" \
+            --sha-file out/SHA256SUMS
+
+      - name: Upload small packing evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pack-${{ matrix.variant }}-evidence
+          retention-days: 7
+          path: |
+            out/*.json
+            out/SHA256SUMS
+          if-no-files-found: error
+
+      - name: Final disk report
+        if: always()
+        run: df -h

@@ -142,7 +142,8 @@ final class DiTPreparationExecutor {
         _ command: MTLCommandBuffer, _ weight: QuantizedLinearWeightBuffers,
         _ input: MTLBuffer, _ output: MTLBuffer
     ) throws {
-        let pipeline = try context.pipeline(named: "w4_matvec_f32")
+        let pipeline = try context.pipeline(
+            named: DiTQuantizedWeightFactory.matvecKernel(for: weight.storage))
         guard let encoder = command.makeComputeCommandEncoder() else {
             throw AnimapkError.validation("failed to create timestep matvec encoder")
         }
@@ -202,18 +203,12 @@ private struct DiTPreparationWeights {
             (String($0.tensor.name.dropFirst(prefix.count)), $0)
         })
         func matrix(_ name: String, rows: Int, columns: Int) throws -> QuantizedLinearWeightBuffers {
-            guard let item = spans[name], item.tensor.shape == [rows, columns],
-                  item.tensor.storage == .w4, let scale = item.scale, let zero = item.zero,
-                  item.data.length % UInt64(rows) == 0,
-                  item.data.offset <= UInt64(Int.max), scale.offset <= UInt64(Int.max),
-                  zero.offset <= UInt64(Int.max) else {
-                throw AnimapkError.validation("invalid DiT preparation matrix \(name)")
+            guard let item = spans[name] else {
+                throw AnimapkError.validation("missing DiT preparation matrix \(name)")
             }
-            return QuantizedLinearWeightBuffers(
-                storage: .w4, packed: ring, packedOffset: Int(item.data.offset),
-                scale: ring, scaleOffset: Int(scale.offset), zero: ring,
-                zeroOffset: Int(zero.offset), rows: rows, columns: columns,
-                packedRowStride: Int(item.data.length / UInt64(rows)))
+            return try DiTQuantizedWeightFactory.makeMatrix(
+                item, ring: ring, rows: rows, columns: columns,
+                label: "DiT preparation \(name)")
         }
         xEmbed = try matrix("x_embedder.proj.1.weight", rows: 2_048, columns: 68)
         timestep1 = try matrix("t_embedder.1.linear_1.weight", rows: 2_048, columns: 2_048)

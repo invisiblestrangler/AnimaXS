@@ -165,6 +165,7 @@ jobs:
             -configuration Debug \
             -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.sim }}" \
             -derivedDataPath .derivedData \
+            -resultBundlePath "$RUNNER_TEMP/full-inference.xcresult" \
             -only-testing:AnimaXSTests/FullInferenceTests \
             CODE_SIGNING_ALLOWED=NO \
             test 2>&1 | tee full-inference.log
@@ -177,6 +178,60 @@ jobs:
           fi
           grep -q 'FULL_INFERENCE=PASS' full-inference.log
         timeout-minutes: 90
+
+      - name: Discover xcresulttool syntax on this runner
+        if: steps.metal.outputs.available == 'true'
+        run: |
+          xcrun xcresulttool help export 2>&1 | tee xcresulttool-help.log || true
+          echo "---"
+          xcrun xcresulttool export --help 2>&1 | tee -a xcresulttool-help.log || true
+
+      - name: Export image attachments from result bundle
+        if: steps.metal.outputs.available == 'true'
+        run: |
+          set -euo pipefail
+          ls -la "$RUNNER_TEMP/full-inference.xcresult"
+          mkdir -p "$RUNNER_TEMP/exported" "$RUNNER_TEMP/artifacts"
+          # Export every attachment (generated.png, reference.png,
+          # comparison.png, metrics.txt) to a flat directory.
+          xcrun xcresulttool export attachments \
+            --path "$RUNNER_TEMP/full-inference.xcresult" \
+            --output-path "$RUNNER_TEMP/exported" 2>&1 | tee export.log
+          echo "--- exported dir ---"
+          ls -la "$RUNNER_TEMP/exported"
+          echo "--- manifest ---"
+          cat "$RUNNER_TEMP/exported/manifest.json" || true
+          # Normalize UUID-named exports to canonical artifact names using the
+          # suggested names recorded in manifest.json.
+          python3 scripts/export_full_inference_attachments.py \
+            "$RUNNER_TEMP/exported" "$RUNNER_TEMP/artifacts"
+          ls -la "$RUNNER_TEMP/artifacts"
+          # Fill the workflow-injected fields in metrics.txt.
+          if [ -f "$RUNNER_TEMP/artifacts/metrics.txt" ]; then
+            sed -i '' "s|^commit: .*|commit: ${{ github.sha }}|" "$RUNNER_TEMP/artifacts/metrics.txt"
+            sed -i '' "s|^run_id: .*|run_id: ${{ github.run_id }}|" "$RUNNER_TEMP/artifacts/metrics.txt"
+            cat "$RUNNER_TEMP/artifacts/metrics.txt"
+          fi
+          # Hard-require the four deliverables.
+          for f in generated.png reference.png comparison.png metrics.txt; do
+            [ -s "$RUNNER_TEMP/artifacts/$f" ] || { echo "::error::missing artifact $f"; exit 1; }
+          done
+          # Lossless sanity: generated/reference must be 512x512 (comparison is
+          # 1024x512+). Verified via ImageIO `sips` if available.
+          sips -g pixelWidth -g pixelHeight "$RUNNER_TEMP/artifacts/generated.png" || true
+          sips -g pixelWidth -g pixelHeight "$RUNNER_TEMP/artifacts/reference.png" || true
+
+      - name: Upload full-inference images artifact
+        if: steps.metal.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: anima-xs-full-inference-images
+          path: |
+            ${{ runner.temp }}/artifacts/generated.png
+            ${{ runner.temp }}/artifacts/reference.png
+            ${{ runner.temp }}/artifacts/comparison.png
+            ${{ runner.temp }}/artifacts/metrics.txt
+          if-no-files-found: error
 
       - name: Report Metal availability and result
         if: always()

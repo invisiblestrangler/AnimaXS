@@ -2,6 +2,11 @@
 
 Record non-obvious choices and why. Append only; newest at bottom.
 
+## Refinement phase
+
+- **D075: Refinement phase begins (2026-08-13).** The integrated three-pack graph is connected, but the legacy W4 output is only historical regression evidence and is not an image-quality target. New work keeps Qwen/VAE/canonical inputs unchanged and focuses on reproducible DiT W4-v2/W8 packing, one shared runtime graph, and direct PNG comparison.
+- **D076: Source provenance is pinned to HF revision `f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b`.** The official Turbo file is `split_files/diffusion_models/anima-turbo-v1.0.safetensors` with the expected LFS SHA `c0b905034510750a505d21aa96c81718f4ffcc500777318421f58a88636e2174`; a changed source is a hard stop.
+
 ## Preflight / project
 - **D001: Deployment target = iOS 18.0** (runbook §5). Build SDK under Xcode 26.3 = iOS 26.2; minimum OS = 18.0. That is what installs on the user's iOS 18.6 phone.
 - **D002: Swift language mode 5** (runbook §9). async/await available; less strict-Sendable friction for Metal/MPS; supported by Xcode 26.3. No Swift 6 migration as part of inference.

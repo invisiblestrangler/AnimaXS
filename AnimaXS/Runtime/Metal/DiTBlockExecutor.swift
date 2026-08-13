@@ -195,10 +195,8 @@ final class DiTBlockExecutor {
         _ command: MTLCommandBuffer, input: MTLBuffer,
         weight: QuantizedLinearWeightBuffers, output: MTLBuffer
     ) throws {
-        guard weight.storage == .w4 else {
-            throw AnimapkError.validation("DiT modulation matvec requires W4 weights")
-        }
-        let pipeline = try context.pipeline(named: "w4_matvec_f32")
+        let pipeline = try context.pipeline(
+            named: DiTQuantizedWeightFactory.matvecKernel(for: weight.storage))
         guard let encoder = command.makeComputeCommandEncoder() else {
             throw AnimapkError.validation("failed to create modulation matvec encoder")
         }
@@ -435,20 +433,12 @@ private struct BlockWeights {
             spans[String(item.tensor.name.dropFirst(prefix.count))] = item
         }
         func matrix(_ name: String, _ rows: Int, _ columns: Int) throws -> QuantizedLinearWeightBuffers {
-            guard let item = spans[name], item.tensor.shape == [rows, columns],
-                  item.tensor.storage == .w4, let scale = item.scale, let zero = item.zero,
-                  item.data.length % UInt64(rows) == 0 else {
-                throw AnimapkError.validation("invalid DiT matrix \(prefix)\(name)")
+            guard let item = spans[name] else {
+                throw AnimapkError.validation("missing DiT matrix \(prefix)\(name)")
             }
-            let stride = item.data.length / UInt64(rows)
-            guard stride <= UInt64(Int.max), item.data.offset <= UInt64(Int.max),
-                  scale.offset <= UInt64(Int.max), zero.offset <= UInt64(Int.max) else {
-                throw AnimapkError.validation("DiT matrix span exceeds addressable range")
-            }
-            return QuantizedLinearWeightBuffers(
-                storage: .w4, packed: ring, packedOffset: Int(item.data.offset),
-                scale: ring, scaleOffset: Int(scale.offset), zero: ring, zeroOffset: Int(zero.offset),
-                rows: rows, columns: columns, packedRowStride: Int(stride))
+            return try DiTQuantizedWeightFactory.makeMatrix(
+                item, ring: ring, rows: rows, columns: columns,
+                label: "DiT \(prefix)\(name)")
         }
         func norm(_ name: String) throws -> Int {
             guard let item = spans[name], item.tensor.shape == [128],

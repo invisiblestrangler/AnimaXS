@@ -1,2860 +1,3864 @@
-# Execution Runbook — AnimaXS
+# AnimaXS Refine-and-Improve Runbook
 
-## Build a complete Anima-Turbo inference app for iPhone XS Max / A12 / iOS 18
+## Mission
 
-You are the implementation agent for a narrowly targeted engineering project.
+AnimaXS has passed the difficult integration stage.
 
-Your job is to build, test, document, and push a complete iOS application that runs the supplied Anima-Turbo image-generation model locally on:
+The complete:
 
 ```text
-Device: iPhone XS Max
-SoC: Apple A12 Bionic
-RAM: 4 GB
-OS target: iOS 18.x
-Actual user's device: iOS 18.6
-GPU family: Apple5
+prompt
+→ tokenizer
+→ Qwen
+→ LLM adapter
+→ DiT
+→ 8-step sampler
+→ VAE
+→ RGB/PNG
 ```
 
-The finished repository must:
+pipeline now executes end-to-end.
 
-* clone cleanly onto a Mac;
-* open directly in Xcode 26.3;
-* build with Xcode 26.3;
-* have minimum deployment target iOS 18.0;
-* install on an iPhone XS Max running iOS 18.6 after the user selects their signing team;
-* download and verify the model packs;
-* tokenize prompts;
-* execute the Qwen text encoder;
-* execute the LLM adapter;
-* execute the 28-block Anima DiT;
-* execute the 8-step Turbo sampler;
-* decode the final image with the VAE;
-* display the generated image;
-* survive normal cancellation/memory/background conditions reasonably;
-* contain useful diagnostics for A12-specific issues;
-* build and test automatically using GitHub Actions;
-* attempt a full model inference in GitHub Actions when the runner exposes a usable Metal device;
-* clearly distinguish tests that genuinely ran from tests that were skipped because an actual A12 device is required.
+The project is **not in production-readiness mode**.
 
-Do not optimize for any other phone.
+It is now officially in:
 
-Do not build MLX, Core ML, ANE, Metal 3, `MTLIOCommandQueue`, or newer-GPU fast paths.
+> **REFINE-AND-IMPROVE MODE**
 
-Do not turn this into a generic inference framework.
+The immediate objective is to rebuild the DiT packing system properly, generate improved **W4** and **W8** model packs from the original Anima Turbo source, make the runtime support both formats cleanly, and compare both using the exact same canonical full inference.
 
-The goal is **one model on one old phone**.
+Do not waste this phase repeatedly re-proving components that already have strong parity evidence.
+
+The current legacy W4 remains valuable as a historical baseline, but its visible patterned/dull output is **not an acceptable image-quality target**.
+
+Historical measurements:
+
+```text
+Legacy W4 final latent cosine ≈ 0.6946
+Legacy W4 RGB cosine          ≈ 0.7035
+```
+
+The earlier isolated eight-step W4 test independently produced approximately `0.6919` final-latent cosine, strongly confirming that the full pipeline reproduces the same accumulated W4 divergence rather than introducing a new VAE/PNG bug.
 
 ---
 
-# 0. Source-of-truth rule
+# 1. New infrastructure architecture
 
-You are being supplied a handoff bundle named approximately:
+The old VPS-centric model-building workflow is retired.
 
-```text
-PHASE0_2_HANDOFF.zip
-```
+Do **not** use Clore.ai in this refinement cycle.
 
-Treat the files inside it as the model-specific source of truth.
+Do **not** download the original 4+ GB Anima model onto the VPS.
 
-The zip is already extracted at `/root/anima-xsmax/PHASE0_2_HANDOFF/`.
+Do **not** build new `.animapk` model files on the VPS.
 
-Before implementing each major subsystem, re-read the relevant handoff files rather than relying on memory.
+Do **not** use GitHub Releases as the primary working storage for the new W4/W8 refinement packs.
 
-Most important:
+The new architecture is:
 
 ```text
-HANDOFF.md
-HANDOFF.json
-RUNTIME_CONSTANTS.json
-MODEL_ARCHITECTURE.json
-ANIMAPK_SPEC.md
-ANIMAPK_LAYOUT.json
-NUMERICS.md
-GOLDENS.md
-TEST_RESULTS.md
-KNOWN_ISSUES.md
-IMPLEMENTATION_RECOMMENDATIONS.md
-FILE_INDEX.md
-relevant-small-artifacts/model_info.json
-relevant-small-artifacts/inspect_animapk.py
-relevant-small-artifacts/animapk_reader.*
-relevant-small-artifacts/RESULTS.sha256
+                 ORIGINAL MODEL
+                       │
+                       ▼
+          Hugging Face: circlestone-labs/Anima
+                       │
+                       │ direct download
+                       ▼
+              GitHub Actions Linux
+              ┌─────────────────┐
+              │ packing job W4  │
+              └────────┬────────┘
+                       │
+                       ├── verify
+                       ├── quant report
+                       └── upload
+                            │
+                            ▼
+                  Hugging Face W4 repo
+
+
+          Hugging Face: circlestone-labs/Anima
+                       │
+                       │ direct download
+                       ▼
+              GitHub Actions Linux
+              ┌─────────────────┐
+              │ packing job W8  │
+              └────────┬────────┘
+                       │
+                       ├── verify
+                       ├── quant report
+                       └── upload
+                            │
+                            ▼
+                  Hugging Face W8 repo
+
+
+              Full-inference workflow
+                       │
+            ┌──────────┴──────────┐
+            ▼                     ▼
+        download W4           download W8
+        from HF               from HF
+            │                     │
+            ▼                     ▼
+      macOS simulator        macOS simulator
+      full inference         full inference
+            │                     │
+            ▼                     ▼
+      PNG + metrics          PNG + metrics
 ```
 
-Observed implementation facts in these files override assumptions in this runbook.
+GitHub Actions becomes **ephemeral compute**.
 
-If a value here disagrees with the handoff artifacts, investigate the discrepancy and use the experimentally confirmed value.
+Hugging Face becomes **durable model storage**.
 
-Never silently guess.
+The VPS becomes only:
 
-For particularly subtle operations—Qwen masks, adapter attention/mask behavior, VAE upsampling, causal convolution, RoPE, modulation—also inspect the **pinned reference source identified by the handoff** before implementing it.
+* source-control workspace;
+* execution-agent workspace;
+* GitHub workflow authoring environment;
+* secret-bootstrap environment;
+* documentation environment.
 
-Resolved discrepancies are recorded in `DECISIONS.md` and override stale handoff/runbook prose. In particular: Qwen output includes the final RMSNorm (D019), AdaLN applies SiLU before its first linear (D026), DiT RoPE uses the exact computed spatial theta (D029), and quantization groups reset at every matrix row (D034).
-
-## Current implementation checkpoint (2026-08-11)
-
-The parser, CPU correctness oracles, tokenizer parity, streamed Metal Qwen/adapter, and complete streamed Metal DiT path through final velocity are implemented and numerically validated through G003/H007. CPU implementations remain correctness oracles, not the production inference architecture.
-
-The production Metal DiT path is validated through H007. Do **not** replace it with `DiTBlockCPU` or retain fully dequantized weights in nested Swift arrays. Continue from the completed vertical slice:
-
-```text
-D007 block/tensor range locator with mmap-backed spans
-→ E001 permanent Metal execution harness
-→ E002–E008 tested Metal/MPS primitives
-→ E009 one production Metal block 0 matching the H005 oracle
-→ H006 streamed 28-block Metal loop
-→ H007 streamed final layer + source-order velocity unpatchify
-→ D008/F007 streamed Metal Qwen
-→ G003 streamed Metal adapter (complete)
-```
-
-Normal GitHub Actions simulator CI has been verified to execute both a project Metal kernel and `MPSMatrixMultiplication` on the standard `macos-15` arm64 runner (final snapshot run `31452206651`). Put all pack-free functional Metal/MPS tests in the normal simulator test target. A physical XS Max remains mandatory only for A12-specific performance, memory, thermal, watchdog, and device-family acceptance.
+This completely removes the VPS model-storage problem.
 
 ---
 
-# 1. Persistent context/checklist system — DO THIS FIRST
+# 2. Why NOT to use GitHub Actions artifacts for the model packs
 
-This job is too large to trust to conversational context.
+Multiple artifacts per workflow are supported.
 
-At the repository root create:
+The current `actions/upload-artifact` implementation allows up to **500 artifacts from an individual job**. GitHub also supports downloading individual named artifacts or all artifacts from a workflow run.
+
+However, **do not use Actions artifact storage for the large `.animapk` files**.
+
+The reason is the account-level artifact storage quota.
+
+GitHub currently documents included Actions artifact storage approximately as:
+
+```text
+GitHub Free       500 MB
+GitHub Pro          1 GB
+GitHub Team         2 GB
+Enterprise Cloud   50 GB
+```
+
+The existing legacy W4 alone is:
+
+```text
+1,179,435,008 bytes
+```
+
+and the existing Qwen pack is another:
+
+```text
+635,305,984 bytes
+```
+
+Therefore the original assumption:
+
+> “GitHub Actions artifacts can hold ~5 GB, therefore use them for W4/W8”
+
+should **not** be part of the design.
+
+Even if an individual upload could technically be accepted, the account-level storage quota can make this unreliable.
+
+## Correct usage of Actions artifacts
+
+Use GitHub artifacts only for small evidence:
+
+```text
+quant-report.json
+packing-manifest.json
+verification-report.json
+SHA256SUMS
+generated.png
+reference.png
+comparison.png
+metrics.json
+logs if useful
+```
+
+Set short retention, e.g.:
+
+```yaml
+retention-days: 7
+```
+
+The actual multi-GB model pack must be uploaded directly from the packing job to Hugging Face **before the ephemeral runner disappears**.
+
+---
+
+# 3. Why Hugging Face is the correct durable store
+
+Hugging Face's CLI handles large-file uploads automatically.
+
+Its current repository recommendations say individual files should preferably remain below about **200 GB**, with a hard maximum of 500 GB per individual file. A 1–3 GB `.animapk` is therefore completely ordinary for the platform.
+
+Free public repositories are currently described as best-effort storage; the few GB involved in AnimaXS are far below the scale of the Hub's documented large-model repository recommendations.
+
+Hugging Face also specifically recommends separate repositories for different model-weight variants.
+
+Therefore create separate durable repositories for:
+
+```text
+AnimaXS-DiT-W4
+AnimaXS-DiT-W8
+```
+
+under the Hugging Face account associated with the token supplied by the user.
+
+This also avoids two parallel GitHub matrix jobs attempting concurrent commits into the same HF repository.
+
+---
+
+# 4. Qwen and VAE are NOT being rebuilt
+
+Continue using the existing validated:
+
+```text
+qwen3-0.6b-xsmax-w8.animapk
+qwen-image-vae-xsmax-fp16.animapk
+```
+
+The current release records:
+
+```text
+qwen3-0.6b-xsmax-w8.animapk
+635,305,984 bytes
+SHA256:
+ba59e4d1797de5f6512aeafcecf3f38e1f62a47313a2a400b949c9018d84ceab
+
+qwen-image-vae-xsmax-fp16.animapk
+256,163,840 bytes
+SHA256:
+10171af0b826927b75fecf4482aaa0e268254874e694a0788ebdd8c4254fc447
+```
+
+The VAE already achieved approximately `0.99981` same-pack Swift/Metal parity, so there is no evidence-driven reason to rebuild or modify it during this cycle.
+
+Leave both components alone.
+
+---
+
+# 5. Synchronize the real repository first
+
+Before modifying anything:
+
+```bash
+cd /root/AnimaXS
+
+git status --short
+git remote -v
+
+git fetch origin --prune
+
+echo "REMOTE MAIN:"
+git ls-remote origin refs/heads/main
+
+git switch main
+git pull --ff-only origin main
+
+echo "BASE HEAD:"
+git rev-parse HEAD
+git log --oneline --decorate -15
+
+git status --short
+```
+
+Do not rely on any SHA quoted by an earlier agent report.
+
+Do not assume the artifact branch is current.
+
+Do not assume previous TODO documents describe the actual repository state.
+
+Only after synchronizing:
+
+```bash
+git switch -c refine/packing-v2-w4-w8
+```
+
+If this branch already exists remotely, inspect it before deciding whether to continue or create another branch.
+
+---
+
+# 6. Install this runbook into the repository
+
+Save this entire document as:
+
+```text
+RUNBOOK.md
+```
+
+The execution agent must re-read it:
+
+```text
+before every major phase
+after context compaction
+after an agent restart
+before changing the packer
+before changing Metal/runtime dtype handling
+before starting packing CI
+before interpreting W4/W8 results
+```
+
+Do not rely on conversational context alone.
+
+The repository copy is authoritative for this refinement run.
+
+---
+
+# 7. Archive the old project-completion task documents
+
+The project is no longer trying to “finish the original TODO list.”
+
+Inspect first:
+
+```bash
+find . -maxdepth 2 -type f \
+  \( -iname '*runbook*' \
+     -o -iname '*todo*' \
+     -o -iname '*handoff*' \
+     -o -iname '*test_matrix*' \) \
+  -print
+```
+
+Create:
+
+```bash
+mkdir -p docs/archive/pre-refine-2026-08-13
+```
+
+Archive superseded operational documents using `git mv`.
+
+For example, only where appropriate:
+
+```bash
+git mv OLD_RUNBOOK.md docs/archive/pre-refine-2026-08-13/
+git mv OLD_TODO.md docs/archive/pre-refine-2026-08-13/
+```
+
+If the current files are literally named:
 
 ```text
 RUNBOOK.md
 TODO.md
-STATUS.md
-DECISIONS.md
+NEXT_TASK_HANDOFF.md
 TEST_MATRIX.md
-DEVICE_TESTS.md
 ```
 
-Put this complete runbook in `RUNBOOK.md`.
+archive their old versions before replacing them.
 
-## TODO.md
+## Keep DECISIONS.md
 
-Make a checkbox for every meaningful task with stable IDs.
-
-Use approximately:
+Do **not** archive or rewrite:
 
 ```text
-A001... preflight and assets
-B001... repository/project bootstrap
-C001... CI
-D001... animapk/model store
-E001... Metal/MPS primitives
-F001... tokenizer/text encoder
-G001... LLM adapter
-H001... DiT
-I001... sampler/full diffusion
-J001... VAE
-K001... UI/resilience
-L001... full CI/inference testing
-M001... documentation/release/final handoff
+DECISIONS.md
 ```
 
-Every task must include:
+It remains useful.
 
-```text
-status
-dependencies
-expected output
-validation criterion
-```
+It is explicitly append-only in the current repository.
 
-Do not check a task merely because code was written.
+Never rewrite old decisions merely because our interpretation has improved.
 
-Check it only when its validation criterion passes.
+Append new decisions that supersede old operational choices.
 
-## STATUS.md
+---
 
-Keep this short and current:
+# 8. Documentation reset
 
-```text
-Current milestone:
-Current task:
-Last green commit:
-Current CI run:
-What currently works:
-What currently fails:
-Known device-only unknowns:
-Next three tasks:
-```
-
-## DECISIONS.md
-
-Record non-obvious choices and why.
-
-## Context-refresh rule
-
-At:
-
-* start of every work session;
-* after context compaction;
-* after a substantial failure;
-* before beginning a new subsystem;
-* whenever uncertain about what has already been done;
-
-re-read:
+Create fresh:
 
 ```text
 RUNBOOK.md
+TODO.md
+TEST_MATRIX.md
+NEXT_TASK_HANDOFF.md
+```
+
+Update:
+
+```text
 STATUS.md
-unchecked TODO.md items
-relevant handoff section
-tail of DECISIONS.md
 ```
 
-Never reconstruct project state from memory.
+Suggested new project status:
 
-Commit frequently.
+> AnimaXS is in refine-and-improve mode. The complete 3-pack inference pipeline executes end-to-end and produces image output. Current work focuses on DiT packing/quantization quality, W4/W8 runtime support, canonical image-quality comparison, and CI determinism. Production-readiness work is intentionally deferred until a satisfactory model representation has been identified.
+
+Append a new decision after the existing D074.
+
+Suggested conceptual decision:
+
+```text
+D075: Refinement phase begins.
+
+The integrated inference graph is considered connected and functional.
+Legacy W4 source-vs-BF16 metrics (~0.6946 latent / ~0.7035 RGB) remain
+historical regression evidence but are not image-quality acceptance targets.
+
+New work focuses on reproducible DiT repacking, W4/W8 support and direct
+full-image comparison. Qwen and VAE remain unchanged until evidence says
+otherwise.
+```
 
 ---
 
-# 2. Hard preflight: locate the actual model assets
+# 9. Fix D072 CI determinism
 
-The supplied handoff ZIP intentionally does NOT contain the large packs.
+Do this early.
 
-Look first for the paths documented by `FILE_INDEX.md`, particularly:
+The current historical D072 says the normal CI test assumes no packs exist in simulator Application Support and occasionally observes otherwise.
 
-```text
-/root/anima-xsmax/results/packs/anima-turbo-v1.0-xsmax-w4.animapk
-/root/anima-xsmax/results/packs/qwen3-0.6b-xsmax-w8.animapk
-/root/anima-xsmax/results/packs/qwen-image-vae-xsmax-fp16.animapk
-/root/anima-xsmax/results/goldens/
-```
+Do **not** modify D072 itself.
 
-Expected packs:
+Append a newer decision after fixing it.
 
-```text
-anima-turbo-v1.0-xsmax-w4.animapk
-size:   1,179,435,008
-SHA256: ba1ce615f03665812f05088f9239f0cb23591a0811067d57fa51773abf6f0d25
+One correction is worth recording:
 
-qwen3-0.6b-xsmax-w8.animapk
-size:   635,305,984
-SHA256: ba59e4d1797de5f6512aeafcecf3f38e1f62a47313a2a400b949c9018d84ceab
+GitHub's current documentation says standard hosted jobs normally receive a fresh VM.
 
-qwen-image-vae-xsmax-fp16.animapk
-size:   256,163,840
-SHA256: 10171af0b826927b75fecf4482aaa0e268254874e694a0788ebdd8c4254fc447
-```
+Therefore the old explanation:
 
-Verify with `sha256sum`.
+> “the shared hosted runner reused our old VM”
 
-Also locate at least:
+should remain historical context, not be treated as a guaranteed GitHub behavior.
 
-```text
-case1_danbooru_seed1337.npz
-```
+The engineering fix is still simple:
 
-Expected:
+> explicitly establish the simulator state that the test requires.
 
-```text
-size:   118,302,516
-SHA256: 44d35d4f788c0a48411b0e68db66a84a79a8dcd8ef3beb842d800ceaff81a8dc
-```
+## Preferred workflow-only fix
 
-If the large assets are absent, do not invent replacements.
-
-The code/project can still be built, but:
-
-```text
-model release upload
-full model CI
-real inference validation
-```
-
-remain blocked until the files are supplied.
-
-Record that explicitly.
-
-**STATUS: VERIFIED on 2026-08-10.** All four SHA-256s match exactly. Assets at the documented paths.
-
----
-
-# 3. GitHub credentials and repository
-
-The execution environment should contain the GitHub repository location and PAT supplied for this project.
-
-Prefer environment variables such as:
-
-```text
-GH_TOKEN
-GH_REPO
-```
-
-or equivalent credentials already configured by the harness.
-
-Never:
-
-```text
-print the PAT
-commit the PAT
-put it in workflow YAML
-put it in a git remote URL stored permanently
-write it into STATUS/TODO/logs
-```
-
-Use GitHub CLI credential handling.
-
-**STATUS: PAT found at `/root/GITHUB_PAT_ANIMAXS` (format: `PAT: <token>` line 1, repo URL line 2). Target repo: `https://github.com/invisiblestrangler/AnimaXS.git` — verified EMPTY, PUBLIC, not archived. gh CLI installed locally (v2.4.0).**
-
----
-
-# 4. Verify current external facts before coding
-
-Do not blindly trust even this runbook.
-
-Before project bootstrap, verify:
-
-1. Xcode 26.3 still exists on the selected GitHub Actions runner.
-2. Its path.
-3. Its bundled iOS SDK.
-4. current `swift-transformers` compatibility.
-5. current CircleStone Anima license and every upstream license inherited by the derivative, including NVIDIA Cosmos.
-6. current GitHub Release size rules.
-
-As of this runbook, Apple says Xcode 26.3 ships iOS 26.2 SDK, supports deployment to iOS 15–26.2, and supports Swift 5 and Swift 6 language modes.
-
-As of this runbook, the public `macos-15` ARM64 GitHub runner has:
-
-```text
-3-core M1
-7 GB RAM
-14 GB SSD
-```
-
-and public standard runners are free/unlimited for public repositories.
-
-The current `macos-15` image has:
-
-```text
-/Applications/Xcode_26.3.app
-```
-
-while Xcode 16.4 is the default, so CI must select Xcode 26.3 explicitly.
-
-If these facts have changed, adapt CI while preserving the requirement that **Xcode 26.3 remains a required build**.
-
-**STATUS: RE-VERIFIED 2026-08-11.** Final snapshot run `31452206651` used the standard arm64 `macos-15` image, selected `/Applications/Xcode_26.3.app`, verified XcodeGen 2.46.0 by SHA-256, regenerated the project cleanly, built the generic iPhone target, and ran 56 simulator tests with 0 failures (3 expected real-pack skips). The permanent project Metal-kernel and MPS GEMM tests executed successfully on `Apple iOS simulator GPU`. Current action majors were checked before updating CI.
-
-Authoritative links used by this audit:
-
-- GitHub runner specifications: `https://docs.github.com/en/actions/reference/runners/github-hosted-runners`
-- current runner image inventory: `https://github.com/actions/runner-images/blob/main/images/macos/macos-15-arm64-Readme.md`
-- Apple Simulator Metal behavior: `https://developer.apple.com/documentation/metal/developing-metal-apps-that-run-in-simulator`
-- MPS matrix-multiplication semantics: `https://developer.apple.com/documentation/metalperformanceshaders/mpsmatrixmultiplication`
-- GitHub Release limits: `https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases`
-
----
-
-# 5. Deployment target: do this correctly
-
-Use:
-
-```text
-IPHONEOS_DEPLOYMENT_TARGET = 18.0
-```
-
-in the **app project settings**.
-
-Do NOT set:
-
-```text
-deployment target = 26.x
-```
-
-and do not require an iOS 18.6 build SDK.
-
-Xcode 26.3 builds against its iOS 26.2 SDK while producing an app whose minimum OS is iOS 18.0. That is what allows installation on the user's iOS 18.6 phone.
-
-Do not globally export `IPHONEOS_DEPLOYMENT_TARGET` in CI because that can interfere with Swift Package dependencies.
-
-Set it on the project/targets.
-
----
-
-# 6. Model-license gate before public upload
-
-The `.animapk` files are modified/packed model weights and publishing them is model distribution.
-
-Anima is a derivative of NVIDIA Cosmos, so the release gate covers both the current CircleStone Anima license and the current NVIDIA Cosmos/Open Model terms. Before uploading packs to the public GitHub repository's Releases:
-
-1. Fetch and archive the CURRENT official CircleStone Anima license and NVIDIA upstream model license/terms from their authoritative model pages.
-2. Read every distribution, attribution, use-restriction, and derivative-work condition.
-3. Confirm this project's intended use/distribution fits **both** sets of terms.
-4. Distribute the required license copies and notices, including any required NVIDIA/Cosmos attribution wording.
-5. Clearly state that the `.animapk` files are modified/quantized/converted derivatives.
-6. Include any required website/UI/documentation acknowledgement.
-7. Do not imply CircleStone or NVIDIA endorses the project.
-
-The current license permits model/derivative distribution only subject to its terms and non-commercial restrictions, and its distribution section requires a license copy and attribution notice; derivatives also require disclosure that the model was modified.
-
-If the current license no longer permits the intended public distribution, **do not upload the packs**. Finish the code using local asset paths and document the licensing blocker.
-
-Do not choose an open-source license for the app's own source code unless one has been supplied by the user. Model-license files and app-code licensing are separate issues.
-
-Do not treat this runbook as legal advice or mark A005 complete from a summary. Preserve the exact license texts/notices used by the release and record their source URLs and retrieval date in `DECISIONS.md`.
-
-The 2026-08-11 audit observed CircleStone Non-Commercial License v1.2 at `https://huggingface.co/circlestone-labs/Anima/blob/main/LICENSE.md` and the upstream NVIDIA Open Model License dated 2025-04-30 in `https://huggingface.co/nvidia/Cosmos-Predict2-2B-Text2Image/blob/main/README.md`. The latter currently requires its license/Notice attribution and “Built on NVIDIA Cosmos” acknowledgement. Re-fetch these exact sources at A005; do not rely on this observation if either revision changes.
-
-**STATUS: PENDING — both license chains must pass A005 before L002 uploads model packs.**
-
----
-
-# 7. Technical facts that MUST drive the implementation
-
-These are confirmed by the supplied handoff.
-
-Re-check them in the machine-readable files before coding.
-
-## DiT
-
-```text
-model: Anima-Turbo v1.0
-type: FLOW / flow-matching
-blocks: 28
-hidden: 2048
-heads: 16
-head dim: 128
-MLP: 2048 → 8192 → 2048, GELU
-latent channels: 16
-effective input channels after padding-mask concat: 17
-patch: 2×2 spatial, T=1
-512 image: latent 64×64 → 32×32 = 1024 DiT tokens
-cross context: 512 × 1024
-```
-
-### CRITICAL NUMERICAL FACT
-
-The DiT residual stream produced measured values around:
-
-```text
-261,120
-```
-
-which is far beyond fp16's finite maximum.
-
-Therefore:
-
-```text
-DiT residual stream = Float32
-```
-
-This is non-negotiable.
-
-Normalize/modulate from Float32 and cast only appropriate branch/computation inputs to Float16.
-
-Attention/MLP branch output may be Float16, but gate/residual addition goes back into Float32.
-
-## Quantization
-
-```text
-DiT: W4 group=64 + fp16 exclusions
-TE:  W8 group=64 + fp16 norms/etc.
-VAE: fp16
-```
-
-## `.animapk`
-
-```text
-magic: ANMA
-version: 1
-endianness: little
-header: 256 bytes
-alignment: 16,384
-```
-
-Every tensor blob was verified 16 KB aligned.
-
-The binary tensor table truncates:
-
-```text
-name → 64 chars
-shape → 4 dimensions
-```
-
-Therefore:
-
-**Use JSON tensor metadata as authoritative.**
-
-Match JSON and table records using `blob_offset`.
-
-Do not port the existing C++ parser blindly because its binary-shape handling is insufficient for 5-D VAE tensors.
-
-## Physical DiT ordering
-
-The DiT pack is NOT physically in numerical block execution order.
-
-It is string/alphabetical order:
-
-```text
-0, 1, 10...19, 2, 20...27, 3...9
-```
-
-Each transformer's block tensors ARE contiguous, each approximately:
-
-```text
-38,993,920 stored bytes
-```
-
-Therefore:
-
-* execute logical blocks 0→27;
-* look up each block's actual byte range;
-* never calculate `blockOffset = firstBlock + index * blockSize`.
-
-Also do not trust JSON `block_index` alone for blocks 0–5 because the original regex also matched LLM-adapter blocks.
-
-Identify DiT blocks strictly by:
-
-```text
-model.diffusion_model.blocks.N.
-```
-
-## Largest weight scratch
-
-Largest dequantized fp16 matrix:
-
-```text
-33,554,432 bytes
-```
-
-Use one reusable dequant scratch buffer.
-
-## Text encoder
-
-```text
-Qwen3-0.6B
-28 layers
-hidden: 1024
-Q heads: 16
-KV heads: 8
-head dim: 128
-MLP intermediate: 3072
-activation: gated SiLU
-RMSNorm
-RoPE theta: 1,000,000
-```
-
-The main Qwen output used as `cond_context` is the layer-27 hidden state **after final RMSNorm** (D019). Earlier handoff prose saying “without final norm” refers to a different intermediate capture path and is not authoritative for this golden.
-
-Text encoder pack:
-
-```text
-635,305,984 bytes
-embedding stored W8: ~165 MB
-each TE layer stored: 16,777,216 bytes
-all 28 TE layers contiguous
-```
-
-Never dequantize the full embedding table.
-
-Gather only token rows.
-
-## LLM adapter
-
-Weights live in the DiT `.animapk`.
-
-It takes:
-
-```text
-Qwen last hidden
-+
-T5 target token IDs
-```
-
-and produces the 512×1024 DiT cross-attention context.
-
-Re-check its exact MLP activation, self-attention mask/causality, and cross-attention behavior from the pinned source before implementing. Do not rely on the handoff's `GELU?` question-mark description.
-
-## Sampler
-
-Canonical Turbo:
-
-```text
-steps: 8
-CFG: 1
-sampler: Euler
-scheduler: sgm_uniform
-```
-
-Sigma sequence:
-
-```text
-1.0
-0.95469
-0.90036
-0.834
-0.75112
-0.64469
-0.50299
-0.30501
-0.0
-```
-
-CFG=1 skips the unconditional model pass.
-
-Sampler arithmetic is Float32.
-
-## VAE
-
-```text
-latent: [1,16,1,64,64]
-output: [1,3,1,512,512]
-3-D causal convolutions
-Wan channel-wise RMS normalization (`F.normalize` over C, then ×sqrt(C)×gamma)
-decoder channels include 384 → 192 → 96
-```
-
-Single-frame T=1 3D→2D folding is validated in J001. The actual model uses pinned
-`comfy/ldm/wan/vae.py`: uncached T=1 `CausalConv3d` uses causal zero padding, so
-the effective 2-D kernel is the **final temporal slice**, not a temporal sum.
-The decoder's two `time_conv` tensors are skipped at T=1 because no feature cache exists.
-See `docs/VAE_FOLD_REPORT.md`; do not substitute the Cosmos tokenizer's replication semantics.
-
-Tiled VAE decode has also NOT been validated.
-
-Do not start by implementing tiling.
-
----
-
-# 8. Keep the architecture small
-
-Use a normal SwiftUI application.
-
-Suggested repository:
-
-```text
-AnimaXS/
-├── AnimaXS.xcodeproj
-├── project.yml
-├── AnimaXS/
-│   ├── App/
-│   │   ├── AnimaXSApp.swift
-│   │   ├── ContentView.swift
-│   │   ├── GenerationViewModel.swift
-│   │   └── DiagnosticsView.swift
-│   │
-│   ├── Runtime/
-│   │   ├── ModelStore/
-│   │   ├── Animapk/
-│   │   ├── Metal/
-│   │   ├── Text/
-│   │   ├── DiT/
-│   │   ├── Sampler/
-│   │   ├── VAE/
-│   │   └── Generation/
-│   │
-│   ├── Resources/
-│   │   └── Tokenizers/
-│   │
-│   └── Shaders/
-│       └── AnimaKernels.metal
-│
-├── AnimaXSTests/
-│   └── Fixtures/
-├── scripts/
-├── docs/
-├── .github/workflows/
-├── README.md
-├── RUNBOOK.md
-├── TODO.md
-├── STATUS.md
-├── DECISIONS.md
-├── TEST_MATRIX.md
-└── DEVICE_TESTS.md
-```
-
-Do not create multiple framework targets.
-
-Do not build a plugin system.
-
-Do not build generic device abstraction layers.
-
-Use Foundation + SwiftUI + Metal + MetalPerformanceShaders + MPSGraph + CryptoKit.
-
-Use only the `Tokenizers` product from Hugging Face `swift-transformers` unless more is genuinely needed.
-
-The current package supports iOS 16+, so an iOS 18 target is compatible.
-
-Pin the dependency to a verified exact release/commit rather than tracking `main`.
-
----
-
-# 9. Xcode project generation
-
-The clean execution environment may not be a Mac.
-
-Use **XcodeGen only as a project-generation tool**, not as a permanent runtime dependency.
-
-Create a simple `project.yml`.
-
-Required project settings:
-
-```text
-product: application
-platform: iOS
-deployment target: 18.0
-Swift language mode: 5
-CODE_SIGN_STYLE: Automatic
-no committed DEVELOPMENT_TEAM
-```
-
-Swift 5 language mode is intentional:
-
-* async/await remains available;
-* Metal/MPS objects cause less strict-Sendable friction;
-* this project gains little from making Swift 6 concurrency migration part of the inference problem.
-
-Xcode 26.3 officially supports Swift 5 language mode.
-
-Generate the `.xcodeproj` on a GitHub Actions macOS runner.
-
-Commit both:
-
-```text
-project.yml
-AnimaXS.xcodeproj
-```
-
-The MacBook user must NOT need XcodeGen just to clone and open the app.
-
-CI should regenerate the project and fail if the committed project differs from `project.yml`.
-
-Use XcodeGen 2.46.0 for both local and CI generation. CI downloads the official release zip and verifies its pinned SHA-256 (D041). Keep `generateEmptyDirectories: false`: git does not preserve empty directories, so including them makes a populated local checkout generate a different project from a clean CI checkout (D040).
-
-**Implementation note: bootstrap job in `.github/workflows/bootstrap-project.yml` generates the xcodeproj on macos-15 and commits it back. `ci.yml` job 1 regenerates and `git diff --exit-code` to enforce consistency.**
-
----
-
-# 10. Bootstrap GitHub Actions immediately
-
-Do not wait until the app is complete before using CI.
-
-First get a minimal SwiftUI app green.
-
-Use:
+After selecting the simulator but before running pack-free tests:
 
 ```yaml
-runs-on: macos-15
+- name: Reset selected simulator state
+  shell: bash
+  run: |
+    set -euo pipefail
+
+    UDID="${{ steps.sim.outputs.sim }}"
+
+    if [ -z "$UDID" ]; then
+      echo "::error::No simulator UDID selected"
+      exit 1
+    fi
+
+    echo "Resetting selected simulator before pack-free tests"
+
+    xcrun simctl shutdown "$UDID" 2>/dev/null || true
+    xcrun simctl erase "$UDID"
 ```
 
-and explicitly:
+Then allow `xcodebuild` to boot/use it normally.
+
+If necessary:
+
+```yaml
+- name: Reset and boot selected simulator
+  shell: bash
+  run: |
+    set -euo pipefail
+
+    UDID="${{ steps.sim.outputs.sim }}"
+
+    xcrun simctl shutdown "$UDID" 2>/dev/null || true
+    xcrun simctl erase "$UDID"
+    xcrun simctl boot "$UDID"
+    xcrun simctl bootstatus "$UDID" -b
+```
+
+## Do not
+
+Do not:
+
+```text
+weaken DiagnosticsTests
+skip DiagnosticsTests
+change expected FAIL to PASS-or-FAIL
+delete arbitrary CoreSimulator filesystem paths
+erase every simulator on the machine
+re-run CI repeatedly hoping for luck
+accept "green except D072" forever
+```
+
+The test's environment should be deterministic.
+
+---
+
+# 10. VPS storage policy
+
+Since packing is moving entirely to GitHub-hosted Linux, large weight files should disappear from the VPS workflow.
+
+Check:
+
+```bash
+df -h /
+df -ih /
+
+du -xh --max-depth=2 /root 2>/dev/null \
+  | sort -h \
+  | tail -80
+
+find /root -xdev -type f -size +250M \
+  -printf '%s %p\n' 2>/dev/null \
+  | sort -n
+```
+
+The legacy W4 pack is already available from the existing public model release and is recorded with SHA:
+
+```text
+ba1ce615f03665812f05088f9239f0cb23591a0811067d57fa51773abf6f0d25
+```
+
+If a duplicate local copy is consuming significant VPS space:
+
+1. verify its SHA;
+2. verify the remote release still exists;
+3. ensure nothing currently running needs the local file;
+4. delete the local duplicate.
+
+Do **not** retain multi-GB model files on the VPS “just in case.”
+
+The new durable copies belong on Hugging Face.
+
+---
+
+# 11. Bootstrap the Hugging Face token into GitHub Secrets
+
+The user has placed the Hugging Face API token somewhere under `/root`.
+
+Never display it.
+
+Never commit it.
+
+Never print even a partial token.
+
+Never put it directly into workflow YAML.
+
+## Find candidate token files without printing contents
+
+```bash
+find /root -maxdepth 2 -type f \
+  \( -iname '*hugging*' \
+     -o -iname '*hf*token*' \
+     -o -iname '*api*key*' \) \
+  -ls
+```
+
+Identify the intended token file.
+
+Disable shell tracing:
+
+```bash
+set +x
+```
+
+Use the existing authenticated GitHub CLI to create:
+
+```text
+HF_TOKEN
+```
+
+as a repository secret.
+
+If the file contains only the raw token:
+
+```bash
+gh secret set HF_TOKEN \
+  --repo invisiblestrangler/AnimaXS \
+  < /path/to/hf_token_file
+```
+
+If it is an environment-style file such as:
+
+```text
+HF_TOKEN=hf_...
+```
+
+parse it without printing.
+
+For example:
+
+```bash
+python3 - /path/to/hf_token_file <<'PY' \
+  | gh secret set HF_TOKEN \
+      --repo invisiblestrangler/AnimaXS
+
+import pathlib
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text().strip()
+
+if text.startswith("HF_TOKEN="):
+    text = text.split("=", 1)[1].strip()
+
+if not text:
+    raise SystemExit("empty Hugging Face token")
+
+print(text, end="")
+PY
+```
+
+This sends the token directly into `gh secret set`.
+
+Then:
+
+```bash
+gh secret list --repo invisiblestrangler/AnimaXS
+```
+
+Confirm **only that the secret name exists**.
+
+Never attempt to read it back.
+
+---
+
+# 12. The original source weights come directly from Hugging Face
+
+The source model is currently available from:
+
+```text
+circlestone-labs/Anima
+```
+
+and the actual Turbo diffusion file is:
+
+```text
+split_files/diffusion_models/anima-turbo-v1.0.safetensors
+```
+
+Hugging Face currently reports this file as approximately **4.18 GB**.
+
+The project previously identified the intended source file SHA-256 as:
+
+```text
+c0b905034510750a505d21aa96c81718f4ffcc500777318421f58a88636e2174
+```
+
+That exact SHA is a **hard gate**.
+
+---
+
+# 13. Pin the Hugging Face source revision
+
+Do not permanently build from:
+
+```text
+revision=main
+```
+
+because upstream `main` can change later.
+
+The execution agent must:
+
+1. query the current full Hugging Face repository revision;
+2. download the exact Turbo file;
+3. calculate its SHA-256;
+4. confirm it equals:
+
+```text
+c0b905034510750a505d21aa96c81718f4ffcc500777318421f58a88636e2174
+```
+
+5. record the full HF commit/revision in the workflow.
+
+The final packing workflow should therefore contain something like:
 
 ```yaml
 env:
-  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+  ANIMA_SOURCE_REPO: circlestone-labs/Anima
+  ANIMA_SOURCE_REVISION: <FULL_PINNED_HF_REVISION>
+  ANIMA_SOURCE_FILE: split_files/diffusion_models/anima-turbo-v1.0.safetensors
+  ANIMA_SOURCE_SHA256: c0b905034510750a505d21aa96c81718f4ffcc500777318421f58a88636e2174
 ```
 
-Before every important CI build print:
-
-```bash
-xcodebuild -version
-xcrun --sdk iphoneos --show-sdk-version
-xcrun --sdk iphonesimulator --show-sdk-version
-df -h
-```
-
-Fail clearly if selected Xcode is not 26.3.
-
-### Metal toolchain workaround
-
-Xcode 26's Metal compiler can be an optional runner component and GitHub runner-image reports have documented it being absent on some jobs. If:
-
-```bash
-xcrun --find metal
-```
-
-fails, run:
-
-```bash
-xcodebuild -downloadComponent MetalToolchain
-```
-
-before building.
-
-Do this conditionally because the component is large.
+Never silently accept a changed upstream source.
 
 ---
 
-# 11. Required CI workflow
+# 14. Preserve the recovered legacy packer
 
-Create:
+The attached recovered `pack_anima.py` is important historical evidence.
 
-```text
-.github/workflows/ci.yml
-```
-
-Required push/PR workflow:
-
-### Job 1 — project consistency
-
-```text
-checkout
-select Xcode 26.3
-ensure Metal toolchain
-install XcodeGen if needed
-xcodegen generate
-git diff --exit-code
-```
-
-### Job 2 — iPhone build
-
-Run:
-
-```bash
-xcodebuild \
-  -project AnimaXS.xcodeproj \
-  -scheme AnimaXS \
-  -configuration Debug \
-  -destination 'generic/platform=iOS' \
-  CODE_SIGNING_ALLOWED=NO \
-  build
-```
-
-This proves that an ARM iPhone build compiles without needing signing.
-
-### Job 3 — simulator unit tests
-
-Discover an available iPhone simulator dynamically.
-
-Do not hard-code:
-
-```text
-iPhone XS Max simulator
-iOS 18.6 simulator
-```
-
-Xcode 26.3's bundled simulator is from the iOS 26.2 SDK generation. Use whatever compatible iPhone simulator its installation exposes.
-
-Build/test the iOS 18-targeted app on that simulator.
-
-### Pure-reference and pack-free Metal tests
-
-Run these in the same simulator XCTest target as Job 3; do not compile the large Swift dependency graph a second time merely to create a fourth job:
-
-```text
-.animapk header parser
-full-name/shape JSON resolution
-16 KB offset checks
-W4 test vector
-W8 test vector
-fp16 tensor reader
-sampler vector
-sigma schedule
-RoPE CPU reference
-RMSNorm CPU reference
-AdaLN CPU reference
-tokenization reference
-model manifest/hash parser
-checkpoint serialization
-Metal kernel smoke
-MPS matrix-multiplication smoke
-```
-
-Do not download 2 GB of model weights on every push.
-
----
-
-# 12. GitHub Actions is NOT the A12 oracle
-
-GitHub's ARM64 standard macOS runner currently has an M1-class VM with 7 GB RAM and 14 GB SSD.
-
-That is useful for:
-
-```text
-building
-simulator testing
-Metal shader compilation and execution
-MPS execution
-CPU numerical tests
-pack-free GPU/CPU parity tests
-possibly a full functional inference after release assets and L001 exist
-```
-
-but it cannot prove:
-
-```text
-A12 speed
-A12 jetsam threshold
-Apple5 numerical behavior
-A12 command-buffer watchdog limit
-A12 sustained thermal behavior
-A12 page-cache behavior
-```
-
-Do not claim that an M1 CI inference proves those things.
-
-The standard hosted runner currently exposes an iOS Simulator Metal device, but every GPU test must still probe `MTLCreateSystemDefaultDevice()`. An unavailable device is an explicit `SKIPPED_NO_METAL`; a present device with a wrong result is a test failure. Never downgrade a real Metal/MPS failure to a skip.
-
----
-
-# 13. Separate manual full-model workflow
-
-Create:
-
-```text
-.github/workflows/full-inference.yml
-```
-
-Trigger only through:
-
-```text
-workflow_dispatch
-```
-
-This job should:
-
-1. select Xcode 26.3;
-2. ensure Metal compiler;
-3. discover and boot a simulator;
-4. execute the permanent pack-free Metal/MPS smoke tests;
-5. if Metal is unavailable:
-
-   * record `SKIPPED_NO_METAL`;
-   * exit successfully;
-6. if Metal exists:
-
-   * require `FullInferenceTests` to exist;
-   * run the app's full integration inference test;
-   * fail the workflow on build, download, execution, timeout, NaN/Inf, or parity failure.
-
-Do not silently label a skipped test PASS.
-Do not use `continue-on-error` on the inference step. Write `PASS`, `FAIL`, or `SKIPPED_NO_METAL` to the job summary. Until L001 and L002 are complete, the manual workflow is infrastructure only and must report “not implemented” as a failure if invoked on a Metal-capable runner.
-
-The manual integration test may download the three model packs from the GitHub Release because together they are only about 2.1 GB and the runner currently has 14 GB SSD. Monitor `df -h` during this job.
-
----
-
-# 14. Model assets should use GitHub Releases, not Git
-
-Do NOT commit `.animapk` files to normal Git.
-
-GitHub normal repository objects are limited to 100 MB.
-
-Do not use Git LFS unless forced.
-
-Use one release such as:
-
-```text
-model-assets-v1
-```
-
-and upload:
+It says explicitly that it creates:
 
 ```text
 anima-turbo-v1.0-xsmax-w4.animapk
 qwen3-0.6b-xsmax-w8.animapk
 qwen-image-vae-xsmax-fp16.animapk
-model-manifest.json
-MODEL_LICENSE.md
-MODEL_NOTICE.txt
 ```
 
-GitHub currently allows up to 1000 assets per release, each under 2 GiB, with no total release-size or bandwidth limit. All three packs individually fit that limit.
+Its quantization format is:
 
-Use the exact verified SHA-256s from section 2.
+```text
+W4: unsigned uint4 affine
+W8: unsigned uint8 affine
+group size: 64
+scale: fp16
+zero: fp16
+decode: q * scale + zero
+```
+
+It correctly resets matrix groups on each output row.
+
+Preserve it unchanged as:
+
+```text
+scripts/archive/pack_anima_v1_extracted.py
+```
+
+Before committing:
+
+```bash
+sha256sum scripts/archive/pack_anima_v1_extracted.py
+```
+
+The SHA measured during this investigation was:
+
+```text
+953e3ae1c2409584a0b0c7f849779400f891ad15e9e5c1b48c3851a2a4cdf185
+```
+
+Recalculate this locally before treating it as authoritative.
+
+Do not modify the archived file.
+
+Develop the replacement at:
+
+```text
+scripts/pack_anima.py
+```
 
 ---
 
-# 15. Extract small golden fixtures
+# 15. Why packing v2 is needed
 
-Before implementation, use the existing canonical golden:
+The recovered packer works, but it has several refinement limitations.
 
-```text
-case1_danbooru_seed1337.npz
-```
+## 15.1 It is not actually output-streaming
 
-Create small deterministic test fixtures.
+It reads tensors one at a time but appends each tensor's finished packed byte arrays into the global `tensors` list and only writes the final pack afterward.
 
-Commit only a small, deterministic CPU fixture set:
+That retains approximately the entire quantized output in memory.
 
-```text
-canonical prompt text
-T5 token IDs
-attention mask
-Qwen final-context anchors or the full context if the size budget permits
-init_noise_randn
-sigma vector
-final latent
-small deterministic decoded-RGB anchors/slices
-```
-
-Extract compact deterministic slices/anchors plus shape/hash metadata for:
-
-```text
-step_latents
-block_00_out
-block_15_out
-block_27_out
-```
-
-Store them as very simple:
-
-```text
-raw little-endian Float32
-raw Int32/Int64 as appropriate
-JSON metadata with shape + SHA256
-```
-
-Do not implement an NPZ reader in Swift just for tests.
-
-Small fixture files can live in the **test target only**. Keep the committed fixture set near the A006 budget (about 3 MB); do not commit the complete 8 MB block tensors or the approximately 118 MB NPZ. Full tensors remain local or are fetched only by the manual pack-backed integration workflow.
-
-Do not include tens of megabytes of debug goldens in the shipping app unless needed.
-
-A minimal end-to-end device fixture should contain:
-
-```text
-canonical prompt
-golden input noise
-expected final latent
-```
-
-This allows inference validation without requiring exact production RNG parity.
+v2 must write each finished tensor to the output file and release it.
 
 ---
 
-# 16. Tokenizers
+## 15.2 W4 range selection is extremely basic
 
-Two tokenizers are required:
+For every group of 64 weights, v1 simply computes:
 
-```text
-Qwen tokenizer
-T5 tokenizer
+```python
+mn = seg.min()
+mx = seg.max()
+scale = (mx - mn) / 15
+zero = mn
 ```
 
-Use the exact tokenizer assets corresponding to the pinned reference.
+then rounds into 16 values.
 
-Bundle the tokenizer/config files as app resources.
+There is no range optimization.
 
-Use `swift-transformers` `Tokenizers` from local files; do not require Hugging Face network access for tokenizer operation.
+There is no outlier clipping.
 
-The library supports local tokenizer folders and currently contains T5/SentencePiece-related regression tests, but tokenization parity still MUST be checked against the supplied model reference rather than assumed.
+There is no MSE search.
 
-Before accepting the dependency:
-
-1. create Python reference token IDs for all three canonical prompts;
-2. run the Swift implementation;
-3. demand exact token IDs;
-4. test both Qwen and T5.
-
-If the latest stable package version disagrees:
-
-```text
-try a newer fixed commit
-```
-
-before writing your own tokenizer.
-
-Do not continue to the text encoder with mismatched tokenization.
-
-For v1, reject prompts whose Qwen OR T5 tokenized length exceeds 512 instead of silently applying unverified truncation behavior.
+This is a plausible source of accumulated W4 degradation.
 
 ---
 
-# 17. `.animapk` parser — implement in Swift
+## 15.3 Integer Q is chosen against parameters the runtime does not use exactly
 
-Do not add C++ bridging unless Swift proves impossible.
+v1 calculates Q using Float32 `scale`/`zero`, then converts them to FP16 for storage afterward.
 
-Implement:
+The runtime reconstructs using the stored FP16 values.
 
-```text
-MappedFile.swift
-AnimapkHeader.swift
-AnimapkTensor.swift
-AnimapkFile.swift
-```
-
-`MappedFile` should:
+v2 should:
 
 ```text
-open O_RDONLY
-fstat
-mmap PROT_READ | MAP_PRIVATE
-own fd + mapping lifetime
-munmap/close cleanly
+calculate candidate affine range
+→ convert scale/zero to fp16
+→ convert them back to float32
+→ choose Q using those exact stored values
 ```
 
-Parse little-endian header manually.
+That removes the inconsistency.
 
-Avoid unsafe unaligned integer loads; copy bytes safely.
+---
 
-Load architecture JSON with Foundation `JSONDecoder`.
+## 15.4 Mixed precision was not completed end-to-end
 
-Build:
+The v1 script already contains:
 
-```swift
-[String: TensorMeta]
+```text
+--exclude-json
 ```
 
-using the JSON full names/shapes.
+and can leave selected matrices FP16.
 
-Also index by `blobOffset`.
+But current DiT-specific runtime paths still assume W4 in several places.
 
-Validation:
+v2 should make:
+
+```text
+W4
+W8
+```
+
+first-class per-matrix choices.
+
+Do **not** add general FP16 rank-2 matrix execution yet unless later evidence requires it.
+
+---
+
+# 16. Packing-v2 design
+
+Keep the ANMA container at version `1` unless a concrete incompatibility makes that impossible.
+
+The current parser is header-driven and validates JSON/table/payload bounds and 16-KiB blob alignment rather than requiring the table immediately after JSON.
+
+Therefore a bounded-memory writer can reserve a fixed metadata area without changing the runtime format.
+
+Required behavior:
+
+```text
+Container               ANMA v1
+Blob alignment          16 KiB
+Group size              64
+Rank <= 1               FP16
+Rank 2                  W4 or W8
+W4                      optimized affine
+W8                      affine
+Scale                    FP16
+Zero                     FP16
+Group reset              every matrix row
+W4 nibble layout         even K low / odd K high
+Output writer            bounded-memory
+Source finite check      mandatory
+Scale finite check       mandatory
+Verification             mandatory
+Quant report             mandatory
+Source provenance        mandatory
+Precision map            supported
+Dry-plan                 mandatory
+```
+
+---
+
+# 17. Do not change group size yet
+
+Use:
+
+```text
+GROUP = 64
+```
+
+for both W4-v2 and W8-v2.
+
+The existing Swift decoder already implements row-aware W4/W8 group-64 matrix decoding, including the historical `[2,68]` and `[2,65]` boundary cases.
+
+Do not simultaneously change:
+
+```text
+bit depth
+quantizer
+group size
+runtime
+```
+
+during the first comparison.
+
+The experiment should remain understandable.
+
+---
+
+# 18. Packing-v2 CLI
+
+Implement approximately:
+
+```bash
+python3 scripts/pack_anima.py \
+  --component dit \
+  --input source.safetensors \
+  --out anima-turbo-v1.0-xsmax-w4-v2.animapk \
+  --quant w4 \
+  --group 64 \
+  --w4-algorithm mseclip \
+  --report anima-turbo-v1.0-xsmax-w4-v2.quant-report.json \
+  --verify
+```
+
+and:
+
+```bash
+python3 scripts/pack_anima.py \
+  --component dit \
+  --input source.safetensors \
+  --out anima-turbo-v1.0-xsmax-w8-v2.animapk \
+  --quant w8 \
+  --group 64 \
+  --report anima-turbo-v1.0-xsmax-w8-v2.quant-report.json \
+  --verify
+```
+
+Also support:
+
+```text
+--precision-map PATH
+--dry-plan
+--row-chunk N
+--verify
+```
+
+---
+
+# 19. Precision-map design
+
+Support per-matrix storage now even though the first two packs are pure W4 and pure W8.
+
+Suggested format:
+
+```json
+{
+  "version": 1,
+  "default": "w4",
+  "overrides": [
+    {
+      "match": "model.diffusion_model.final_layer.*",
+      "storage": "w8"
+    }
+  ]
+}
+```
+
+Rules:
+
+```text
+rank <= 1:
+    always FP16
+
+rank == 2:
+    resolved from default + overrides
+
+allowed rank-2 storage:
+    W4
+    W8
+```
+
+Hard fail when:
+
+```text
+storage type is unknown
+override pattern is malformed
+an intended override matches zero tensors
+multiple conflicting rules match one tensor
+rank > 2 reaches matrix quantization unexpectedly
+```
+
+For first W4:
+
+```json
+{
+  "version": 1,
+  "default": "w4",
+  "overrides": []
+}
+```
+
+For first W8:
+
+```json
+{
+  "version": 1,
+  "default": "w8",
+  "overrides": []
+}
+```
+
+This means that if W8 is clean and W4 is not, generating one mixed W4/W8 follow-up later requires **no new pack format or runtime redesign**.
+
+---
+
+# 20. W4 range optimizer
+
+Do not implement GPTQ, AWQ, calibration datasets or Hessian-based optimization yet.
+
+That would overcomplicate the first refinement experiment.
+
+Use a modest deterministic per-group MSE range search.
+
+For each 64-element group, test:
+
+```text
+baseline min/max
+symmetric 0.5% clipping
+symmetric 1%
+symmetric 2%
+symmetric 3%
+symmetric 5%
+
+lower-only 1%
+lower-only 2%
+lower-only 5%
+
+upper-only 1%
+upper-only 2%
+upper-only 5%
+```
+
+The exact implementation may be adjusted if a cleaner equivalent is found.
+
+For every candidate:
+
+1. determine candidate lower/upper range;
+2. calculate scale/zero;
+3. round scale/zero to FP16;
+4. reconstruct their exact runtime Float32 values;
+5. quantize Q using those values;
+6. reconstruct;
+7. calculate MSE against original FP32 group;
+8. select lowest-MSE candidate.
+
+Example core helper:
+
+```python
+import numpy as np
+
+def evaluate_range(seg, bits, lo, hi):
+    qmax = (1 << bits) - 1
+
+    if hi - lo < 1e-8:
+        scale16 = np.float16(1.0)
+        zero16 = np.float16(lo)
+        q = np.zeros(seg.shape, dtype=np.uint8)
+
+        recon = (
+            q.astype(np.float32) * float(scale16)
+            + float(zero16)
+        )
+
+        mse = float(np.mean((recon - seg) ** 2))
+
+        return mse, q, scale16, zero16
+
+    scale16 = np.float16((hi - lo) / qmax)
+    zero16 = np.float16(lo)
+
+    scale = float(scale16)
+    zero = float(zero16)
+
+    if not np.isfinite(scale):
+        return None
+
+    if not np.isfinite(zero):
+        return None
+
+    if scale <= 0:
+        return None
+
+    q = np.clip(
+        np.rint((seg - zero) / scale),
+        0,
+        qmax
+    ).astype(np.uint8)
+
+    recon = q.astype(np.float32) * scale + zero
+
+    mse = float(
+        np.mean((recon - seg) ** 2)
+    )
+
+    return mse, q, scale16, zero16
+```
+
+Do not implement the entire model as individual Python 64-element loops.
+
+Vectorize group candidates across row chunks.
+
+---
+
+# 21. W8 algorithm
+
+Keep W8 relatively simple.
+
+With 256 quantization levels, first use ordinary per-group affine min/max, but still fix the FP16 parameter issue.
+
+Conceptually:
+
+```python
+scale16 = np.float16((mx - mn) / 255.0)
+zero16 = np.float16(mn)
+
+scale = np.float32(scale16)
+zero = np.float32(zero16)
+
+q = np.clip(
+    np.rint((seg - zero) / scale),
+    0,
+    255
+).astype(np.uint8)
+```
+
+If W8 still produces a bad image, do not immediately optimize W8 ranges.
+
+That result would be diagnostically interesting.
+
+---
+
+# 22. Vectorized row-chunk processing
+
+The GitHub runner should not spend hours executing millions of tiny Python loops.
+
+Use row chunks.
+
+Conceptually:
+
+```python
+def process_matrix_chunk(chunk, bits):
+    # chunk shape: [rows, K]
+
+    rows, k = chunk.shape
+
+    groups_per_row = (k + GROUP - 1) // GROUP
+    padded_k = groups_per_row * GROUP
+
+    # Build explicit validity mask so padded values cannot
+    # influence the final partial group's statistics.
+
+    ...
+```
+
+Important invariants:
+
+```text
+groups restart each row
+
+K=68:
+row 0 groups 0,1
+row 1 groups 2,3
+
+partial groups ignore padding during:
+min
+max
+MSE
+
+W4:
+even K index -> low nibble
+odd K index  -> high nibble
+```
+
+The historical row-boundary bug must never return.
+
+---
+
+# 23. Quantization report
+
+Packing should produce useful information automatically.
+
+Do not run a second multi-GB analysis pass afterward.
+
+Accumulate statistics while quantizing:
+
+```text
+sum_x2
+sum_y2
+sum_xy
+sum_squared_error
+sum_absolute_error
+max_absolute_error
+element_count
+q_zero_count
+q_max_count
+```
+
+Then calculate:
+
+```python
+cosine = sum_xy / sqrt(sum_x2 * sum_y2)
+
+rmse = sqrt(
+    sum_squared_error / element_count
+)
+
+relative_l2 = sqrt(
+    sum_squared_error / sum_x2
+)
+
+mae = (
+    sum_absolute_error / element_count
+)
+```
+
+Per tensor:
+
+```json
+{
+  "name": "model.diffusion_model....weight",
+  "shape": [2048, 2048],
+  "storage": "w4",
+  "group": 64,
+  "cosine": 0.999,
+  "rmse": 0.01,
+  "relative_l2": 0.03,
+  "mae": 0.005,
+  "max_abs": 0.2,
+  "q_zero_fraction": 0.02,
+  "q_max_fraction": 0.01
+}
+```
+
+Final report must contain sorted sections:
+
+```text
+worst_by_relative_l2
+worst_by_cosine
+worst_by_rmse
+worst_by_max_abs
+```
+
+This becomes very useful if mixed W4/W8 is needed later.
+
+---
+
+# 24. Make output writing genuinely bounded-memory
+
+Do not retain:
+
+```text
+data
+scale
+zero
+```
+
+for every tensor until the end.
+
+Use two phases.
+
+## Phase A — planning
+
+Read only metadata/shapes.
+
+Determine:
+
+```text
+tensor name
+shape
+storage type
+data bytes
+scale bytes
+zero bytes
+aligned blob bytes
+execution index
+block index
+blob offset
+```
+
+For matrix `[rows, columns]`:
+
+```python
+groups_per_row = (
+    columns + GROUP - 1
+) // GROUP
+```
+
+W4:
+
+```python
+packed_row_bytes = (
+    columns + 1
+) // 2
+
+data_size = (
+    rows * packed_row_bytes
+)
+
+param_size = (
+    rows
+    * groups_per_row
+    * 2
+)
+```
+
+W8:
+
+```python
+data_size = (
+    rows * columns
+)
+
+param_size = (
+    rows
+    * groups_per_row
+    * 2
+)
+```
+
+FP16:
+
+```python
+data_size = (
+    rows
+    * columns
+    * 2
+)
+
+scale_size = 0
+zero_size = 0
+```
+
+---
+
+# 25. Reserve metadata space
+
+Because the current ANMA parser gets offsets from the binary header and only requires sections to remain in bounds, a fixed metadata reserve is compatible with the existing parser design.
+
+For example:
+
+```python
+METADATA_RESERVE = 4 * 1024 * 1024
+```
+
+Then:
+
+```text
+256-byte header
+
+reserved JSON area
+
+tensor table
+
+align to 16 KiB
+
+payload tensor 0
+align
+
+payload tensor 1
+align
+
+...
+```
+
+Calculate final offsets before loading full tensors.
+
+If the final metadata unexpectedly exceeds the reserve:
+
+```text
+HARD FAIL
+```
+
+Do not silently corrupt layout.
+
+---
+
+# 26. Direct writer pattern
+
+Conceptually:
+
+```python
+with open(output_path, "w+b") as dst:
+    dst.truncate(final_file_size)
+
+    with safe_open(
+        source_path,
+        framework="pt",
+        device="cpu"
+    ) as src_file:
+
+        for plan in tensor_plans:
+            tensor = src_file.get_tensor(
+                plan.name
+            )
+
+            process_and_write_tensor(
+                dst=dst,
+                plan=plan,
+                source=tensor
+            )
+
+            del tensor
+
+    metadata = build_final_metadata(...)
+    table = build_table(...)
+
+    dst.seek(0)
+
+    write_header(dst, ...)
+    write_metadata(dst, metadata)
+    write_table(dst, table)
+```
+
+The completed quantized matrix should be written directly to its planned file offset.
+
+Do not create a second complete temporary `.animapk`.
+
+---
+
+# 27. Strengthen integrity without changing ANMA v1
+
+The existing binary CRC covers the packed data region.
+
+Keep that behavior for runtime compatibility.
+
+Additionally put this into v2 JSON metadata:
+
+```text
+blob_sha256
+```
+
+where:
+
+```text
+blob_sha256 =
+SHA256(
+    data
+    + scale
+    + zero
+)
+```
+
+This allows the v2 verifier to protect all quantization parameters without altering the ANMA binary record format.
+
+The runtime does not have to validate this during normal inference yet.
+
+The offline pack verifier should.
+
+---
+
+# 28. Provenance metadata
+
+Every v2 pack must contain/report:
+
+```json
+{
+  "packer": {
+    "version": 2,
+    "script_sha256": "...",
+    "git_commit": "...",
+    "python": "...",
+    "numpy": "...",
+    "torch": "...",
+    "safetensors": "..."
+  },
+
+  "source": {
+    "repo": "circlestone-labs/Anima",
+    "revision": "...",
+    "path": "split_files/diffusion_models/anima-turbo-v1.0.safetensors",
+    "sha256": "c0b905..."
+  },
+
+  "quantization": {
+    "default": "w4",
+    "group": 64,
+    "w4_algorithm": "mseclip-v1",
+    "scale_dtype": "fp16",
+    "zero_dtype": "fp16"
+  },
+
+  "precision_map_sha256": "...",
+
+  "output": {
+    "filename": "...",
+    "bytes": 0,
+    "sha256": "..."
+  }
+}
+```
+
+Do not put secrets in provenance.
+
+---
+
+# 29. Add `--dry-plan`
+
+The packer must be able to predict resources without producing the pack.
+
+Example:
+
+```bash
+python3 scripts/pack_anima.py \
+  --component dit \
+  --input source.safetensors \
+  --out ignored.animapk \
+  --quant w8 \
+  --group 64 \
+  --dry-plan
+```
+
+Output:
+
+```text
+SOURCE
+------
+filename:
+bytes:
+SHA256:
+
+MODEL
+-----
+tensor count:
+rank-2 tensors:
+rank<=1 tensors:
+
+OUTPUT
+------
+W4 tensors:
+W8 tensors:
+FP16 tensors:
+
+estimated data bytes:
+estimated scale bytes:
+estimated zero bytes:
+estimated padding:
+estimated final file size:
+
+largest source tensor:
+estimated peak working memory:
+```
+
+GitHub CI should run `--dry-plan` before the real pack.
+
+---
+
+# 30. Pack verifier
+
+Create:
+
+```text
+scripts/verify_animapk.py
+```
+
+Do not make verification part of undocumented packer internals only.
+
+Validate:
 
 ```text
 magic == ANMA
 version == 1
-declared file size == actual
-all section ranges inside file
-all blob ranges inside file
-every blobOffset % 16384 == 0
-```
+component == DiT
+alignment == 16384
+record size == 128
+declared file size == real file size
 
-Never use the binary table's truncated shape as the authoritative shape.
+JSON in bounds
+table in bounds
+payload in bounds
 
----
+tensor count correct
 
-# 18. W4/W8 decoders: prove byte compatibility first
+every blob:
+    offset aligned
+    range in file
 
-Before using GPU dequantization, implement tiny CPU reference decoders in the TEST TARGET.
+every W4 matrix:
+    expected packed bytes
+    expected scale bytes
+    expected zero bytes
 
-W4 exact definition:
+every W8 matrix:
+    expected packed bytes
+    expected scale bytes
+    expected zero bytes
 
-```text
-group axis: K/input dimension
-group size: 64
-q: unsigned 0...15
-scale: fp16
-zero: fp16
-even K index → low nibble
-odd K index → high nibble
+every FP16 tensor:
+    expected bytes
+    no quant params
 
-value = q * scale + zero
-```
+every scale:
+    finite
+    > 0
 
-Required known W4 test:
+every zero:
+    finite
 
-```text
-block 0 mlp.layer1
-first packed bytes:
-110, 135, 69, 55, 138, 137, 37, 98
+CRC:
+    correct
 
-first scale values include:
-0.0004537
-0.0004232
-0.0004251
-0.0004313
-```
+v2 blob SHA:
+    correct
 
-Verify the first reconstructed values against the handoff.
+source provenance:
+    present
 
-W8:
-
-```text
-unsigned uint8
-group size 64
-fp16 scale
-fp16 zero
-value = q*scale + zero
-```
-
-For a rank-2 `[N,K]` matrix, group indexing resets for each row:
-
-```text
-groupsPerRow = ceil(K / 64)
-group = row * groupsPerRow + column / 64
-```
-
-Never use `flatIndex / 64` for matrices whose K is not divisible by 64. Required regression shapes are W4 `[2,68]` and W8 `[2,65]`, with row-1 values asserted. This is the H005 root-cause regression (D034).
-
-Use the real embedding-table vector documented in `HANDOFF.md`.
-
-Only after CPU tests are exact should Metal decoders be implemented.
-
----
-
-# 19. Minimal runtime memory design
-
-Start with this.
-
-No three-slot ring.
-
-No MTLHeap.
-
-No dynamic tier system.
-
-### Weight ring
-
-One reusable:
-
-```text
-39 MB-ish .storageModeShared MTLBuffer
-```
-
-large enough for the largest contiguous DiT block range.
-
-### Dequant scratch
-
-One reusable fp16:
-
-```text
-33,554,432-byte
-```
-
-buffer for the largest matrix.
-
-### Residual
-
-One or two reusable Float32 residual buffers:
-
-```text
-1024 × 2048 × 4 ≈ 8.4 MB each
-```
-
-### Other activations
-
-Reuse simple explicit buffers.
-
-Do not allocate all possible tensors simultaneously.
-
-Start with ring=1.
-
-The CPU oracle may use `Data` and flat Swift arrays for safe test-scoped decoding. The production path must operate on validated mmap-backed byte spans and `MTLBuffer` offsets; it must not copy entire tensors into `Data` or construct large `[[Float]]` matrices.
-
-Only implement ring=2 after a real XS Max measurement demonstrates that I/O overlap is worth the memory.
-
----
-
-# 20. Weight streaming
-
-Implement:
-
-```text
-WeightStreamer.swift
-```
-
-For logical DiT block N:
-
-1. obtain its actual start/end from metadata;
-2. optionally `madvise(..., WILLNEED)`;
-3. memcpy its contiguous bytes into ring buffer;
-4. execute tensors using offsets relative to block start;
-5. reuse ring for next logical block.
-
-`D007` must expose both block ranges and tensor-relative spans. Validate every offset/length before creating a buffer view. Copy each block into the one-slot ring once, then address packed data/scales/zeros by offsets relative to that ring; do not make an additional `Data` copy per tensor. If a direct mmap upload or bytes-no-copy path is considered later, require A12 measurements first.
-
-Do not assume physical neighboring blocks correspond to logical neighbors.
-
-For Qwen:
-
-```text
-embedding rows gathered directly from mmap
-layer N → copy its contiguous 16.78 MB range → execute → reuse ring
-```
-
-Do not dequantize an entire 31.5 MB text layer at once unless necessary.
-
-Still dequantize one matrix at a time into the shared scratch.
-
-The mmap is read-only/file-backed. Let the OS manage clean file pages initially.
-
-Do not add aggressive page touching, custom page-cache tricks or `newBufferWithBytesNoCopy` before measuring them on the actual XS Max.
-
----
-
-# 21. MetalContext
-
-Implement one:
-
-```text
-MetalContext
-```
-
-owning:
-
-```text
-MTLDevice
-MTLCommandQueue
-default metallib
-compute pipeline cache
-MPS helpers
-```
-
-At runtime record:
-
-```text
-supportsFamily(.apple5)
-maxBufferLength
-maxThreadgroupMemoryLength
-recommendedMaxWorkingSetSize if available
-os_proc_available_memory()
-ProcessInfo.thermalState
-```
-
-Do not require newer GPU families.
-
-Do not use:
-
-```text
-simdgroup_matrix
-Metal 3-only APIs
-MTLIOCommandQueue
-bfloat16
+whole output SHA:
+    generated
 ```
 
 ---
 
-# 22. First Metal kernels
+# 31. Add tiny packer regression tests
 
-Keep `AnimaKernels.metal` straightforward.
+No multi-GB source is needed for normal CI.
 
-Implement and independently unit-test:
-
-```text
-dequant_w4_to_half
-dequant_w8_to_half
-
-rmsnorm_f32_to_half
-rmsnorm_half_to_half
-layernorm_f32_modulated_to_half
-
-silu
-gelu_exact
-
-gate_add_fp32_into_float
-add_half_into_float
-
-rope_qk
-qk_rmsnorm
-
-patchify17
-unpatchify16
-unpatchify_velocity16
-
-euler_step_f32
-
-w4_matvec_f32
-```
-
-All norm statistics/reductions:
+Create synthetic tensors:
 
 ```text
-Float32 accumulation
+W4 matrix:  [2,68]
+W8 matrix:  [2,65]
+FP16 vector
 ```
 
-All softmax max/sum:
+Use deliberately different value ranges between row 0 and row 1.
+
+Tests must catch:
 
 ```text
-Float32
+global group indexing
+wrong nibble packing
+partial-group padding contamination
+wrong W8 row stride
+scale/zero length errors
+metadata corruption
 ```
 
-Sampler:
-
-```text
-Float32
-```
-
-Timestep/AdaLN:
-
-```text
-Float32
-```
-
-Do not fuse kernels prematurely.
-
-Match the validated H005 equations, not convenient approximations: adapter/DiT GELU is exact `0.5*x*(1+erf(x/sqrt(2)))`, LayerNorm mean-centers, RMSNorm does not, and DiT modulation/gates/residual additions remain Float32. The current tanh GELU and half-precision gate scaffold are not parity implementations and must be replaced before E003 is complete.
-
-Correct separate Q/K norm + RoPE is preferable to a hard-to-debug fused kernel.
-
-Fuse only after correctness.
+The current project already has historical regression evidence specifically around `[2,68]` W4 and `[2,65]` W8.
 
 ---
 
-# 23. Linear layers: one common implementation
+# 32. GitHub-hosted packing resources
 
-For large matrix operations:
+Use:
 
-```text
-packed weight
-→ Metal dequant to reusable fp16 weight scratch
-→ MPSMatrixMultiplication
+```yaml
+runs-on: ubuntu-latest
 ```
 
-MPS supports transposition of either input matrix and computes the standard matrix product form.
+The repository is public.
 
-For weight logical shape:
-
-```text
-[N, K]
-```
-
-and activations:
+GitHub currently provides standard public `ubuntu-latest` runners with approximately:
 
 ```text
-[M, K]
+4 CPU
+16 GB RAM
+14 GB SSD
 ```
 
-use the weight as the right matrix with right transpose:
+The source model is approximately:
 
 ```text
-[M,K] × [N,K]^T → [M,N]
+4.18 GB
 ```
 
-The dequant kernels must receive explicit row/column strides and use row-reset quantization groups. A synthetic non-aligned-K matrix test is required before any real-model linear is trusted.
+Therefore **do not build W4 and W8 in the same job filesystem**.
 
-Use straightforward contiguous row strides first; MPS publishes recommended matrix row strides, but they are an optimization rather than a prerequisite for the first correct implementation.
-
-### M=1 precision-critical linears
-
-For:
-
-```text
-timestep embedding
-AdaLN/modulation
-```
-
-use the custom direct:
-
-```text
-w4_matvec_f32
-```
-
-kernel.
-
-It should:
-
-```text
-read packed W4 directly
-dequant group values on the fly
-multiply by fp32 input
-accumulate fp32
-produce fp32 output
-```
-
-This avoids forcing the precision-critical modulation path through fp16.
+Give each its own VM.
 
 ---
 
-# 24. Tile the M dimension of giant GEMMs
+# 33. Packing workflow topology
 
-Do not launch the largest:
-
-```text
-M=1024, N=8192, K=2048
-```
-
-as one monolithic operation on A12 unless testing proves it safe.
-
-Default first implementation:
+Create:
 
 ```text
-M tile = 128
+.github/workflows/pack-dit-v2.yml
 ```
 
-For a 1024-row GEMM:
+Use a two-entry matrix:
+
+```yaml
+strategy:
+  fail-fast: false
+  matrix:
+    include:
+      - variant: w4-v2
+        quant: w4
+        output: anima-turbo-v1.0-xsmax-w4-v2.animapk
+        hf_repo_suffix: AnimaXS-DiT-W4
+
+      - variant: w8-v2
+        quant: w8
+        output: anima-turbo-v1.0-xsmax-w8-v2.animapk
+        hf_repo_suffix: AnimaXS-DiT-W8
+```
+
+This creates:
 
 ```text
-8 tiles
+JOB 1:
+source 4.18 GB
++
+W4 output only
+
+JOB 2:
+source 4.18 GB
++
+W8 output only
 ```
 
-Dequantize the weight once.
-
-Execute all M tiles against it.
-
-Use asynchronous command-buffer completion from a background task/actor.
-
-Never block the SwiftUI main thread with:
-
-```text
-waitUntilCompleted()
-```
-
-A helper using a checked continuation around the command-buffer completion handler is enough.
-
-Do not build a dynamic GFLOPS autotuner yet.
-
----
-
-# 25. A12 MPS precision test
-
-The handoff correctly identifies this as unresolved.
-
-Build an isolated test covering:
-
-```text
-K=2048
-K=8192
-```
-
-and representative model shapes.
-
-Compare GPU output against a CPU Float32/Float64 reference.
-
-Measure:
-
-```text
-max absolute error
-RMSE
-cosine similarity
-```
-
-Record it in diagnostics.
-
-If MPS fp16 behavior is accurate enough:
-
-```text
-keep the simple path
-```
-
-If not:
-
-```text
-implement K-chunking + fp32 accumulation only for affected operations
-```
-
-Do not implement a complicated precision fallback preemptively.
+Each gets its own fresh runner disk.
 
 ---
 
-# 26. Attention: use the simplest memory-safe baseline
+# 34. GitHub-hosted job timeout
 
-Do NOT begin with a bespoke FlashAttention implementation.
+GitHub currently limits a standard hosted job to **6 hours**.
 
-At 512×512 the DiT has only:
+Use:
 
-```text
-1024 query tokens
+```yaml
+timeout-minutes: 330
 ```
 
-Use **query tiling**.
+That leaves headroom below the hard platform timeout.
 
-Recommended first approach:
-
-```text
-query tile = 128
-```
-
-For each tile:
+The packer must print progress periodically:
 
 ```text
-Q_tile
-× K^T
-→ scaled scores
-→ softmax
-→ × V
-→ output tile
+tensor 1 / N
+tensor 25 / N
+tensor 50 / N
+...
+
+bytes written
+elapsed
+current tensor
 ```
 
-Implement this with reusable MPSGraph attention/matmul+softmax graphs if they work correctly on the current SDK/device.
+Do not allow a four-hour job to appear completely silent.
 
-The query dimension is independent under attention softmax, so splitting the query rows does not alter the result.
+If packing approaches the timeout, first improve/vectorize the CPU quantizer.
 
-At self-attention:
-
-```text
-Q tile: 128
-K length: 1024
-heads: 16
-head dim: 128
-```
-
-At cross-attention:
-
-```text
-Q tile: 128
-K/V length: 512
-```
-
-This limits score-memory and reduces the size of individual GPU work submissions without implementing streaming-key online softmax.
-
-### Fallback
-
-Only if actual XS Max testing shows that MPSGraph:
-
-```text
-uses too much memory
-times out
-or is unacceptably slow
-```
-
-implement the custom online-softmax attention kernel described by the handoff.
-
-Do not build both backends upfront.
+Do **not** immediately add external paid infrastructure.
 
 ---
 
-# 27. Text encoder implementation
+# 35. Source download in the packing job
 
-Implement Qwen first.
+Install only required Python dependencies.
 
-`QwenEncoderCPU` is the validated oracle. Production F007 must use the same equations through E002–E008, gather only requested embedding rows, stream one D008 layer range at a time, and reuse bounded Metal buffers. Do not retain all dequantized layer matrices in Swift arrays.
+Example:
 
-Pipeline:
+```yaml
+- name: Install packing dependencies
+  run: |
+    set -euo pipefail
 
-```text
-prompt
-→ Qwen token IDs
-→ gather W8 embedding rows
-→ Float32 residual
-→ 28 streamed Qwen layers
-→ layer 27 output
-→ apply final RMSNorm
+    python3 -m pip install --upgrade pip
+
+    python3 -m pip install \
+      numpy \
+      safetensors \
+      huggingface_hub
+
+    python3 -m pip install \
+      torch \
+      --index-url https://download.pytorch.org/whl/cpu
 ```
 
-Keeping the Qwen residual in Float32 is inexpensive because the sequence is small and reduces numerical risk.
+Then inspect disk:
 
-For each Qwen layer re-check exact pinned-source ordering.
-
-Expected broad structure:
-
-```text
-RMSNorm
-self attention
-residual
-RMSNorm
-gated SiLU MLP
-residual
+```yaml
+- name: Initial disk report
+  run: |
+    df -h
+    du -sh "$RUNNER_TEMP" || true
 ```
 
-Q/K has per-head normalization.
+Download only the required source file.
 
-RoPE theta:
+Do not clone the complete 34.9-GB Anima repository. The upstream HF repository as a whole is currently about 34.9 GB, while the required Turbo file is only about 4.18 GB.
 
-```text
-1,000,000
-```
-
-GQA:
-
-```text
-16 Q heads
-8 KV heads
-```
-
-For simplicity, expand/broadcast K/V heads to 16 with a tiny Metal kernel or the equivalent MPSGraph broadcast rather than implementing a generic GQA abstraction.
-
-Implement the exact causal mask used by the pinned Qwen reference.
-
-Validation gate:
-
-```text
-canonical prompt token IDs exact
-final Qwen context shape exact
-all finite
-cosine against supplied cond_context >= expected golden tolerance
-```
-
-Only then proceed to the adapter.
-
----
-
-# 28. LLM adapter
-
-After Qwen completes:
-
-```text
-unmap/release TE pack
-map DiT pack
-```
-
-Generate T5 token IDs using the second tokenizer.
-
-Gather adapter target embeddings directly from the W4 embedding tensor instead of dequantizing the entire `[32128,1024]` matrix.
-
-Execute the six adapter blocks.
-
-`LLMAdapter.swift` is the validated CPU oracle. Production G003 must execute these equations with the common Metal/MPS primitives and bounded buffers; it must not dequantize the full T5 embedding table or build large nested Swift matrices.
-
-Use the exact pinned source to resolve:
-
-```text
-MLP activation
-self-attention causality/mask
-cross-attention mask
-RoPE placement
-normalization order
-bias behavior
-```
-
-Do not guess those details.
-
-Finally:
-
-```text
-out_proj
-RMSNorm
-multiply T5 weights
-zero-pad sequence to 512
-```
-
-Retain:
-
-```text
-[1,512,1024]
-```
-
-conditioning for diffusion.
-
----
-
-# 29. DiT input
-
-For the first working generation support only:
-
-```text
-512×512
-```
-
-Do not add 640 yet.
-
-Latent:
-
-```text
-[1,16,1,64,64]
-```
-
-Append the confirmed padding-mask channel:
-
-```text
-17 channels
-```
-
-Patchify:
-
-```text
-2×2
-→ 1024 tokens
-→ width 68
-```
-
-Apply input projection to 2048.
-
-Store resulting residual as Float32.
-
----
-
-# 30. Exact timestep/modulation path
-
-Implement directly from model source/handoff.
-
-Timestep is:
-
-```text
-sigma
-```
-
-not an arbitrary integer diffusion step.
-
-The confirmed sinusoidal embedding uses:
-
-```text
-dimension 2048
-base 10000
-```
-
-and then the model-specific RMSNorm/timestep embedding path.
-
-Keep the entire:
-
-```text
-timestep embedding
-AdaLN LoRA projection
-shift/scale/gate creation
-```
-
-in Float32.
-
-For each of the three block branches:
-
-```text
-self-attn
-cross-attn
-MLP
-```
-
-the modulation must follow the exact shift/scale/gate chunk ordering.
-
-This is a major correctness risk.
-
-Write standalone CPU unit tests for modulation equations before GPU integration.
-
----
-
-# 31. RoPE
-
-Do not implement generic LLM RoPE and assume it applies to DiT.
-
-The DiT uses its own confirmed 3-D position encoding.
-
-From the handoff, re-read and implement:
-
-```text
-axes: T, H, W
-head dimension: 128
-axis split:
-  H 42
-  W 42
-  T 44
-
-spatial theta = 10000 * 4^(42/40) = 42870.938501451725
-temporal theta = 10000
-```
-
-and the exact 2×2 rotation block arrangement.
-
-DiT RoPE applies to self-attention.
-
-Cross-attention does not use that 3-D RoPE.
-
-Write a CPU implementation first.
-
-The CPU implementation has been validated against the pinned source (H004/D029). E004 must apply the same split-half mapping `(p, p+64)` in Metal and compare a tiny reference slice.
-
-Wrong RoPE can produce plausible but completely incorrect images, so this is a hard validation gate.
-
----
-
-# 32. One DiT block first
-
-Do NOT write the full 28-block loop and debug the final image.
-
-Implement a single block and validate it.
-
-The completed CPU H005 gate uses canonical:
-
-```text
-prompt
-golden input noise
-the final block-hook invocation, sampler step 7, sigma 0.3050089478492737
-```
-
-Run from input through block 0.
-
-If `block_00_out` has been extracted into the test fixtures:
-
-compare:
-
-```text
-shape
-finite values
-max abs
-RMSE
-cosine
-```
-
-The handoff's suggested block correctness range is approximately:
-
-```text
-cosine >= 0.999
-```
-
-but use measured/reference tolerances rather than blindly forcing a number.
-
-CPU H005 is green: Swift-W4 matches the independent NumPy-W4 oracle at cosine `1.000000000`; the remaining W4-vs-source-golden difference is source-proven quantization error (D032–D035).
-
-Do not proceed directly from that CPU oracle to a CPU 28-block loop. First implement E009: one bounded-memory production Metal block 0 using the real range locator, ring/scratch buffers, Metal kernels, MPS linears, and tiled attention. It must reproduce the H005 W4 oracle within an experimentally recorded tolerance and keep residual/modulation/gates Float32.
-
----
-
-# 33. Full DiT loop
-
-Once the production Metal block 0 is correct:
-
-```text
-for logical block in 0..<28
-```
-
-For each:
-
-1. locate real byte range;
-2. load into ring;
-3. execute exact block;
-4. optionally emit diagnostics;
-5. reuse buffers;
-6. continue.
-
-In debug/self-test mode compare selected:
-
-```text
-block 0
-block 15
-block 27
-```
-
-if fixtures exist.
-
-In normal mode do not copy huge block outputs back to CPU and do not retain dequantized matrices between linears.
-
-After block 27 execute final normalization/modulation/projection exactly as the reference specifies.
-
-Unpatchify to:
-
-```text
-[1,16,1,64,64]
-```
-
-velocity/flow output.
-
----
-
-# 34. Sampler
-
-Implement the canonical Turbo path only.
-
-Hardcode/reference the validated 9 sigma points in one constants file.
-
-At each of the eight steps:
-
-```text
-run DiT once
-CFG=1 → no unconditional pass
-apply Euler FLOW update in Float32
-```
-
-Use the exact formula from supplied sampler vectors.
-
-Unit-test it with `sampler_vectors.py` data.
-
-Keep latent Float32 between steps.
-
-After every step:
-
-```text
-check NaN/Inf
-update progress
-optionally checkpoint ~256 KB latent
-```
-
----
-
-# 35. Production RNG
-
-Exact `torch.randn` parity is NOT required for the first app.
-
-Do not spend days reverse-engineering PyTorch's normal generator.
-
-Production requirements:
-
-```text
-same app version + same seed → deterministic same initial noise
-reasonable standard-normal distribution
-```
-
-Implement a small deterministic seeded generator plus Box-Muller or equivalent.
-
-Document that app seeds are initially **app-deterministic, not guaranteed ComfyUI-identical**.
-
-For golden testing, bypass production RNG and load the exact supplied `init_noise_randn`.
-
-This cleanly separates:
-
-```text
-runtime correctness
-```
-
-from:
-
-```text
-cross-framework RNG parity
-```
-
----
-
-# 36. VAE: validate 3D→2D fold BEFORE app dependence
-
-Write:
-
-```text
-scripts/validate_vae_fold.py
-```
-
-using existing VAE weights and exact source padding behavior.
-
-For every decoder/post-quant causal 3-D conv at T=1:
-
-1. compute direct reference 3-D output;
-2. construct proposed folded 2-D kernel;
-3. compute 2-D output;
-4. compare numerically.
-
-Verify all temporal kernel/padding variants used by decoder.
-
-Do not assume every layer folds identically.
-
-J001 marked:
-
-```text
-VAE_2D_FOLD_VALIDATED=LAST_TEMPORAL_SLICE_CAUSAL_ZERO
-```
-
-after all 34 relevant rank-5 tensors passed within Float64 reduction ulps and all
-32 kt=3 tensors disproved replication-sum folding.
-
-If folding cannot exactly reproduce T=1 behavior, implement the actual T=1 3-D semantics instead.
-
----
-
-# 37. VAE first implementation: full frame, NOT tiles
-
-Do not start with 64×64 tile blending.
-
-The decoder contains spatial attention and wide convolutional receptive fields, so
-independent tiles change the math even though its normalization is channel-local.
-
-Instead:
-
-```text
-final latent
-→ Wan21 latent normalization
-→ full-frame decoder
-→ RGB
-```
-
-Use exact channel mean/std values from `model_info.json`/runtime constants.
-
-For T=1 use chunk-0 values exactly as the reference.
-
-### Convolutions
-
-After fold validation, use a straightforward Metal Performance Shaders/MPSGraph 2-D convolution path.
-
-Process one layer at a time.
-
-Do not keep all VAE weights resident.
-
-### Wan RMS normalization
-
-Match pinned `wan/vae.py::RMS_norm`:
-
-```text
-normalize across channel dimension only at each (T,H,W)
-PyTorch F.normalize epsilon behavior
-multiply by sqrt(channel count)
-multiply by learned gamma
-fp16 output
-```
-
-Do not port the Cosmos tokenizer GroupNorm path; it is a different VAE implementation.
-
-### Activations
-
-Use exact source activation and exact upsampling method.
-
-Re-read pinned VAE source; do not infer interpolation details.
-
----
-
-# 38. Only implement tiled VAE if the XS Max actually needs it
-
-The full 512 decoder has large activations but is still worth trying first.
-
-If actual device diagnostics show unacceptable peak memory/jetsam:
-
-THEN implement tiled decode.
-
-At that point preserve exact convolution halos and the middle block's global spatial
-attention. Channel-wise RMS normalization itself is local to each pixel and does not
-require a global two-pass statistic.
-
-The old candidate:
-
-```text
-64×64 latent tile
-16 px overlap
-```
-
-was never validated.
-
-Treat it as an experiment, not truth.
-
----
-
-# 39. RGB output
-
-Reference decoder can produce values slightly outside `[-1,1]`.
-
-For display:
-
-```text
-rgb01 = clamp((rgb + 1) / 2, 0, 1)
-```
-
-convert to an image.
-
-Produce `CGImage`/`UIImage`.
-
-Do not retain the large Float32 RGB buffer after conversion if unnecessary.
-
----
-
-# 40. Model download/store
-
-The app must not bundle 2 GB of weights.
-
-Create a small built-in manifest containing for each model:
-
-```text
-filename
-size
-SHA256
-GitHub Release URL
-component
-```
-
-ModelStore UI:
-
-```text
-Not Downloaded
-Downloading X%
-Verifying
-Ready
-Error
-```
-
-Download sequentially.
-
-Store under:
-
-```text
-Application Support/AnimaXS/Models/
-```
-
-Use `URLSessionDownloadTask`.
-
-Move temporary file atomically to final location.
-
-Verify SHA-256 incrementally—never load a 1.18 GB file into `Data`.
-
-Use CryptoKit streaming SHA256.
-
-Mark model directory/files:
-
-```text
-excluded from backup
-FileProtectionType.completeUntilFirstUserAuthentication
-```
-
-Before download, check available disk space and show the user the total download size.
-
-No complicated background-download subsystem is required for v1.
-
----
-
-# 41. Minimal SwiftUI
-
-One screen is enough initially.
-
-Include:
-
-```text
-model status/download controls
-prompt TextEditor
-seed
-Randomize Seed
-resolution: 512 only initially
-Generate button
-Cancel button
-stage progress
-step 1/8...8/8
-block progress where useful
-elapsed time
-result image
-Share button
-Diagnostics button
-```
-
-Do not build:
-
-```text
-accounts
-gallery database
-cloud sync
-prompt history database
-social features
-multi-model selector
-settings hierarchy
-```
-
-After 512 end-to-end works, you may expose 640 experimentally.
-
----
-
-# 42. GenerationCoordinator
-
-Use one coordinator.
-
-Only one generation may run at a time.
-
-Conceptual sequence:
-
-```text
-tokenize
-map TE
-encode Qwen
-unmap TE
-
-map DiT
-run adapter
-create/init latent
-8 diffusion steps × 28 blocks
-unmap DiT
-
-map VAE
-decode
-unmap VAE
-
-publish image
-```
-
-Keep only the 512×1024 conditioning between TE/DiT.
-
-Use `autoreleasepool` around large stages if helpful.
-
-No component should remain mapped merely for convenience once its stage is complete.
-
----
-
-# 43. Cancellation/background/checkpoint
-
-Do the useful minimum.
-
-After each sampler step save:
-
-```text
-latent Float32
-step index
-prompt
-seed
-resolution
-model hashes
-```
-
-to an atomic checkpoint.
-
-On Cancel:
-
-```text
-finish/abort at a safe command-buffer boundary
-free resources
-keep or delete checkpoint based on user intent
-```
-
-On app background:
-
-```text
-stop scheduling new GPU work
-finish current safe work
-checkpoint
-release large GPU resources
-```
-
-On foreground:
-
-```text
-offer Resume
-```
-
-Do not attempt to keep a long Metal generation running in background.
-
-Disable `UIApplication.shared.isIdleTimerDisabled` only while actively generating, and restore it afterward.
-
----
-
-# 44. Memory pressure and thermal behavior
-
-Do not implement five runtime tiers.
-
-Observe:
-
-```text
-memory warning
-available memory
-thermal state
-```
-
-Simple policy:
-
-### Memory warning
-
-```text
-checkpoint
-cancel current generation gracefully
-free ring/scratch/activation buffers
-show recoverable message
-```
-
-### Thermal serious
-
-```text
-continue but pause briefly at safe block/step boundaries if needed
-```
-
-### Thermal critical
-
-```text
-checkpoint and pause/stop
-```
-
-Record the state in diagnostics.
-
----
-
-# 45. Diagnostics screen — important because CI has no A12
-
-Add a simple Diagnostics screen.
-
-Display/export:
-
-```text
-OS version
-device/GPU family support
-maxBufferLength
-maxThreadgroupMemoryLength
-recommendedMaxWorkingSetSize
-os_proc_available_memory
-thermal state
-
-model file sizes/hashes
-model parser status
-```
-
-Buttons/tests:
-
-```text
-Run model-pack validation
-Run W4 vector test
-Run W8 vector test
-Run MPS precision benchmark
-Run 39 MB mmap/copy benchmark
-Run representative MPS GEMM
-Run attention tile benchmark
-Run golden-noise inference self-test
-Export diagnostics JSON
-```
-
-Do not deliberately try to crash the GPU to discover watchdog timeout.
-
-Instead progressively measure representative operation durations.
-
----
-
-# 46. Device microbenchmarks that matter
-
-On the XS Max, capture:
-
-### mmap/copy
-
-```text
-read/copy one 38,993,920-byte DiT block
-cold
-warm
-MB/s
-```
-
-### W4 dequant
-
-Largest:
-
-```text
-8192 × 2048
-```
-
-Measure time.
-
-### MPS GEMMs
-
-At least:
-
-```text
-M=1024 N=2048 K=2048
-M=1024 N=8192 K=2048
-M=1024 N=2048 K=8192
-```
-
-plus tiled M=128 versions.
-
-### Accuracy
-
-Compare K=2048/8192 against CPU Float32.
-
-### Attention
-
-Test:
-
-```text
-16 heads
-q=128 tile
-k=1024
-d=128
-```
-
-### Memory
-
-Record available memory at:
-
-```text
-idle
-after mapping
-after ring allocation
-inside DiT
-before VAE
-VAE peak
-```
-
-### Thermal
-
-Record total time and thermal state after one 8-step generation.
-
-These results belong in `DEVICE_TESTS.md`.
-
----
-
-# 47. Model release upload
-
-Once license gate and pack verification pass:
+Use:
 
 ```bash
-gh release create model-assets-v1 ...
+hf download \
+  "$ANIMA_SOURCE_REPO" \
+  "$ANIMA_SOURCE_FILE" \
+  --revision "$ANIMA_SOURCE_REVISION" \
+  --local-dir "$RUNNER_TEMP/source"
 ```
 
-Upload the three `.animapk` files plus:
+Then find the resulting exact file path and verify:
+
+```bash
+sha256sum "$SOURCE"
+```
+
+Hard gate:
+
+```bash
+echo \
+  "$ANIMA_SOURCE_SHA256  $SOURCE" \
+  | sha256sum --check
+```
+
+If SHA differs:
 
 ```text
-model-manifest.json
+STOP
+```
+
+Do not pack it.
+
+---
+
+# 36. Watch Hugging Face cache/disk use
+
+Immediately after source download:
+
+```bash
+df -h
+
+du -sh \
+  "$RUNNER_TEMP" \
+  "$HOME/.cache/huggingface" \
+  2>/dev/null || true
+```
+
+The runner has only 14 GB SSD.
+
+If `hf download --local-dir` unexpectedly leaves a duplicate multi-GB cache and makes W8 unsafe:
+
+1. determine where the actual source bytes live;
+2. remove only redundant cache data;
+3. retain the one verified source file;
+4. rerun `sha256sum`;
+5. continue.
+
+Do not delete the source path while the packer still needs it.
+
+If necessary, switch that workflow to a direct streaming HTTP download of the **same pinned HF revision** to avoid duplicate caching.
+
+Do not redesign infrastructure over a cache implementation detail.
+
+---
+
+# 37. Create the Hugging Face repos automatically
+
+The action already has:
+
+```text
+secrets.HF_TOKEN
+```
+
+Use the Hugging Face API to determine the token owner.
+
+Example:
+
+```python
+import os
+from huggingface_hub import HfApi
+
+api = HfApi(
+    token=os.environ["HF_TOKEN"]
+)
+
+identity = api.whoami()
+
+owner = identity["name"]
+
+print(owner)
+```
+
+Printing the account name is fine.
+
+Do not print the token.
+
+For W4:
+
+```text
+<owner>/AnimaXS-DiT-W4
+```
+
+For W8:
+
+```text
+<owner>/AnimaXS-DiT-W8
+```
+
+Create them if necessary:
+
+```python
+api.create_repo(
+    repo_id=repo_id,
+    repo_type="model",
+    private=False,
+    exist_ok=True,
+)
+```
+
+If the user account cannot create public repos or the token lacks write permission:
+
+```text
+HARD FAIL
+```
+
+Do not silently switch to another account.
+
+---
+
+# 38. Hugging Face model licensing is mandatory
+
+The existing repository's license audit concludes that non-commercial redistribution of the quantized Anima derivative is permitted only with the required notices/license material.
+
+Therefore every W4/W8 HF repo must contain:
+
+```text
+README.md
 MODEL_LICENSE.md
 MODEL_NOTICE.txt
+
+licenses/
+  CircleStone-NC-1.2.md
+  NVIDIA-Open-Model-License.txt
 ```
 
-Verify download URLs from an unauthenticated request because the app must work for a normal public-repository user.
+Copy these from the audited GitHub project rather than rewriting the license text.
 
-Download each once and re-check SHA256.
+The HF model card must clearly state:
 
-Then put those URLs/hashes in the built-in app manifest.
+```text
+AnimaXS converted/quantized derivative
+non-commercial model use
+source: circlestone-labs/Anima
+Built on NVIDIA Cosmos
+packing algorithm/version
+source SHA
+output SHA
+intended iPhone/Metal runtime
+experimental/refinement status
+```
+
+Do not present these experimental packs as official CircleStone releases.
 
 ---
 
-# 48. Tests required before calling the implementation complete
+# 39. Hugging Face repo structure
 
-## Pure Swift/CPU unit tests
+Because each precision gets its own model repo, keep the structure simple.
 
-Must pass:
-
-```text
-header parse
-JSON full-name/shape
-range validation
-W4 nibble order
-W4 dequant reference
-W8 dequant reference
-fp16 tensor read
-block-range lookup
-logical block 0...27 order
-sampler vector
-sigma constants
-checkpoint serialization
-SHA manifest
-tokenizers exact on canonical prompts
-CPU RoPE reference
-CPU timestep reference
-CPU modulation reference
-```
-
-## Metal tests where Metal exists
+Example W4:
 
 ```text
-W4 dequant
-W8 dequant
-norm
-RoPE
-GELU/SiLU
-gate-add
-MPS linear
-attention tile
-sampler kernel
+README.md
+MODEL_LICENSE.md
+MODEL_NOTICE.txt
+
+licenses/
+  CircleStone-NC-1.2.md
+  NVIDIA-Open-Model-License.txt
+
+anima-turbo-v1.0-xsmax-w4-v2.animapk
+
+quant-report.json
+packing-manifest.json
+verification-report.json
+SHA256SUMS
 ```
 
-Compare with CPU reference. Pack-free synthetic Metal/MPS tests run on every push because hosted execution is verified. At minimum include non-aligned-K W4/W8 row reset, exact GELU, fp32 gate-add, norm semantics, split-half RoPE, transposed MPS linear, tiled attention, patchify/unpatchify, and Euler update.
-
-## Model integration
+W8 equivalent:
 
 ```text
-TE final context is finite/close to golden
-adapter context finite
-block 0 finite/close to golden where fixture exists
-all 28 blocks finite
-8 step latents finite
-final latent finite
-VAE RGB finite
+README.md
+MODEL_LICENSE.md
+MODEL_NOTICE.txt
+
+licenses/
+  CircleStone-NC-1.2.md
+  NVIDIA-Open-Model-License.txt
+
+anima-turbo-v1.0-xsmax-w8-v2.animapk
+
+quant-report.json
+packing-manifest.json
+verification-report.json
+SHA256SUMS
 ```
 
-## Full canonical inference
+No splitting.
 
-Using:
+No multipart reassembly.
 
-```text
-canonical prompt
-exact golden input noise
-512×512
-8 steps
-CFG1
-```
-
-compare at least:
-
-```text
-final latent
-```
-
-against supplied reference with the experimentally reasonable tolerance.
-
-Do NOT demand bit equality between A12 fp16/W4 runtime and the desktop bf16/fp32 golden.
+No GitHub Release limit workaround.
 
 ---
 
-# 49. GitHub full-inference attempt
+# 40. Upload directly from Actions to Hugging Face
 
-After L001 and the licensed model release L002 exist, trigger the manual `full-inference.yml`.
+After packing and verification succeed:
 
-The simulator test should:
-
-1. check a Metal device exists;
-2. download/verify packs using the real ModelStore;
-3. inject golden reference noise;
-4. run canonical inference;
-5. measure stage timings;
-6. assert no NaN/Inf;
-7. compare reference checkpoints where valid;
-8. save only small logs/results.
-
-Do not upload the model files themselves as Actions artifacts.
-
-Do not cache all model packs.
-
-If Metal is unavailable on a future GitHub VM:
-
-```text
-SKIP with explicit reason
+```bash
+hf upload \
+  "$HF_REPO" \
+  "$OUTPUT_PACK" \
+  "$(basename "$OUTPUT_PACK")" \
+  --repo-type model \
+  --commit-message "Upload ${VARIANT} ANIMAPK"
 ```
 
-and leave actual inference as a device acceptance gate. If Metal is available, every other error is a failure; never use `continue-on-error` to turn it green.
+The HF CLI handles large files automatically.
+
+Then upload:
+
+```text
+quant report
+packing manifest
+verification report
+SHA256SUMS
+license files
+model card
+```
+
+Do not delete the local output yet.
+
+First verify it landed remotely.
 
 ---
 
-# 50. Do not fake A12 validation
+# 41. Remote-after-upload verification
 
-Unless you physically ran the app on an iPhone XS Max, NEVER write:
+After upload, query Hugging Face metadata.
 
-```text
-"A12 inference passed"
-"XS Max memory is safe"
-"XS Max generation takes X minutes"
-```
-
-GitHub M1 testing does not count.
-
-Instead say:
+Verify:
 
 ```text
-A12 DEVICE TEST PENDING
+repository exists
+expected filename exists
+expected size exists
+commit/revision recorded
 ```
 
-The project can still be implementation-complete and CI-green.
+Then download the remote pack's metadata/checksum if available.
 
-The MacBook/iPhone owner then runs the built-in Diagnostics/Self Test.
+For strongest verification, if disk permits:
+
+```text
+local pack SHA
+==
+recorded manifest SHA
+==
+HF stored file identity
+```
+
+If full redownload would endanger the 14-GB runner disk, do not redownload 2+ GB merely for ceremony.
+
+The original local SHA plus successful HF large-file upload metadata is enough for the packing job.
+
+The later macOS full-inference download provides an independent end-to-end download check.
 
 ---
 
-# 51. Signing/local Mac behavior
+# 42. GitHub artifact from packing job — SMALL FILES ONLY
 
-Do not commit a development team.
+After successful HF upload:
 
-Set automatic signing.
-
-README instructions:
-
-```text
-1. git clone ...
-2. open AnimaXS.xcodeproj in Xcode 26.3
-3. select AnimaXS target
-4. Signing & Capabilities → choose your Apple Development Team
-5. connect/unlock iPhone XS Max
-6. enable Developer Mode on phone if required
-7. select the physical iPhone
-8. Build & Run
-9. download model packs in app
-10. run Diagnostics first
-11. generate canonical 512 image
+```yaml
+- name: Upload packing evidence
+  uses: actions/upload-artifact@v7
+  with:
+    name: pack-${{ matrix.variant }}-evidence
+    retention-days: 7
+    path: |
+      out/*.quant-report.json
+      out/*.packing-manifest.json
+      out/*.verification-report.json
+      out/SHA256SUMS
 ```
 
-The repository should need no manual source edits to perform these steps.
+Do **not** include:
+
+```text
+*.animapk
+*.safetensors
+```
+
+The current upload-artifact documentation supports many independently named artifacts; these evidence files are the appropriate use case.
 
 ---
 
-# 52. README must explain SDK vs deployment target
+# 43. Packing workflow skeleton
 
-Explicitly document:
+The final workflow should look conceptually like:
 
-```text
-Validated build IDE: Xcode 26.3
-Build SDK under Xcode 26.3: iOS 26.2
-Minimum deployment target: iOS 18.0
-Target physical OS: iOS 18.6
+```yaml
+name: Pack DiT v2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ANIMA_SOURCE_REPO: circlestone-labs/Anima
+  ANIMA_SOURCE_REVISION: <PINNED FULL REVISION>
+  ANIMA_SOURCE_FILE: split_files/diffusion_models/anima-turbo-v1.0.safetensors
+  ANIMA_SOURCE_SHA256: c0b905034510750a505d21aa96c81718f4ffcc500777318421f58a88636e2174
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: w4-v2
+            quant: w4
+            output: anima-turbo-v1.0-xsmax-w4-v2.animapk
+            hf_suffix: AnimaXS-DiT-W4
+
+          - variant: w8-v2
+            quant: w8
+            output: anima-turbo-v1.0-xsmax-w8-v2.animapk
+            hf_suffix: AnimaXS-DiT-W8
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Disk before
+        run: |
+          df -h
+
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+
+          python3 -m pip install --upgrade pip
+
+          python3 -m pip install \
+            numpy \
+            safetensors \
+            huggingface_hub
+
+          python3 -m pip install \
+            torch \
+            --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Download exact source
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/source"
+
+          hf download \
+            "$ANIMA_SOURCE_REPO" \
+            "$ANIMA_SOURCE_FILE" \
+            --revision "$ANIMA_SOURCE_REVISION" \
+            --local-dir "$RUNNER_TEMP/source"
+
+          SOURCE="$RUNNER_TEMP/source/$ANIMA_SOURCE_FILE"
+
+          echo \
+            "$ANIMA_SOURCE_SHA256  $SOURCE" \
+            | sha256sum --check
+
+          echo "SOURCE=$SOURCE" >> "$GITHUB_ENV"
+
+          df -h
+
+      - name: Dry plan
+        run: |
+          python3 scripts/pack_anima.py \
+            --component dit \
+            --input "$SOURCE" \
+            --out "$RUNNER_TEMP/unused.animapk" \
+            --quant "${{ matrix.quant }}" \
+            --group 64 \
+            --dry-plan
+
+      - name: Pack
+        run: |
+          set -euo pipefail
+
+          mkdir -p out
+
+          python3 scripts/pack_anima.py \
+            --component dit \
+            --input "$SOURCE" \
+            --out "out/${{ matrix.output }}" \
+            --quant "${{ matrix.quant }}" \
+            --group 64 \
+            --report "out/${{ matrix.variant }}.quant-report.json"
+
+      - name: Verify pack
+        run: |
+          python3 scripts/verify_animapk.py \
+            "out/${{ matrix.output }}" \
+            --report \
+            "out/${{ matrix.variant }}.verification-report.json"
+
+      - name: Generate hashes and manifest
+        run: |
+          set -euo pipefail
+
+          cd out
+
+          sha256sum \
+            "${{ matrix.output }}" \
+            "${{ matrix.variant }}.quant-report.json" \
+            "${{ matrix.variant }}.verification-report.json" \
+            > SHA256SUMS
+
+      - name: Prepare Hugging Face repository
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python3 scripts/prepare_hf_model_repo.py \
+            --suffix "${{ matrix.hf_suffix }}" \
+            --variant "${{ matrix.variant }}"
+
+      - name: Upload durable model to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python3 scripts/publish_hf_pack.py \
+            --suffix "${{ matrix.hf_suffix }}" \
+            --pack "out/${{ matrix.output }}" \
+            --report "out/${{ matrix.variant }}.quant-report.json" \
+            --verification "out/${{ matrix.variant }}.verification-report.json" \
+            --sha-file out/SHA256SUMS
+
+      - name: Upload small CI evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: pack-${{ matrix.variant }}-evidence
+          retention-days: 7
+          path: |
+            out/*.json
+            out/SHA256SUMS
+
+      - name: Final disk report
+        if: always()
+        run: |
+          df -h
 ```
 
-Do not tell the user to find an "iOS 18.6 SDK" for this project.
-
-The newer build SDK is intentionally compatible with the older deployment target.
+The execution agent should adjust action major versions to the currently supported versions if necessary, but do not downgrade just because an old workflow uses an older major.
 
 ---
 
-# 53. First-image implementation order
+# 44. Runtime must support both W4 and W8
 
-Follow this order.
+Do this before full W8 inference.
 
-Do not jump around.
+The existing project already has significant W8 infrastructure.
+
+Current historical evidence includes W8 row-aware decoding and successful Qwen W8 execution.
+
+The remaining work is primarily the DiT-specific validation/direct-matvec code that still assumes `.w4`.
+
+Do not fork the entire DiT implementation into:
 
 ```text
-1. repository + Xcode project + CI green
-2. animapk parser
-3. CPU W4/W8 tests
-4. tokenizer/Qwen/adapter and DiT CPU references through block 0 (complete)
-5. DiT block/tensor range locator and one-slot ring semantics
-6. permanent Metal execution harness in normal CI
-7. row-aware Metal W4/W8 dequant + exact elementwise/norm/RoPE kernels
-8. direct W4 fp32 matvec + MPS linear + query-tiled attention
-9. one production Metal DiT block 0 vs H005 oracle
-10. streamed Metal Qwen + adapter vs their CPU oracles
-11. all 28 streamed Metal blocks / one DiT forward
-12. Euler sampler
-13. 8-step final latent
-14. validate VAE 3D→2D fold
-15. full-frame VAE
-16. first RGB image
-17. model download UX
-18. checkpoint/background/memory handling
-19. manual CI full-inference attempt
-20. documentation
-21. A12 diagnostics/self-test
+DiTW4
+DiTW8
 ```
 
-This order is deliberate.
+There should be **one inference graph**.
 
-Do not build polish around an inference core that has never produced an image.
+Storage dtype is a property of each weight.
 
 ---
 
-# 54. What NOT to implement unless measurements force it
+# 45. Create one common DiT quantized-weight factory
 
-Do NOT preemptively add:
+Create something such as:
 
 ```text
-ring=2/3
-MTLHeap activation aliasing
-newBufferWithBytesNoCopy
-custom FlashAttention
-custom fused dequant-GEMM
-VAE tiling
-Core ML
-MLX
-ANE
-multiple device tiers
-multiple model variants
-Base/Aesthetic
-W8 DiT
-1024 resolution
-dynamic GPU autotuner
-background inference
-generic tensor graph engine
+AnimaXS/Runtime/Metal/DiTQuantizedWeightFactory.swift
 ```
 
-Each is allowed later only if a measured XS Max problem justifies it.
+Conceptually:
+
+```swift
+enum DiTQuantizedWeightFactory {
+
+    static func makeMatrix(
+        _ item: AnimapkTensorSpans,
+        ring: MTLBuffer,
+        rows: Int,
+        columns: Int,
+        label: String
+    ) throws -> QuantizedLinearWeightBuffers {
+
+        let storage = item.tensor.storage
+
+        guard storage == .w4 ||
+              storage == .w8 else {
+
+            throw AnimapkError.validation(
+                "\(label) must be W4 or W8"
+            )
+        }
+
+        guard item.tensor.shape == [
+            rows,
+            columns
+        ] else {
+
+            throw AnimapkError.validation(
+                "\(label) shape mismatch"
+            )
+        }
+
+        guard
+            let scale = item.scale,
+            let zero = item.zero
+        else {
+
+            throw AnimapkError.validation(
+                "\(label) missing scale/zero"
+            )
+        }
+
+        let rowBytes: Int
+
+        switch storage {
+        case .w4:
+            rowBytes = (
+                columns + 1
+            ) / 2
+
+        case .w8:
+            rowBytes = columns
+
+        default:
+            fatalError(
+                "guarded above"
+            )
+        }
+
+        let groupsPerRow = (
+            columns + 63
+        ) / 64
+
+        let expectedData =
+            rows * rowBytes
+
+        let expectedParams =
+            rows
+            * groupsPerRow
+            * MemoryLayout<Float16>.stride
+
+        guard
+            item.data.length
+                == UInt64(expectedData),
+
+            scale.length
+                == UInt64(expectedParams),
+
+            zero.length
+                == UInt64(expectedParams)
+        else {
+
+            throw AnimapkError.validation(
+                "\(label) quantized layout mismatch"
+            )
+        }
+
+        return QuantizedLinearWeightBuffers(
+            storage: storage,
+
+            packed: ring,
+            packedOffset:
+                Int(item.data.offset),
+
+            scale: ring,
+            scaleOffset:
+                Int(scale.offset),
+
+            zero: ring,
+            zeroOffset:
+                Int(zero.offset),
+
+            rows: rows,
+            columns: columns,
+
+            packedRowStride:
+                rowBytes
+        )
+    }
+}
+```
+
+Use this in:
+
+```text
+DiTPreparationExecutor
+DiTBlockExecutor
+DiTFinalLayerExecutor
+```
+
+Do not retain three separate W4-only validators.
 
 ---
 
-# 55. Important expected failure hierarchy
+# 46. Add W8 FP32 direct matvec
 
-When first inference differs from reference, debug in this order:
+The direct modulation/timestep/final-layer paths currently use a specialized W4 FP32 matvec.
+
+Add:
 
 ```text
-1. tokenizer IDs
-2. Qwen final context
-3. adapter output/masks
-4. timestep embedding
-5. AdaLN shift/scale/gate ordering
-6. DiT 3-D RoPE axis/order
-7. block 0 output
-8. later block overflow/precision
-9. sampler
-10. Wan21 latent normalization
-11. VAE temporal fold
+w8_matvec_f32
 ```
 
-Do not debug by staring at the final image.
+Copy the **existing W4 kernel's execution/reduction structure**.
 
-Find the first stage where numbers diverge.
+Change only packed weight decoding.
+
+Conceptually:
+
+```metal
+const uint q =
+    uint(
+        packed[
+            row * rowStride
+            + column
+        ]
+    );
+
+const uint group =
+    row * groupsPerRow
+    + column / 64u;
+
+const float scale =
+    float(scales[group]);
+
+const float zero =
+    float(zeros[group]);
+
+const float weight =
+    float(q) * scale + zero;
+
+sum += input[column] * weight;
+```
+
+Do not invent a different reduction order.
+
+Do not change residual precision.
+
+Do not change LayerNorm/RMSNorm semantics.
+
+Do not change GELU.
+
+Do not change RoPE.
+
+Do not change sampler math.
+
+Only add W8 weight decode.
 
 ---
 
-# 56. Git discipline
+# 47. Centralize matvec dispatch
 
-Every major green gate gets a commit.
+Conceptually:
 
-Examples:
+```swift
+func quantizedMatvecKernel(
+    storage: StorageDtype
+) throws -> String {
 
-```text
-ci: xcode 26.3 project builds
-runtime: parse ANMA v1 packs
-runtime: validate W4/W8 decode
-metal: dequant and MPS linear
-text: qwen conditioning parity
-text: adapter conditioning
-dit: block zero parity
-dit: full forward
-sampler: eight-step latent
-vae: validated single-frame decode
-app: end-to-end generation
-ci: manual full inference
-docs: mac install instructions
+    switch storage {
+
+    case .w4:
+        return "w4_matvec_f32"
+
+    case .w8:
+        return "w8_matvec_f32"
+
+    default:
+        throw AnimapkError.validation(
+            "DiT matvec requires W4 or W8"
+        )
+    }
+}
 ```
 
-Push frequently.
-
-After every push monitor Actions.
-
-Fix red CI before accumulating unrelated changes.
+Preparation, block modulation and final-layer modulation should all use the same dispatch logic where practical.
 
 ---
 
-# 57. Completion gates
+# 48. Focused runtime tests only
 
-The project is complete only when:
+Do not build another massive oracle project before full inference.
 
-### Repository
+Add:
 
-```text
-[ ] public GitHub repo populated
-[ ] no secrets committed
-[ ] no model packs in Git history
-[ ] xcodeproj committed
-[ ] project.yml committed
-[ ] README complete
-```
+## W8 matvec parity
 
-### Xcode
+Use:
 
 ```text
-[ ] Xcode 26.3 generic iOS build PASS
-[ ] deployment target iOS 18.0
-[ ] no signing required for CI build
-[ ] Metal shaders compile
-[ ] pack-free Metal kernel and MPS execution tests PASS in hosted simulator CI
-[ ] simulator unit tests PASS
+K = 65 or 68
 ```
 
-### Runtime
+and more than one row.
+
+Compare:
 
 ```text
-[ ] animapk parser PASS
-[ ] W4 decode PASS
-[ ] W8 decode PASS
-[ ] tokenizer parity PASS
-[ ] Qwen runs
-[ ] adapter runs
-[ ] DiT block 0 works
-[ ] 28 blocks work
-[ ] 8-step sampler works
-[ ] VAE fold validated
-[ ] full VAE works
-[ ] final image produced on at least available supported test environment
+Metal W8 FP32 matvec
+vs
+CPU dequantW8Matrix + FP32 dot
 ```
 
-### Model distribution
+Require tight parity.
+
+## Weight factory
+
+Verify:
 
 ```text
-[ ] current model license re-checked
-[ ] required license/notice distributed
-[ ] three packs uploaded as Release assets OR license blocker documented
-[ ] release downloads work
-[ ] SHA256s match
+W4 accepted
+W8 accepted
+
+wrong W4 length rejected
+wrong W8 length rejected
+
+missing scale rejected
+missing zero rejected
+
+rank-2 FP16 rejected for now
 ```
 
-### GitHub testing
+## Packer-parser integration
+
+Use the synthetic:
 
 ```text
-[ ] required CI workflow green
-[ ] manual full-inference workflow attempted
-[ ] if Metal available and L001/L002 exist, full simulator inference attempted without masked failures
-[ ] if Metal unavailable, explicit SKIP recorded
+W4 [2,68]
+W8 [2,65]
+FP16 vector
 ```
 
-### Physical XS Max
+pack.
 
-If agent has no physical device:
+Open it using the real Swift `AnimapkFile`.
 
-```text
-A12 DEVICE ACCEPTANCE = PENDING
-```
-
-That is acceptable.
-
-Do not invent a pass.
-
-The repository must contain everything the user needs to perform that final acceptance test from their MacBook.
+No large model required.
 
 ---
 
-# 58. Final report to the user
+# 49. Preserve existing W4 semantics
 
-When finished, provide:
+Adding W8 support must not change legacy W4 execution.
 
-```text
-GitHub repository URL
-final commit SHA
-model release URL/tag
-Xcode version actually used in CI
-iOS build SDK
-deployment target
-CI workflow URLs
-required CI status
-full-inference workflow status
-whether Metal was available in CI
-whether a complete image was generated in CI
-pack SHA verification result
-unit test count/pass count
-simulator test result
-known unresolved issues
-exact steps for the user's first XS Max test
-```
-
-Also state separately:
+Before large inference:
 
 ```text
-A12 DEVICE TESTED: YES/NO
+run normal tests
+run synthetic W4 tests
+run existing pack-free Metal tests
 ```
 
-If NO, list exactly what remains unverified:
+If an existing same-W4 numerical test changes merely because W8 support was added:
 
 ```text
-MPS fp16 accuracy on Apple5
-A12 memory/jetsam
-A12 performance
-A12 watchdog behavior
-A12 thermal behavior
+STOP
 ```
 
-Do not bury these behind general wording.
+Fix that first.
 
 ---
 
-# 59. Definition of success
+# 50. Create both packs in ONE workflow run
 
-Success is NOT:
-
-```text
-"the app compiles"
-```
-
-Success is a repository containing a coherent, model-specific, tested implementation that gets as far toward complete inference as the available hardware genuinely allows, has a green Xcode 26.3 CI build, and is ready for the user to clone, sign, install and run on their iPhone XS Max.
-
-Optimize for:
+Once:
 
 ```text
-correctness first
-first image second
-measured A12 optimization third
+packer v2
+runtime W8 support
+D072 cleanup
+HF secret
 ```
 
-Do not optimize hypothetical problems before the baseline works.
+are committed:
+
+manually dispatch:
+
+```text
+Pack DiT v2
+```
+
+That single workflow should launch:
+
+```text
+pack / w4-v2
+pack / w8-v2
+```
+
+in parallel.
+
+Do not:
+
+```text
+run W4
+inspect
+change code
+then run W8
+```
+
+The first comparison should use the same code revision.
+
+Record:
+
+```text
+GitHub workflow run ID
+commit SHA
+W4 job ID
+W8 job ID
+HF W4 repo
+HF W8 repo
+HF upload revisions
+pack SHA values
+pack byte sizes
+```
+
+---
+
+# 51. Expected disk behavior
+
+Each packing job should contain only:
+
+```text
+source ~4.18 GB
+
+ONE output pack
+
+Python dependencies
+
+small reports
+```
+
+rather than:
+
+```text
+source
++ W4
++ W8
++ duplicate output buffers
++ VPS copies
++ release-upload staging
+```
+
+The streaming writer is still important even though GitHub has 16 GB RAM, because it reduces both memory and unnecessary temporary copies.
+
+---
+
+# 52. Do not upload the source model anywhere
+
+The packing workflow downloads the official source from:
+
+```text
+circlestone-labs/Anima
+```
+
+It does not re-upload that 4.18-GB original file to:
+
+```text
+GitHub artifacts
+our HF repos
+GitHub Releases
+```
+
+Only derived W4/W8 outputs are persisted.
+
+The source remains identified by:
+
+```text
+HF repo
+HF revision
+file path
+SHA256
+```
+
+---
+
+# 53. Full-inference workflow now consumes Hugging Face
+
+Update/create the refinement full-inference workflow.
+
+Use two matrix jobs:
+
+```yaml
+strategy:
+  fail-fast: false
+  matrix:
+    include:
+      - variant: w4-v2
+        hf_repo: <OWNER>/AnimaXS-DiT-W4
+        filename: anima-turbo-v1.0-xsmax-w4-v2.animapk
+
+      - variant: w8-v2
+        hf_repo: <OWNER>/AnimaXS-DiT-W8
+        filename: anima-turbo-v1.0-xsmax-w8-v2.animapk
+```
+
+Each matrix entry should also contain the exact expected:
+
+```text
+HF revision
+SHA256
+byte size
+```
+
+from the accepted packing run.
+
+Do not download “latest.”
+
+---
+
+# 54. Pin the packed HF revisions too
+
+After packing completes, Hugging Face gives each upload a repository revision.
+
+The full-inference workflow must use that immutable revision.
+
+Conceptually:
+
+```yaml
+- variant: w4-v2
+  hf_repo: user/AnimaXS-DiT-W4
+  hf_revision: <EXACT COMMIT>
+  filename: anima-turbo-v1.0-xsmax-w4-v2.animapk
+  sha256: <EXACT SHA>
+
+- variant: w8-v2
+  hf_repo: user/AnimaXS-DiT-W8
+  hf_revision: <EXACT COMMIT>
+  filename: anima-turbo-v1.0-xsmax-w8-v2.animapk
+  sha256: <EXACT SHA>
+```
+
+That makes the test reproducible even if the HF repositories receive improved packs later.
+
+---
+
+# 55. Full-inference download
+
+On the macOS runner:
+
+```bash
+hf download \
+  "$DIT_HF_REPO" \
+  "$DIT_FILENAME" \
+  --revision "$DIT_HF_REVISION" \
+  --local-dir "$RUNNER_TEMP/dit"
+```
+
+Then:
+
+```bash
+echo \
+  "$EXPECTED_DIT_SHA  $DIT_PATH" \
+  | shasum -a 256 --check
+```
+
+No inference begins until the SHA matches.
+
+Use the existing validated Qwen/VAE packs exactly as before.
+
+Do not change their hashes.
+
+---
+
+# 56. Avoid hardcoding W4 inside FullInferenceTests
+
+Use one stable test-only fixture alias.
+
+For example:
+
+```text
+anima-turbo-refine.animapk
+```
+
+Workflow:
+
+```bash
+cp \
+  "$DIT_PATH" \
+  "AnimaXSTests/Fixtures/Case1Binary/anima-turbo-refine.animapk"
+```
+
+Then FullInferenceTests always opens:
+
+```swift
+requiredFixture(
+    name: "anima-turbo-refine.animapk"
+)
+```
+
+The selected variant metadata should be another small generated fixture:
+
+```json
+{
+  "variant": "w8-v2",
+  "hf_repo": "...",
+  "hf_revision": "...",
+  "sha256": "...",
+  "storage": "w8",
+  "group": 64
+}
+```
+
+Do not maintain separate:
+
+```text
+FullInferenceW4Tests
+FullInferenceW8Tests
+```
+
+The graph must be identical.
+
+---
+
+# 57. Canonical inputs must remain IDENTICAL
+
+Both W4-v2 and W8-v2 use:
+
+```text
+same canonical prompt
+same T5 tokens
+same Qwen tokens
+same seed
+same initial noise
+same 8 sigmas
+same Qwen pack
+same VAE pack
+same app/runtime commit
+same output conversion
+same reference latent
+same RGB reference
+```
+
+The current project previously found a wrong-prompt full-inference test and corrected it.
+
+Do not repeat that mistake.
+
+The **only intended difference** is the DiT weight representation.
+
+---
+
+# 58. Full inference output
+
+Each variant saves:
+
+```text
+generated.png
+reference.png
+comparison.png
+metrics.json
+pack-metadata.json
+```
+
+These are small and **should** be uploaded as GitHub Actions artifacts.
+
+Artifact names:
+
+```text
+anima-xs-refine-w4-v2-images
+anima-xs-refine-w8-v2-images
+```
+
+Retention:
+
+```text
+14 days
+```
+
+or another sensible short value.
+
+Unlike model weights, these artifacts are exactly what GitHub artifact storage is good for.
+
+---
+
+# 59. Metrics to record
+
+For both variants:
+
+```text
+final latent cosine
+final latent RMSE
+final latent MAE
+final latent maxAbs
+
+RGB cosine
+RGB RMSE
+RGB MAE
+RGB maxAbs
+
+Qwen seconds
+adapter seconds
+diffusion seconds
+VAE seconds
+total seconds
+
+pack bytes
+pack SHA
+```
+
+Also:
+
+```text
+224 blocks executed
+8 sampler steps executed
+all states finite
+```
+
+Example:
+
+```json
+{
+  "variant": "w8-v2",
+
+  "pack": {
+    "sha256": "...",
+    "bytes": 0,
+    "hf_repo": "...",
+    "hf_revision": "..."
+  },
+
+  "latent": {
+    "cosine": 0.0,
+    "rmse": 0.0,
+    "mae": 0.0,
+    "max_abs": 0.0
+  },
+
+  "rgb": {
+    "cosine": 0.0,
+    "rmse": 0.0,
+    "mae": 0.0,
+    "max_abs": 0.0
+  },
+
+  "timings": {
+    "qwen": 0.0,
+    "adapter": 0.0,
+    "diffusion": 0.0,
+    "vae": 0.0,
+    "total": 0.0
+  }
+}
+```
+
+---
+
+# 60. Do not call `0.65` image quality
+
+The historical `0.65` full-loop floor exists because accumulated source-BF16 vs W4 divergence was already known.
+
+The final image from the legacy W4 pack demonstrates that passing that floor does not imply good visual quality.
+
+During refinement distinguish:
+
+## Structural success
+
+Hard fail on:
+
+```text
+invalid pack
+SHA mismatch
+unsupported dtype
+NaN/Inf
+Metal error
+wrong number of diffusion steps
+missing block
+wrong output dimensions
+PNG failure
+crash
+```
+
+## Quality result
+
+Record:
+
+```text
+latent cosine
+RGB cosine
+visual result
+```
+
+Do not initially make a newly invented number the sole W4/W8 winner criterion.
+
+Inspect the PNGs.
+
+---
+
+# 61. Main comparison table
+
+After both jobs finish:
+
+```text
+                         LEGACY W4     W4-v2       W8-v2
+----------------------------------------------------------------
+pack bytes               1.179 GB      ?            ?
+latent cosine             0.6946       ?            ?
+latent RMSE               0.9735       ?            ?
+RGB cosine                0.7035       ?            ?
+RGB RMSE                  0.493        ?            ?
+pattern lattice           obvious      ?            ?
+color dullness            obvious      ?            ?
+diffusion time            baseline     ?            ?
+total time                baseline     ?            ?
+```
+
+Include the actual three images in the final agent report where practical.
+
+---
+
+# 62. Decision tree
+
+## Case A — W4-v2 is clean
+
+If W4-v2:
+
+```text
+substantially improves metrics
+removes the obvious grid/lattice
+restores useful colors
+looks visually good
+```
+
+then:
+
+```text
+W4-v2 becomes leading candidate
+W8-v2 remains high-precision reference
+```
+
+Do not create mixed precision merely because the feature exists.
+
+---
+
+## Case B — W8-v2 clean, W4-v2 bad
+
+This strongly indicates W4 precision remains the main image-quality problem.
+
+Then use the W4 quantization report.
+
+Create **one** mixed pack.
+
+Possible first promoted classes:
+
+```text
+AdaLN / modulation
+timestep matrices
+final layer
+```
+
+and/or whatever classes actually score worst in the quantization report.
+
+Example precision map:
+
+```json
+{
+  "version": 1,
+  "default": "w4",
+
+  "overrides": [
+    {
+      "match": "model.diffusion_model.blocks.*.adaln_modulation_*",
+      "storage": "w8"
+    },
+
+    {
+      "match": "model.diffusion_model.t_embedder.*",
+      "storage": "w8"
+    },
+
+    {
+      "match": "model.diffusion_model.final_layer.*",
+      "storage": "w8"
+    }
+  ]
+}
+```
+
+Then run one additional full inference.
+
+---
+
+## Case C — W8 better but still imperfect
+
+If W8 clearly improves:
+
+```text
+latent
+RGB
+pattern
+color
+```
+
+but remains visibly imperfect, quantization remains a major contributor.
+
+Only then consider:
+
+```text
+selective FP16 matrices
+stronger W4 optimizer
+full W8 as quality mode
+```
+
+Do not modify VAE first.
+
+---
+
+## Case D — W4 and W8 both remain around ~0.7 with same artifact pattern
+
+Stop repacking.
+
+This materially weakens the “4-bit quantization quality” hypothesis.
+
+Next investigate:
+
+```text
+full eight-step same-weight orchestration
+sampler state transitions
+recurrent DiT state
+latent layout
+```
+
+At that point a full same-W8 Python/Swift loop oracle becomes worth the effort.
+
+---
+
+## Case E — W8 crashes or looks much worse than W4
+
+Treat this as a new runtime W8 implementation bug.
+
+Debug:
+
+```text
+W8 matrix span
+W8 row stride
+W8 group indexing
+W8 direct matvec
+W8 loader dtype
+```
+
+before changing quantizer math.
+
+---
+
+# 63. What NOT to do before the first W4/W8 result
+
+Do not implement:
+
+```text
+group32
+group16
+GPTQ
+AWQ
+activation calibration
+Hessian optimization
+FP16 matrix path
+another sampler
+another VAE
+new seed
+new prompt
+new sigmas
+new source checkpoint
+```
+
+The first experiment is intentionally:
+
+```text
+same source
+same GROUP=64
+same runtime graph
+better W4
+vs
+W8
+```
+
+---
+
+# 64. Long-term model storage policy
+
+Going forward:
+
+## Hugging Face
+
+Use for:
+
+```text
+production/refinement .animapk model packs
+quant reports worth retaining
+model cards
+model license notices
+packing manifests
+```
+
+## GitHub repository
+
+Use for:
+
+```text
+source code
+packer
+runtime
+tests
+workflows
+small fixtures
+documentation
+hash manifests
+```
+
+## GitHub Actions artifacts
+
+Use for:
+
+```text
+PNG comparisons
+metrics
+logs
+small CI reports
+short-lived diagnostic data
+```
+
+## GitHub Releases
+
+The existing `model-assets-v1` can remain as historical/legacy distribution.
+
+Do not immediately delete it.
+
+Do not upload every experimental pack there.
+
+---
+
+# 65. Qwen/VAE migration to Hugging Face is optional and deferred
+
+Do not spend this cycle moving the existing Qwen/VAE files merely for architectural purity.
+
+They already exist and work.
+
+The immediate comparison can use:
+
+```text
+new DiT from HF
+existing Qwen/VAE source
+```
+
+After a winning DiT variant exists, a later cleanup task can decide whether all three production packs should live on Hugging Face.
+
+That migration is low priority.
+
+---
+
+# 66. ModelStore changes are deferred until a winner exists
+
+Do not immediately change the shipping app's `ModelManifest` to point at experimental HF URLs.
+
+The refinement CI can inject/download the packs independently.
+
+Only when one of:
+
+```text
+W4-v2
+W8-v2
+mixed-v2
+```
+
+is chosen should production model metadata change.
+
+That prevents churn.
+
+---
+
+# 67. Suggested commit sequence
+
+Use reviewable commits.
+
+For example:
+
+```text
+docs: enter AnimaXS refinement phase
+
+ci: reset selected simulator before pack-free tests
+
+tools: preserve recovered v1 packer
+
+tools: add bounded-memory ANIMAPK v2 writer
+
+tools: add W4 optimized and W8 quantization
+
+tools: add quant reports and ANIMAPK verifier
+
+test: add packer row-boundary regression fixtures
+
+runtime: generalize DiT matrices to W4 and W8
+
+metal: add W8 fp32 direct matvec
+
+test: add W8 matvec parity
+
+ci: add HF-backed W4/W8 packing workflow
+
+ci: add HF-backed W4/W8 full inference matrix
+
+docs: record W4/W8 refinement results
+```
+
+Push useful checkpoints.
+
+Do not leave all of this in one giant final commit.
+
+---
+
+# 68. New TODO.md
+
+Create:
+
+```markdown
+# AnimaXS Refine TODO
+
+## Repository / docs
+
+- [ ] Fetch and verify current origin/main.
+- [ ] Create refinement branch.
+- [ ] Archive superseded operational runbooks/TODOs.
+- [ ] Install new RUNBOOK.md.
+- [ ] Refresh STATUS.md.
+- [ ] Refresh NEXT_TASK_HANDOFF.md.
+- [ ] Refresh TEST_MATRIX.md.
+- [ ] Keep DECISIONS.md append-only.
+- [ ] Add refinement-phase decision.
+
+## D072
+
+- [ ] Add selected-simulator erase before pack-free CI tests.
+- [ ] Run normal CI.
+- [ ] Confirm DiagnosticsTests deterministic.
+- [ ] Record D072 remediation as a new decision.
+
+## Hugging Face infrastructure
+
+- [ ] Locate HF token under /root without exposing it.
+- [ ] Add HF_TOKEN as GitHub repository secret.
+- [ ] Verify secret presence without reading value.
+- [ ] Determine HF account namespace.
+- [ ] Create/prepare AnimaXS-DiT-W4 repo.
+- [ ] Create/prepare AnimaXS-DiT-W8 repo.
+- [ ] Include required model licenses/notices.
+
+## Source provenance
+
+- [ ] Resolve full HF revision for circlestone-labs/Anima.
+- [ ] Download only anima-turbo-v1.0.safetensors.
+- [ ] Verify source SHA c0b905...2174.
+- [ ] Pin full HF revision in packing workflow.
+
+## Legacy packer
+
+- [ ] Preserve recovered pack_anima.py unchanged.
+- [ ] Verify/archive its SHA.
+- [ ] Never edit the archived copy.
+
+## Packer v2
+
+- [ ] Implement dry-plan.
+- [ ] Implement bounded-memory/direct output writer.
+- [ ] Keep ANMA v1.
+- [ ] Keep 16-KiB blob alignment.
+- [ ] Keep group size 64.
+- [ ] Preserve per-row group reset.
+- [ ] Preserve W4 nibble convention.
+- [ ] Use stored FP16 scale/zero when choosing Q.
+- [ ] Implement W4 deterministic MSE-range search.
+- [ ] Implement W8 affine quantization.
+- [ ] Implement per-matrix W4/W8 precision map.
+- [ ] Keep rank<=1 FP16.
+- [ ] Add finite-value validation.
+- [ ] Add streaming quant statistics.
+- [ ] Add provenance metadata.
+- [ ] Add blob SHA256 metadata.
+- [ ] Add independent verify_animapk.py.
+- [ ] Add [2,68] W4 regression.
+- [ ] Add [2,65] W8 regression.
+
+## DiT runtime
+
+- [ ] Add common W4/W8 matrix factory.
+- [ ] Generalize DiT preparation matrices.
+- [ ] Generalize block matrices.
+- [ ] Generalize final-layer matrices.
+- [ ] Add w8_matvec_f32 Metal kernel.
+- [ ] Centralize direct-matvec dispatch.
+- [ ] Confirm W4 behavior unchanged.
+- [ ] Add focused W8 matvec parity test.
+
+## Packing workflow
+
+- [ ] Create pack-dit-v2.yml.
+- [ ] Use ubuntu-latest.
+- [ ] Use separate matrix jobs for W4 and W8.
+- [ ] Download source directly from pinned HF revision.
+- [ ] Verify source SHA before packing.
+- [ ] Run dry-plan.
+- [ ] Pack W4-v2.
+- [ ] Pack W8-v2.
+- [ ] Verify both packs.
+- [ ] Upload W4 directly to HF.
+- [ ] Upload W8 directly to HF.
+- [ ] Upload only small reports as GitHub artifacts.
+- [ ] Record HF revisions and output SHAs.
+
+## Full inference
+
+- [ ] Add W4-v2/W8-v2 matrix workflow.
+- [ ] Download exact SHA-pinned DiT packs from HF.
+- [ ] Keep Qwen unchanged.
+- [ ] Keep VAE unchanged.
+- [ ] Keep canonical prompt.
+- [ ] Keep canonical seed/noise.
+- [ ] Keep sampler sigmas.
+- [ ] Run W4-v2 full inference.
+- [ ] Run W8-v2 full inference.
+- [ ] Capture generated/reference/comparison PNGs.
+- [ ] Record latent metrics.
+- [ ] Record RGB metrics.
+- [ ] Record timings.
+- [ ] Compare visible pattern/color quality.
+
+## Decision
+
+- [ ] Compare legacy W4 vs W4-v2 vs W8-v2.
+- [ ] Select W4-v2 if clean enough.
+- [ ] Otherwise select W8-v2 if clean.
+- [ ] Otherwise make ONE mixed W4/W8 follow-up if evidence supports it.
+- [ ] If W8 remains equally bad, stop repacking and investigate full-loop orchestration.
+
+## Finish cycle
+
+- [ ] Append final decisions.
+- [ ] Update STATUS.md.
+- [ ] Update TEST_MATRIX.md.
+- [ ] Update NEXT_TASK_HANDOFF.md.
+- [ ] Record exact GitHub run IDs.
+- [ ] Record exact HF repo revisions.
+- [ ] Record exact model SHA256s.
+- [ ] Ensure working tree is clean.
+- [ ] Push all useful work.
+```
+
+---
+
+# 69. TEST_MATRIX.md should include
+
+At minimum:
+
+```text
+TEST                          W4-v2      W8-v2
+------------------------------------------------
+packer tiny fixture            □           □
+offline pack verification      □           □
+Swift parser opens pack        □           □
+matrix byte layout             □           □
+finite scale/zero              □           □
+W4/W8 decoder test             □           □
+direct matvec parity           □           □
+normal CI green                □           □
+source SHA verified            □           □
+HF upload verified             □           □
+HF download SHA verified       □           □
+canonical full inference       □           □
+8 finite sampler steps         □           □
+generated PNG                  □           □
+latent metrics recorded        □           □
+RGB metrics recorded           □           □
+timings recorded               □           □
+visual comparison              □           □
+```
+
+---
+
+# 70. Required execution-agent final report
+
+Do not return merely:
+
+> “All tasks complete.”
+
+Return this exact level of information:
+
+```text
+REPOSITORY
+----------
+origin/main at start:
+refinement branch:
+final HEAD:
+working tree:
+
+DOCUMENTATION
+-------------
+old runbooks archived:
+new RUNBOOK:
+new TODO:
+STATUS:
+TEST_MATRIX:
+DECISIONS entries added:
+
+D072
+----
+workflow change:
+normal CI run:
+project-consistency:
+iphone-build:
+simulator tests:
+DiagnosticsTests:
+unexpected failures:
+
+HF INFRASTRUCTURE
+-----------------
+HF namespace:
+HF token secret configured:
+W4 HF repo:
+W8 HF repo:
+licenses/notices present:
+
+SOURCE
+------
+HF source repo:
+HF source revision:
+source path:
+source bytes:
+source SHA256:
+expected SHA matched:
+
+PACKER V1
+---------
+archived path:
+SHA256:
+
+PACKER V2
+---------
+commit:
+group:
+W4 algorithm:
+W8 algorithm:
+mixed precision support:
+bounded-memory confirmed:
+peak RAM if measured:
+
+W4-v2
+-----
+GitHub packing run:
+packing job:
+filename:
+bytes:
+SHA256:
+quant report:
+verification:
+HF repo:
+HF revision:
+HF upload verified:
+
+W8-v2
+-----
+GitHub packing run:
+packing job:
+filename:
+bytes:
+SHA256:
+quant report:
+verification:
+HF repo:
+HF revision:
+HF upload verified:
+
+FULL INFERENCE W4-v2
+--------------------
+GitHub run:
+DiT SHA verified:
+Qwen SHA:
+VAE SHA:
+latent cosine:
+latent RMSE:
+latent MAE:
+latent maxAbs:
+RGB cosine:
+RGB RMSE:
+RGB MAE:
+RGB maxAbs:
+Qwen time:
+adapter time:
+diffusion time:
+VAE time:
+total time:
+image artifact:
+visual description:
+
+FULL INFERENCE W8-v2
+--------------------
+GitHub run:
+DiT SHA verified:
+Qwen SHA:
+VAE SHA:
+latent cosine:
+latent RMSE:
+latent MAE:
+latent maxAbs:
+RGB cosine:
+RGB RMSE:
+RGB MAE:
+RGB maxAbs:
+Qwen time:
+adapter time:
+diffusion time:
+VAE time:
+total time:
+image artifact:
+visual description:
+
+COMPARISON
+----------
+legacy W4:
+W4-v2:
+W8-v2:
+
+pattern:
+color:
+prompt adherence:
+detail:
+metrics:
+speed:
+size:
+
+RECOMMENDATION
+--------------
+winning current representation:
+reason:
+
+mixed follow-up required:
+yes/no
+
+remaining numerical blocker:
+remaining visual blocker:
+remaining infrastructure blocker:
+
+NEXT TASK:
+```
+
+---
+
+# 71. Hard stop conditions
+
+Stop and investigate immediately if:
+
+```text
+source SHA differs from c0b905...2174
+
+HF source revision cannot be pinned
+
+HF token appears in logs
+
+HF token lacks write access
+
+required licensing files are missing
+
+W4-v2 malformed
+
+W8-v2 malformed
+
+scale/zero contains NaN/Inf
+
+v2 pack cannot be opened by real Swift parser
+
+legacy W4 numerical behavior changes merely from runtime generalization
+
+W8 synthetic matvec fails
+
+HF uploaded model SHA cannot be reconciled with packing manifest
+
+full-inference workflow downloads a different pack revision
+
+canonical prompt/seed changes
+
+GitHub packing job approaches six-hour timeout without progress
+
+runner disk becomes critically low
+```
+
+Do not lower validation standards to get around these failures.
+
+---
+
+# 72. Explicitly forbidden during this cycle
+
+Do not:
+
+```text
+use Clore.ai
+
+store source weights on VPS
+
+build multi-GB packs on VPS
+
+upload multi-GB packs as GitHub Actions artifacts
+
+split W8 into chunks
+
+reassemble model chunks
+
+repack Qwen
+
+repack VAE
+
+change the VAE graph
+
+change PNG gamma/colors to hide defects
+
+change the canonical prompt
+
+change the canonical seed
+
+change initial noise
+
+change sampler sigmas
+
+change source checkpoint
+
+implement group32 before W4/W8 results
+
+implement GPTQ/AWQ before W4/W8 results
+
+implement FP16 rank-2 execution before W8 results
+
+create separate DiT W4/W8 inference graphs
+
+lower quality thresholds and call bad output fixed
+
+commit .animapk into the GitHub source repository
+
+print HF_TOKEN
+
+commit HF_TOKEN
+
+use unpinned "latest" HF weights for accepted inference
+```
+
+---
+
+# 73. Definition of done for this refinement cycle
+
+This cycle is done when:
+
+```text
+✓ current origin/main was verified before work
+
+✓ project entered refinement mode
+
+✓ old operational TODO/runbook material archived
+
+✓ DECISIONS preserved append-only
+
+✓ D072 made deterministic
+
+✓ normal CI green
+
+✓ recovered v1 packer preserved
+
+✓ packer v2 committed
+
+✓ packer v2 genuinely bounded-memory
+
+✓ v2 uses stored FP16 scale/zero for quantization
+
+✓ W4 range optimization implemented
+
+✓ W8 implemented
+
+✓ per-matrix W4/W8 architecture implemented
+
+✓ pack verifier implemented
+
+✓ synthetic row-boundary regressions green
+
+✓ GitHub HF_TOKEN secret configured securely
+
+✓ source downloaded directly by Actions from Hugging Face
+
+✓ source revision pinned
+
+✓ source SHA verified
+
+✓ W4 and W8 packed on separate GitHub Linux runners
+
+✓ no source or new packs stored on VPS
+
+✓ W4 uploaded directly to dedicated HF repo
+
+✓ W8 uploaded directly to dedicated HF repo
+
+✓ both HF revisions recorded
+
+✓ both model SHA256 values recorded
+
+✓ DiT runtime supports W4/W8 through one graph
+
+✓ W8 direct FP32 matvec tested
+
+✓ existing W4 path remains unchanged
+
+✓ canonical W4-v2 full inference completed
+
+✓ canonical W8-v2 full inference completed
+
+✓ both generated PNGs captured
+
+✓ both latent metrics recorded
+
+✓ both RGB metrics recorded
+
+✓ both timing results recorded
+
+✓ actual images visually compared
+
+✓ evidence-based W4/W8/mixed recommendation made
+```
+
+---
+
+# 74. Core engineering philosophy
+
+The project no longer needs to prove that all the pieces can connect.
+
+They already connect.
+
+The refinement cycle should therefore optimize for **large, informative experiments** rather than a sequence of tiny speculative fixes.
+
+The first experiment is deliberately simple:
+
+```text
+                ORIGINAL ANIMA TURBO
+                       │
+              exact same source SHA
+                       │
+              ┌────────┴─────────┐
+              │                  │
+              ▼                  ▼
+         improved W4            W8
+              │                  │
+              └────────┬─────────┘
+                       │
+                  same runtime
+                       │
+                same prompt/noise
+                       │
+                 same Qwen/VAE
+                       │
+              canonical inference
+                       │
+              ┌────────┴─────────┐
+              ▼                  ▼
+           W4 PNG              W8 PNG
+```
+
+Then look at the actual result.
+
+If W8 fixes the image, we know where to focus.
+
+If improved W4 fixes it, even better.
+
+If neither fixes it, stop spending time on quantization and move upstream to the full recurrent sampler/DiT loop.
+
+That is the shortest path toward making AnimaXS produce genuinely good images rather than merely passing its existing tests.

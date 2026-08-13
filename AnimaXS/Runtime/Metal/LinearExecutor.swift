@@ -235,3 +235,61 @@ final class LinearExecutor {
         return result
     }
 }
+
+/// Shared validation and construction for all rank-2 DiT/adapter matrices.
+/// W4 and W8 use the same row-major group-64 span layout; only the packed row
+/// stride and direct matvec kernel differ.
+enum DiTQuantizedWeightFactory {
+    static let groupSize = 64
+
+    static func makeMatrix(
+        _ item: AnimapkTensorSpans,
+        ring: MTLBuffer,
+        rows: Int,
+        columns: Int,
+        label: String
+    ) throws -> QuantizedLinearWeightBuffers {
+        let storage = item.tensor.storage
+        guard storage == .w4 || storage == .w8 else {
+            throw AnimapkError.validation("\(label) must be W4 or W8")
+        }
+        guard item.tensor.shape == [rows, columns] else {
+            throw AnimapkError.validation("\(label) shape mismatch")
+        }
+        guard let scale = item.scale, let zero = item.zero else {
+            throw AnimapkError.validation("\(label) missing scale/zero")
+        }
+        let rowStride = storage == .w4 ? (columns + 1) / 2 : columns
+        let groupsPerRow = (columns + groupSize - 1) / groupSize
+        let expectedData = rows * rowStride
+        let expectedParameters = rows * groupsPerRow * MemoryLayout<Float16>.stride
+        guard item.data.length == UInt64(expectedData),
+              scale.length == UInt64(expectedParameters),
+              zero.length == UInt64(expectedParameters),
+              item.data.offset <= UInt64(Int.max),
+              scale.offset <= UInt64(Int.max),
+              zero.offset <= UInt64(Int.max) else {
+            throw AnimapkError.validation("\(label) quantized layout mismatch")
+        }
+        return QuantizedLinearWeightBuffers(
+            storage: storage,
+            packed: ring,
+            packedOffset: Int(item.data.offset),
+            scale: ring,
+            scaleOffset: Int(scale.offset),
+            zero: ring,
+            zeroOffset: Int(zero.offset),
+            rows: rows,
+            columns: columns,
+            packedRowStride: rowStride)
+    }
+
+    static func matvecKernel(for storage: StorageDtype) throws -> String {
+        switch storage {
+        case .w4: return "w4_matvec_f32"
+        case .w8: return "w8_matvec_f32"
+        default:
+            throw AnimapkError.validation("DiT direct matvec requires W4 or W8")
+        }
+    }
+}
