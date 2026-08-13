@@ -9,6 +9,14 @@ from torch import nn
 import torch.nn.functional as F
 
 
+class Embedding(nn.Embedding):
+    """manual_cast-style embedding: output in out_dtype (default input dtype)."""
+
+    def forward(self, x, out_dtype=None):
+        dt = out_dtype if out_dtype is not None else x.dtype
+        return F.embedding(x, self.weight.to(dt))
+
+
 class Linear(nn.Linear):
     def forward(self, x):
         w = self.weight.to(x.dtype)

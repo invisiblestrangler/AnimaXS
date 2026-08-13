@@ -20,13 +20,17 @@ class _Ck:
             q = rms(q, q_scale)
         if k_scale is not None:
             k = rms(k, k_scale)
-        # rope_emb: [1, S, 1, 1, 64, 2, 2] -> [S, 64, 2, 2]
-        rope = rope_emb.squeeze(0).squeeze(1).squeeze(1) if rope_emb.ndim == 7 else rope_emb
+        # rope_emb arrives in one of several shapes ([L,64,2,2] from the
+        # pos_embedder, or with leading singleton dims after the _forward's
+        # unsqueeze chain: [1,L,1,1,64,2,2] / [1,L,1,64,2,2]).
+        rope = rope_emb.squeeze()  # -> [L, 64, 2, 2]
         cos = rope[..., 0, 0].unsqueeze(0).unsqueeze(2)  # [1,S,1,64]
         sin = rope[..., 1, 0].unsqueeze(0).unsqueeze(2)
         for t in (q, k):
-            a = t[..., :64]
-            b = t[..., 64:]
+            # IMPORTANT: clone halves — t[..., :64] is a VIEW; writing it first
+            # would alias the second-half computation (rotate uses original a).
+            a = t[..., :64].clone()
+            b = t[..., 64:].clone()
             t[..., :64] = cos * a - sin * b
             t[..., 64:] = sin * a + cos * b
         return q, k
