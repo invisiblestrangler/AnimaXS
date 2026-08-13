@@ -116,7 +116,7 @@ def main():
         print(f"== capture {variant} ==")
         vel, caps = fn()
         save_captures(args.out, variant, caps)
-        return caps
+        return {k: (v.detach().cpu() if isinstance(v, torch.Tensor) else v) for k, v in caps.items()}
 
     provenance = {
         "fixture": fixture_manifest,
