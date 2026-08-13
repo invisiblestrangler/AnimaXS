@@ -111,6 +111,7 @@ final class FullInferenceTests: XCTestCase {
         let cross = try XCTUnwrap(context.device.makeBuffer(
             length: LLMAdapterMetal.maximumTokens * LLMAdapterMetal.hidden * 4,
             options: .storageModeShared))
+        var adapterSeconds = 0.0
         if diagnosticConfig("golden_dit_context") == "1" {
             let ditContextURL = try requiredFixture(
                 envKey: "ANIMAXS_DIT_CONTEXT_FILE", name: "case1_dit_context.f32")
@@ -128,7 +129,7 @@ final class FullInferenceTests: XCTestCase {
             try await adapter.execute(
                 qwenContext: qwenOutput, contextTokens: qwenTokenIDs.count,
                 t5IDs: t5IDs, t5Weights: t5Weights, output: cross, layerCompleted: nil)
-            let adapterSeconds = Date().timeIntervalSince(adapterStart)
+            adapterSeconds = Date().timeIntervalSince(adapterStart)
             print("FULL_DIT_CONTEXT=production (\\(adapterSeconds)s)")
         }
         XCTAssertTrue(isFinite(cross), "cross-context must be finite")
