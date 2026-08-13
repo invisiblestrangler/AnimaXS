@@ -17,15 +17,16 @@ env:
   SOURCE_FILE: split_files/text_encoders/qwen_3_06b_base.safetensors
   SOURCE_SHA256: cd2a512003e2f9f3cd3c32a9c3573f820bb28c940f73c57b1ddaa983d9223eba
   QWEN_FILE: qwen3-0.6b-xsmax-fp16-matrices.animapk
+  DIT_FILE: anima-turbo-v1.0-xsmax-fp16-all.animapk
   W8_REPO: ScalingBiz/AnimaXS-DiT-W8
   W8_REVISION: 589d028122f872e66ee20cdd12cb55eb3b816add
   W8_FILE: anima-turbo-v1.0-xsmax-w8-v2.animapk
   W8_SHA256: 8b63c7fd9b5872805e5a2ba799ab6d79989c54a6a89a4f34edf022c59c9ed130
 
 jobs:
-  pack-qwen:
+  pack-candidates:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -58,7 +59,29 @@ jobs:
             --source-sha256 "$SOURCE_SHA256" --report "$RUNNER_TEMP/qwen-pack-report.json" --verify
           python scripts/verify_animapk.py "$out" --report "$RUNNER_TEMP/qwen-verify.json"
           sha256sum "$out" | tee "$RUNNER_TEMP/qwen-pack.sha256"
-      - name: Upload Qwen candidate
+      - name: Download and verify pinned DiT source
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          source="$RUNNER_TEMP/dit-source.safetensors"
+          curl --fail --location --retry 3 --retry-all-errors --progress-bar \
+            -H "Authorization: Bearer $HF_TOKEN" -o "$source" \
+            "https://huggingface.co/$SOURCE_REPO/resolve/$SOURCE_REVISION/split_files/diffusion_models/anima-turbo-v1.0.safetensors?download=true"
+          echo "c0b905034510750a505d21aa96c81718f4ffcc500777318421f58a88636e2174  $source" | sha256sum --check
+          echo "DIT_SOURCE=$source" >> "$GITHUB_ENV"
+      - name: Pack all DiT matrices as source FP16
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/$DIT_FILE"
+          python scripts/pack_anima.py --component dit --input "$DIT_SOURCE" --out "$out" \
+            --quant w8 --precision-map scripts/dit-all-fp16.json \
+            --source-repo "$SOURCE_REPO" --source-revision "$SOURCE_REVISION" \
+            --source-sha256 c0b905034510750a505d21aa96c81718f4ffcc500777318421f58a88636e2174 \
+            --report "$RUNNER_TEMP/dit-pack-report.json" --verify
+          python scripts/verify_animapk.py "$out" --report "$RUNNER_TEMP/dit-verify.json"
+          sha256sum "$out" | tee "$RUNNER_TEMP/dit-pack.sha256"
+      - name: Upload candidates
         uses: actions/upload-artifact@v4
         with:
           name: qwen-fp16-pack-${{ github.sha }}
@@ -69,9 +92,13 @@ jobs:
             ${{ runner.temp }}/qwen-pack-report.json
             ${{ runner.temp }}/qwen-verify.json
             ${{ runner.temp }}/qwen-pack.sha256
+            ${{ runner.temp }}/${{ env.DIT_FILE }}
+            ${{ runner.temp }}/dit-pack-report.json
+            ${{ runner.temp }}/dit-verify.json
+            ${{ runner.temp }}/dit-pack.sha256
 
   full-image:
-    needs: pack-qwen
+    needs: pack-candidates
     runs-on: macos-15
     timeout-minutes: 110
     steps:
@@ -92,25 +119,18 @@ jobs:
             --output "$RUNNER_TEMP/xcodegen.zip"
           echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
           ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP"
-      - name: Download Qwen candidate
+      - name: Download packed candidates
         uses: actions/download-artifact@v5
         with:
           name: qwen-fp16-pack-${{ github.sha }}
-          path: ${{ runner.temp }}/qwen-candidate
-      - name: Download existing source-FP16 DiT candidate
-        uses: actions/download-artifact@v5
-        with:
-          name: w8-sensitive-pack-07ac546932e18c7016468a3ed6d13a99425a6afc
-          path: ${{ runner.temp }}/dit-candidate
-          run-id: "31688194943"
-          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/candidates
       - name: Prepare highest-fidelity fixtures
         run: |
           set -euo pipefail
           fixture="AnimaXSTests/Fixtures/Case1Binary"
-          cp "$RUNNER_TEMP/qwen-candidate/$QWEN_FILE" "$fixture/qwen3-0.6b-xsmax-w8.animapk"
-          cp "$RUNNER_TEMP/dit-candidate/anima-w8-sensitive-fp16.animapk" "$fixture/anima-turbo-refine.animapk"
-          (cd "$RUNNER_TEMP/dit-candidate" && shasum -a 256 --check sha256.txt)
+          cp "$RUNNER_TEMP/candidates/$QWEN_FILE" "$fixture/qwen3-0.6b-xsmax-w8.animapk"
+          cp "$RUNNER_TEMP/candidates/$DIT_FILE" "$fixture/anima-turbo-refine.animapk"
+          (cd "$RUNNER_TEMP/candidates" && sha256sum -c dit-pack.sha256)
           curl --fail --location --retry 3 --retry-all-errors -o "$fixture/qwen-image-vae-xsmax-fp16.animapk" \
             https://github.com/invisiblestrangler/AnimaXS/releases/download/model-assets-v1/qwen-image-vae-xsmax-fp16.animapk
           echo "10171af0b826927b75fecf4482aaa0e268254874e694a0788ebdd8c4254fc447  $fixture/qwen-image-vae-xsmax-fp16.animapk" | shasum -a 256 --check
