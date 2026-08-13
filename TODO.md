@@ -22,9 +22,11 @@ Phase 2/4 — same-W8 reference and first-divergence localization.
 
 ## Phase 2 — same-W8 reference
 
-- [ ] Generate exact-dequantized-W8 source evidence on Linux Actions.
-- [ ] Compare high-precision and Swift-like mixed precision at block 0.
-- [ ] Record cosine, RMSE, maxAbs, norms, and exact provenance.
+- [x] Generate exact-dequantized-W8 source evidence on Linux Actions.
+- [x] Compare high-precision and Swift-like mixed precision at block 0.
+- [x] Record cosine, RMSE, maxAbs, norms, and exact provenance (run
+  `31678571617`). Metal-vs-exact-W8 relative L2 is `0.00019` self,
+  `0.00088` cross, and `0.00023` MLP; block 0 runtime is healthy.
 
 ## Phase 3 — attention investigation
 
@@ -33,7 +35,8 @@ Phase 2/4 — same-W8 reference and first-divergence localization.
 - [x] Run focused macOS attention precision tests.
 - [x] Reject FP32 attention as the primary fix — local RMSE improved ~5x,
   but final W8 latent cosine improved only `+0.00047` in run `31676322657`.
-- [ ] Run same-W8 block-0 parity and first-divergence localization.
+- [x] Run same-W8 block-0 parity.
+- [ ] Run first-divergence localization across later blocks/steps.
 
 ## Phase 4 — localize divergence
 
