@@ -2,6 +2,7 @@ name: Quality W8 latent candidate
 
 on:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
