@@ -1,0 +1,197 @@
+# Step-0 backend parity matrix (manual dispatch only — no push trigger).
+#
+# Runs the EXACT same C/D/E .animapk packs through AnimaXS Metal on the
+# simulator, capturing per-block step-0 boundaries (same canonical noise,
+# context, sigma as the CUDA ladder), then uploads the captures for
+# CUDA-vs-Metal comparison (scripts/animapk_cuda/backend_compare.py).
+#
+# Variants:
+#   fp16-all  ScalingBiz/AnimaXS-DiT-FP16-ALL  (rebuilt deterministically)
+#   w8        ScalingBiz/AnimaXS-DiT-W8  (W8-v2, D077)
+#   w4        ScalingBiz/AnimaXS-DiT-W4  (W4-v2, D077)
+
+name: Quality Step-0 Backend Matrix
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+  SOURCE_REPO: circlestone-labs/Anima
+  SOURCE_REVISION: f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b
+  SOURCE_SHA256: c0b905034510750a505d21aa96c81718f4ffcc500777318421f58a88636e2174
+  QWEN_FILE: qwen3-0.6b-xsmax-w8.animapk
+  QWEN_RELEASE: model-assets-v1
+  QWEN_SHA256: ba59e4d1797de5f6512aeafcecf3f38e1f62a47313a2a400b949c9018d84ceab
+  FP16_REPO: ScalingBiz/AnimaXS-DiT-FP16-ALL
+  FP16_FILE: anima-turbo-v1.0-xsmax-fp16-all.animapk
+  FP16_SHA256: 07adee8edb53ec33d6f7422f5a860298f6e92d7e1fc0268677df98d4172cd9fb
+  W8_REPO: ScalingBiz/AnimaXS-DiT-W8
+  W8_REVISION: 589d028122f872e66ee20cdd12cb55eb3b816add
+  W8_FILE: anima-turbo-v1.0-xsmax-w8-v2.animapk
+  W8_SHA256: 8b63c7fd9b5872805e5a2ba799ab6d79989c54a6a89a4f34edf022c59c9ed130
+  W4_REPO: ScalingBiz/AnimaXS-DiT-W4
+  W4_REVISION: 06353ece23ae02bf71e89e3d7d68a814714e6216
+  W4_FILE: anima-turbo-v1.0-xsmax-w4-v2.animapk
+  W4_SHA256: 9109e502a236822d168a3e0b5dc39beb3c03d213b4bf459865815af934c8b5cf
+  CAPTURE_BLOCKS: "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27"
+
+jobs:
+  prepare-packs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Download and verify the three DiT packs
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/packs"
+          cd "$RUNNER_TEMP/packs"
+          for spec in \
+            "FP16|$FP16_REPO|$FP16_FILE" \
+            "W8|$W8_REPO|$W8_FILE" \
+            "W4|$W4_REPO|$W4_FILE"; do
+            key="${spec%%|*}"; rest="${spec#*|}"
+            repo="${rest%%|*}"; file="${rest#*|}"
+            curl --fail --location --retry 3 --retry-all-errors -sS \
+              -H "Authorization: Bearer $HF_TOKEN" \
+              -o "$file" "https://huggingface.co/$repo/resolve/main/$file?download=true"
+          done
+          echo "$FP16_SHA256  $FP16_FILE" | sha256sum --check
+          echo "$W8_SHA256  $W8_FILE" | sha256sum --check
+          echo "$W4_SHA256  $W4_FILE" | sha256sum --check
+          for f in $FP16_FILE $W8_FILE; do
+            if [ "$(stat -c%s "$f")" -gt 1900000000 ]; then
+              split -b 1500m "$f" "$f.part-"
+              rm "$f"
+            fi
+          done
+          sha256sum *.part-* > pack-parts.sha256 2>/dev/null || true
+          ls -la
+      - name: Upload packs
+        uses: actions/upload-artifact@v4
+        with:
+          name: step0-packs-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: error
+          path: ${{ runner.temp }}/packs
+
+  metal-step0:
+    needs: prepare-packs
+    runs-on: macos-15
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [fp16-all, w8, w4]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Select Xcode and ensure Metal toolchain
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          if ! xcrun --find metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+            sudo xcode-select -s "$DEVELOPER_DIR"
+          fi
+          xcodebuild -version
+      - name: Install pinned XcodeGen
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip \
+            --output "$RUNNER_TEMP/xcodegen.zip"
+          echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
+          ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+      - name: Download packs
+        uses: actions/download-artifact@v5
+        with:
+          name: step0-packs-${{ github.sha }}
+          path: ${{ runner.temp }}/packs
+          github-token: ${{ github.token }}
+      - name: Prepare fixtures for variant
+        run: |
+          set -euo pipefail
+          fixture="AnimaXSTests/Fixtures/Case1Binary"
+          cp "$RUNNER_TEMP/packs/$QWEN_FILE" "$fixture/$QWEN_FILE" 2>/dev/null || \
+            curl --fail --location --retry 3 --retry-all-errors -o "$fixture/$QWEN_FILE" \
+              https://github.com/invisiblestrangler/AnimaXS/releases/download/$QWEN_RELEASE/$QWEN_FILE
+          echo "$QWEN_SHA256  $fixture/$QWEN_FILE" | shasum -a 256 --check
+          case "${{ matrix.variant }}" in
+            fp16-all) DIT_FILE="$FP16_FILE"; DIT_SHA="$FP16_SHA256" ;;
+            w8)       DIT_FILE="$W8_FILE";    DIT_SHA="$W8_SHA256" ;;
+            w4)       DIT_FILE="$W4_FILE";    DIT_SHA="$W4_SHA256" ;;
+          esac
+          echo "DIT_SHA=$DIT_SHA" >> "$GITHUB_ENV"
+          echo "DIT_FILE=$DIT_FILE" >> "$GITHUB_ENV"
+          shopt -s nullglob
+          parts=("$RUNNER_TEMP/packs/$DIT_FILE.part-"*)
+          if ((${#parts[@]} > 0)); then
+            cat "${parts[@]}" > "$RUNNER_TEMP/$DIT_FILE"
+          else
+            cp "$RUNNER_TEMP/packs/$DIT_FILE" "$RUNNER_TEMP/$DIT_FILE"
+          fi
+          actual=$(shasum -a 256 "$RUNNER_TEMP/$DIT_FILE" | awk '{print $1}')
+          test "$actual" = "$DIT_SHA" || { echo "::error::DiT pack digest mismatch: expected $DIT_SHA got $actual"; exit 1; }
+          cp "$RUNNER_TEMP/$DIT_FILE" "$fixture/anima-turbo-refine.animapk"
+          printf '%s\n' "{\"attention_numerics\":\"legacy\",\"activation_numerics\":\"legacy\",\"golden_qwen_context\":\"1\",\"golden_dit_context\":\"1\",\"capture_trajectory\":\"1\",\"capture_blocks\":\"$CAPTURE_BLOCKS\"}" \
+            > "$fixture/quality-diagnostic.json"
+          python3 scripts/write_step0_provenance.py "$DIT_SHA"
+          "$RUNNER_TEMP/xcodegen/bin/xcodegen" generate
+        env:
+          FIXTURE_DIR: ${{ github.workspace }}/AnimaXSTests/Fixtures/Case1Binary
+          MATRIX_VARIANT: ${{ matrix.variant }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      - name: Select simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          destination=$(xcrun simctl list devices available -j | python3 -c \
+            "import json,sys; d=json.load(sys.stdin); print(next(x['udid'] for r in d['devices'].values() for x in r if 'iPhone' in x['name'] and x['isAvailable']))")
+          echo "id=$destination" >> "$GITHUB_OUTPUT"
+      - name: Build tests once
+        run: |
+          set -euo pipefail
+          xcodebuild -project AnimaXS.xcodeproj -scheme AnimaXS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}" \
+            -derivedDataPath .derivedData CODE_SIGNING_ALLOWED=NO build-for-testing
+      - name: Run step-0 capture inference
+        run: |
+          set -euo pipefail
+          xcodebuild -project AnimaXS.xcodeproj -scheme AnimaXS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}" \
+            -derivedDataPath .derivedData CODE_SIGNING_ALLOWED=NO \
+            -resultBundlePath "$RUNNER_TEMP/step0.xcresult" \
+            -only-testing:AnimaXSTests/FullInferenceTests/testCanonicalProductionInference \
+            test 2>&1 | tee "$RUNNER_TEMP/step0.log"
+          grep -q 'FULL_DIT_CONTEXT=golden' "$RUNNER_TEMP/step0.log"
+        timeout-minutes: 90
+      - name: Export step-0 captures
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/captures"
+          if [ -d "$RUNNER_TEMP/step0.xcresult" ]; then
+            xcrun xcresulttool export attachments \
+              --path "$RUNNER_TEMP/step0.xcresult" --output-path "$RUNNER_TEMP/captures"
+          fi
+          cp "$RUNNER_TEMP/step0.log" "$RUNNER_TEMP/captures/step0.log" 2>/dev/null || true
+          cp "AnimaXSTests/Fixtures/Case1Binary/provenance.json" "$RUNNER_TEMP/captures/" 2>/dev/null || true
+          cp "AnimaXSTests/Fixtures/Case1Binary/quality-diagnostic.json" "$RUNNER_TEMP/captures/" 2>/dev/null || true
+          ls -la "$RUNNER_TEMP/captures" | head -20
+      - name: Upload step-0 captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: step0-captures-${{ matrix.variant }}-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: error
+          path: ${{ runner.temp }}/captures

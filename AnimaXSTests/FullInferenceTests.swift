@@ -105,15 +105,32 @@ final class FullInferenceTests: XCTestCase {
         XCTAssertTrue(isFinite(qwenOutput), "Qwen output must be finite")
 
         // ---- 3. Adapter → crossContext [512, 1024] fp32 (DiT pack) ----
-        let adapter = try LLMAdapterMetal(context: context, file: AnimapkFile(url: ditURL))
+        // golden_dit_context=1: load the canonical source-adapter context
+        // (case1_dit_context.f32, identical bytes to the CUDA ladder fixture
+        // context512.f32) so backend parity isolates the DiT forward only.
         let cross = try XCTUnwrap(context.device.makeBuffer(
             length: LLMAdapterMetal.maximumTokens * LLMAdapterMetal.hidden * 4,
             options: .storageModeShared))
-        let adapterStart = Date()
-        try await adapter.execute(
-            qwenContext: qwenOutput, contextTokens: qwenTokenIDs.count,
-            t5IDs: t5IDs, t5Weights: t5Weights, output: cross, layerCompleted: nil)
-        let adapterSeconds = Date().timeIntervalSince(adapterStart)
+        if diagnosticConfig("golden_dit_context") == "1" {
+            let ditContextURL = try requiredFixture(
+                envKey: "ANIMAXS_DIT_CONTEXT_FILE", name: "case1_dit_context.f32")
+            let golden = try floats(from: ditContextURL)
+            XCTAssertEqual(golden.count, LLMAdapterMetal.maximumTokens * LLMAdapterMetal.hidden)
+            golden.withUnsafeBytes { bytes in
+                if let base = bytes.baseAddress {
+                    memcpy(cross.contents(), base, bytes.count)
+                }
+            }
+            print("FULL_DIT_CONTEXT=golden")
+        } else {
+            let adapter = try LLMAdapterMetal(context: context, file: AnimapkFile(url: ditURL))
+            let adapterStart = Date()
+            try await adapter.execute(
+                qwenContext: qwenOutput, contextTokens: qwenTokenIDs.count,
+                t5IDs: t5IDs, t5Weights: t5Weights, output: cross, layerCompleted: nil)
+            let adapterSeconds = Date().timeIntervalSince(adapterStart)
+            print("FULL_DIT_CONTEXT=production (\\(adapterSeconds)s)")
+        }
         XCTAssertTrue(isFinite(cross), "cross-context must be finite")
 
         // ---- 4. Diffusion: canonical golden noise → final latent ----
