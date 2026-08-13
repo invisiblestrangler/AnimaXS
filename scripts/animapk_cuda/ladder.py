@@ -72,16 +72,18 @@ def load_captures(out_dir, variant):
 
 
 def run_oracle_variant(w, dtype, x_in, context, sigma, device, mode="decoded"):
-    provider = lambda keys: w  # noqa: E731
-    model = _make_model(provider, dtype, device)
+    from animapk_cuda.runtime import LadderDiT
+    model = LadderDiT(lambda prefix: w, dtype, device)
     with torch.no_grad():
         vel, caps = model.forward(x_in, sigma, context)
     return vel, caps
 
 
-def _make_model(provider, dtype, device):
-    from animapk_cuda.runtime import LadderDiT
-    return LadderDiT(provider, dtype, device)
+def _forward_model(builder, x_in, context, sigma, device):
+    """builder() -> LadderDiT; run one step-0 forward, return (vel, caps)."""
+    model = builder()
+    with torch.no_grad():
+        return model.forward(x_in, sigma, context)
 
 
 def main():
@@ -95,12 +97,26 @@ def main():
                     help="comfy stub package root (contains REAL pinned predict2.py)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--resume", action="store_true",
+                    help="load existing caps for present variants, run missing ones, postprocess")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
     device = args.device if torch.cuda.is_available() else "cpu"
     x_in, context, sigmas, fixture_manifest = load_fixture(args.fixture)
     sigma = sigmas[0]
+
+    def have(variant):
+        return os.path.exists(os.path.join(args.out, f"caps_{variant}.npz"))
+
+    def capture(variant, fn):
+        if args.resume and have(variant):
+            print(f"-- resume: loading {variant} captures")
+            return load_captures(args.out, variant)
+        print(f"== capture {variant} ==")
+        vel, caps = fn()
+        save_captures(args.out, variant, caps)
+        return caps
 
     provenance = {
         "fixture": fixture_manifest,
@@ -114,24 +130,24 @@ def main():
     }
 
     # ---- A: actual pinned upstream (ComfyUI) bf16 ----
-    print("== A: upstream ComfyUI bf16 ==")
-    model_up, _ = up.load_upstream(args.comfy, args.source, dtype=torch.bfloat16, device=device)
-    vel_a, caps_a = up.capture_forward(model_up, x_in, sigma, context, device=device)
-    # align upstream hook names with oracle capture names
-    caps_a["post_final_projection_patched"] = caps_a["final_layer_out"]
-    caps_a["post_unpatchify_velocity"] = vel_a
-    save_captures(args.out, "A_upstream_bf16", caps_a)
+    def _capture_a():
+        model_up, _ = up.load_upstream(args.comfy, args.source, dtype=torch.bfloat16, device=device)
+        vel_a, caps_a = up.capture_forward(model_up, x_in, sigma, context, device=device)
+        caps_a["post_final_projection_patched"] = caps_a["final_layer_out"]
+        caps_a["post_unpatchify_velocity"] = vel_a
+        return vel_a, caps_a
+    caps_a = capture("A_upstream_bf16", _capture_a)
+
+    # source weights (needed for B and the decoder parity audit)
+    w_src = dso.load_weights(args.source)  # bf16 CPU
 
     # ---- A2 / B: source-oracle transcription ----
-    print("== A2/B: oracle transcription ==")
-    w_src = dso.load_weights(args.source)  # bf16 CPU (LadderDiT moves per-block)
     w_bf16 = w_src
     w_fp16 = {k: v.float().half() for k, v in w_src.items()}
-
-    vel_a2, caps_a2 = run_oracle_variant(w_bf16, torch.bfloat16, x_in, context, sigma, device)
-    save_captures(args.out, "A2_oracle_bf16", caps_a2)
-    vel_b, caps_b = run_oracle_variant(w_fp16, torch.float16, x_in, context, sigma, device)
-    save_captures(args.out, "B_oracle_fp16", caps_b)
+    caps_a2 = capture("A2_oracle_bf16",
+                      lambda: run_oracle_variant(w_bf16, torch.bfloat16, x_in, context, sigma, device))
+    caps_b = capture("B_oracle_fp16",
+                     lambda: run_oracle_variant(w_fp16, torch.float16, x_in, context, sigma, device))
 
     # ---- C/D/E: packs, decoded_reference + streaming ----
     packs = {
@@ -146,14 +162,12 @@ def main():
             prov = pk.provenance()
             provenance["packs"][variant] = {"path": path, "sha256": prov["sha256"], "size": prov["size"],
                                             "source": prov["source"], "packer": prov["packer"]}
-            dr = DecodedReference(pk, torch.float16, device)
-            with torch.no_grad():
-                vel_dr, caps_dr = dr.forward(x_in, sigma, context)
-            save_captures(args.out, f"{variant}_decoded", caps_dr)
-            sm = StreamingAnimapk(pk, torch.float16, device)
-            with torch.no_grad():
-                vel_sm, caps_sm = sm.forward(x_in, sigma, context)
-            save_captures(args.out, f"{variant}_streaming", caps_sm)
+            caps_dr = capture(f"{variant}_decoded",
+                              lambda pk=pk: _forward_model(lambda: DecodedReference(pk, torch.float16, device),
+                                                           x_in, context, sigma, device))
+            caps_sm = capture(f"{variant}_streaming",
+                              lambda pk=pk: _forward_model(lambda: StreamingAnimapk(pk, torch.float16, device),
+                                                           x_in, context, sigma, device))
             caps_pack[variant] = caps_dr
 
     # ---- per-stage comparisons ----
