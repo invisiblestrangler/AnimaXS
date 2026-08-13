@@ -227,7 +227,8 @@ class DitTimesteps:
 
     def __call__(self, timesteps, dtype):
         half_dim = DIM // 2
-        exponent = -np.log(10000.0) * torch.arange(half_dim, dtype=torch.float32) / half_dim
+        exponent = -np.log(10000.0) * torch.arange(half_dim, dtype=torch.float32,
+                                                   device=timesteps.device) / half_dim
         emb = torch.exp(exponent)
         emb = timesteps.float().flatten()[:, None] * emb[None, :]
         out = torch.cat([torch.cos(emb), torch.sin(emb)], dim=-1)
