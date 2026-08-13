@@ -3,32 +3,30 @@
 - **Base main:** `45c28f44697253e20385edeab662c8db8098c55f`.
 - **Investigation branch/worktree:** `investigate/dit-quality-runtime` at
   `/root/AnimaXS-quality`.
-- **Current phase:** BF16 compute-mode quality matrix (handoff §8/§9).
-- **Latest evidence — run `31701142683` (run #29, commit `357bfb1`) is a
-  LEGACY control, NOT a BF16 run:** `FULL_ACTIVATION_NUMERICS=legacy`,
-  `FULL_ATTENTION_NUMERICS=legacy`, `FULL_QWEN_CONTEXT=production`. Metrics:
-  latent cosine `0.8120` (RMSE `0.8696`, maxAbs `3.4669`), RGB cosine `0.7921`
-  (RMSE `0.4391`, MAE `0.3708`), 384.10 s total. This is the highest-fidelity
-  legacy baseline. The true `bf16_compute` experiment had NOT run as of this
-  status.
-- **Defect baseline (run #29 PNGs, `scripts/measure_grid_carrier.py`,
-  2026-08-13):** generated exact-8px carrier total `0.01345363`, reference
-  `0.00005484`, ratio `~245x`; horizontal-stripe bins `1082x`, vertical-stripe
-  `113x`. (Calibration differs from the handoff's quoted `0.01228284`/`347.6x`
-  because normalization/axis conventions differ; same strong periodic
-  signature, orders of magnitude above reference.)
-- **Provenance fixed in workflow commit:** candidate artifacts now carry
-  `provenance.json` (commit/run_id/run_attempt/workflow/ref/variant + exact
-  Qwen/DiT/VAE pack identity incl. source revision + packed SHA-256/bytes) and
-  `metrics.txt` records real commit/run ID instead of `<injected-by-workflow>`.
-- **Workflow efficiency fixed:** `quality-investigation.yml` is manual-dispatch
-  only (push trigger removed); `quality-qwen-fp16.yml` packs once and runs the
-  macOS full-image variants in a parallel matrix; pack reuse via
-  `pack_artifact_run_id`/`pack_artifact_sha` skips repacking.
-- **Historical decisions:** D082–D087 recorded (attention FP32 rejected,
-  block parity tight, BF16 residual-boundary rejected, source-FP16 ceilings
-  leave the grid). Qwen golden-context isolation run `31691143106` was block
-  captures only — no comparable full-image golden result existed, so the new
-  matrix includes `legacy-golden-qwen` as a directly comparable control.
+- **Current phase:** source-oracle trajectory parity (the decisive DiT
+  forward-vs-source experiment, run `31724606040` in flight).
+- **BF16 matrix result (run `31711438180`):** BF16 arithmetic is contributory
+  but NOT sufficient. bf16+golden-Qwen: latent `0.8344`, RGB `0.8420`;
+  legacy+golden: `0.8120`/`0.7924`; legacy+production (run #29 control):
+  `0.8120`/`0.7921`; bf16+production: `0.8086`/`0.7853`. The exact-8px grid
+  carrier is unchanged across ALL variants (~0.0132–0.0140 vs reference
+  `0.000055`, ~245–254x) and the image is still visibly etched/woven.
+- **Qwen branch closed (Case E):** golden Qwen context ≈ production Qwen under
+  legacy arithmetic (`0.8120` vs `0.8120`); the validated W8/fp16 Qwen path is
+  not the grid cause.
+- **Sampler/scheduler audit cleared (D090):** Swift sigma schedule == golden
+  trace exactly; Euler/denoised/initial-latent/final-handoff match the pinned
+  source (old-form flux_time_shift shift=3.0/timesteps=1000 vs the pinned
+  snapshot's exp-form — a ComfyUI-version difference, not a Swift bug).
+- **Source oracle built (`scripts/dit_source_oracle.py`):** runs the pinned
+  Anima model (predict2.py + position_embedding.py + anima/model.py LLMAdapter)
+  in torch on the native-bf16 safetensors; per-step velocity parity vs Swift's
+  captured trajectory + end-to-end source run vs the golden fixtures.
+- **Carrier baseline (`scripts/measure_grid_carrier.py`):** generated total
+  `0.01345` vs reference `0.0000548` (~245x; dominant horizontal-stripe bins
+  ~1082x).
+- **Provenance:** workflow-injected `provenance.json` (commit/run_id/attempt/
+  ref/variant + Qwen/DiT/VAE identity incl. packed SHA-256/bytes) — artifacts
+  are self-describing; metrics.txt carries real commit/run IDs.
 - **Completion truth:** old 0.65 regression floors are not the acceptance
   gate; no current image is reference-comparable (severe woven/etched grid).
