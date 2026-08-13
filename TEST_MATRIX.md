@@ -1,15 +1,19 @@
-# AnimaXS Refinement Test Matrix
+# AnimaXS Final Quality Test Matrix
 
-| Area | Test/evidence | Acceptance |
-|---|---|---|
-| ANMA parser | Real Swift parser opens each v2 pack | PASS; W4/W8 independent reports have zero errors and 685 CRC entries |
-| Quantization | Synthetic W4 `[2,68]`, W8 `[2,65]` | PASS; row groups reset and nibble/byte decode exact |
-| Packer | Dry plan, finite source, bounded writer, verifier | PASS; both source-pinned packs written and independently verified |
-| HF publication | Dedicated W4/W8 model repositories | PASS; immutable revisions, sizes, SHA-256 recorded in D077 |
-| Metal | W4/W8 dequant and direct matvec | PASS; W8 K=65 direct matvec parity and full pack inference |
-| Runtime | Shared W4/W8 DiT graph | PASS; normal CI is green with 153 tests, 13 skips, 0 failures |
-| Inference | Canonical W4-v2 and W8-v2 matrix jobs, run `31671198927` | Evidence complete; both completed 8 steps/224 blocks and captured PNGs; W8 `PASS`, W4 `FAIL` by quality floor |
-| Quality | Generated vs canonical reference images | W8-v2 selected: RGB cosine 0.7171 and visibly cleaner than legacy/W4-v2; fine grid texture remains |
+| Class | Test/evidence | Runner | Cost | Status / key metric |
+|---|---|---|---|---|
+| Historical baseline | W8-v2 canonical full inference, run `31671198927` | macOS | full image | Verified: latent `0.7522`, RGB `0.7171`, RGB RMSE `0.4850`; visible fine grid remains |
+| Historical baseline | W4-v2 canonical full inference, run `31671198927` | macOS | full image | Verified rejected: latent `0.6488`, RGB `0.6111`, RGB RMSE `0.5476` |
+| Pack fidelity | Exact W8 reconstruction, run `31666871623` | Linux | pack | Verified: cosine `0.999987`, RMSE `0.004517` |
+| Pack fidelity | Exact W4 reconstruction, run `31666871623` | Linux | pack | Verified: cosine `0.996461`, RMSE `0.070897` |
+| Cheap source/reference | Same-W8 block-0 precision modes | Linux | cheap diagnostic | Pending |
+| Attention numerics | Legacy vs FP32 score/softmax vs independent reference | macOS | focused | Pending |
+| Block parity | Same-input W8 block 0 | Linux + macOS | focused | Pending |
+| Multi-block parity | W8 step-0 block drift CSV | Linux + macOS | moderate | Pending |
+| Latent inference | Eight-step W8 candidate | macOS | expensive latent | Pending; baseline `0.7522` |
+| Full image | Canonical generated/reference/comparison PNG | macOS | full image | Pending; must be visibly reference-comparable |
+| Production regression | Generic iPhone build + simulator tests | macOS | normal CI | Historical main green; rerun required for final candidate |
 
-The historical legacy W4 RGB cosine floor is a structural regression check, not
-the image-quality acceptance criterion for this refinement cycle.
+Metrics from different SHAs, packs, source revisions, or numerical modes must
+not be compared without recording those differences. Artifacts must upload even
+when assertions fail.

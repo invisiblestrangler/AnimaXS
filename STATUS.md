@@ -1,40 +1,19 @@
-# STATUS — AnimaXS (keep short & current)
+# Current Project Status
 
-- **Current milestone:** The runbook refinement cycle is complete. The project
-  now has bounded ANMA-v1 W4/W8 packing, one shared W4/W8 DiT runtime graph,
-  independent pack verification, HF provenance, and exact full-inference image
-  evidence.
-- **Refinement implementation:** `df1ac1b` is merged on `main`. The only
-  untracked path is the pre-existing user artifact
-  `scripts/oracle_out/block0/`.
-- **Normal CI:** main run `31671071004` is **SUCCESS** — project consistency,
-  iPhone build, and simulator tests all pass; 153 tests, 13 expected skips,
-  0 failures. The simulator is shut down and erased before pack-free tests.
-- **Source pin:** `circlestone-labs/Anima` revision
-  `f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b`, source SHA-256
-  `c0b905034510750a505d21aa96c81718f4ffcc500777318421f58a88636e2174`.
-- **Published DiT derivatives:** W4-v2 is
-  `ScalingBiz/AnimaXS-DiT-W4`, revision
-  `06353ece23ae02bf71e89e3d7d68a814714e6216`, 1,187,479,552 bytes, SHA-256
-  `9109e502a236822d168a3e0b5dc39beb3c03d213b4bf459865815af934c8b5cf`.
-  W8-v2 is `ScalingBiz/AnimaXS-DiT-W8`, revision
-  `589d028122f872e66ee20cdd12cb55eb3b816add`, 2,232,975,360 bytes, SHA-256
-  `8b63c7fd9b5872805e5a2ba799ab6d79989c54a6a89a4f34edf022c59c9ed130`.
-- **Inference decision:** Final matrix run `31671198927` completed both
-  canonical 8-step/224-block inferences and uploaded fresh artifacts. W8-v2
-  records `full_inference: PASS` with latent cosine `0.7522` and RGB cosine
-  `0.7171`; W4-v2 records `full_inference: FAIL` at latent cosine `0.6488`
-  and RGB cosine `0.6111`, below the same documented 0.65 floor. Visual
-  inspection selects W8-v2: it is substantially cleaner and more detailed
-  than the legacy W4 and W4-v2, while retaining a visible fine grid texture
-  that is recorded as the remaining quality limitation.
-- **Evidence artifacts:** the run uploads
-  `anima-xs-refine-w8-v2-images` and `anima-xs-refine-w4-v2-images`, each with
-  generated/reference/comparison PNGs, metrics, and exact pack metadata. The
-  comparison attachment is upright and directly inspectable.
-- **License scope:** non-commercial redistribution remains permitted with the
-  committed license copies/notices; commercial use remains blocked without
-  separate authorization.
-- **Device-only unknowns:** A12 speed, memory/jetsam, Apple5 behavior,
-  watchdog limits, thermal stability, and real-device install/launch remain
-  physical-device acceptance items and were not inferred from hosted Metal.
+- **Base main:** `45c28f44697253e20385edeab662c8db8098c55f`.
+- **Investigation branch/worktree:** `investigate/dit-quality-runtime` at
+  `/root/AnimaXS-quality`.
+- **Current phase:** Phase 1 baseline and runtime/oracle audit.
+- **Current best image:** W8-v2 from Actions run `31671198927`; latent cosine
+  `0.7522`, RGB cosine `0.7171`, RGB RMSE `0.4850`. It has substantially better
+  structure than W4 but retains an unacceptable fine grid/etched texture.
+- **Current leading hypothesis:** repeated DiT numerical divergence, with the
+  FP16 attention score/probability path the first suspect. This is unconfirmed.
+- **Current blockers:** none. Telegram visibility is unavailable because this
+  environment exposes no `tg_send` command or connector; work continues with
+  persistent on-disk evidence.
+- **Current running CI:** none.
+- **Next action:** audit the attention/DiT implementation and existing oracle
+  infrastructure, then add branch-only same-W8 and focused attention diagnostics.
+- **Completion truth:** old 0.65 regression floors are not the acceptance gate;
+  no current image is yet reference-comparable.

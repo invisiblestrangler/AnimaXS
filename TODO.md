@@ -1,55 +1,62 @@
-# AnimaXS Refine TODO
+# AnimaXS Final Quality TODO
 
-This checklist is the execution index for `RUNBOOK.md`. A box is checked only
-when its validation evidence exists in the repository, workflow, or recorded
-artifact.
+Reset on 2026-08-13 at base `45c28f4` for the final image-quality investigation.
+Historical work remains in git history and `DECISIONS.md`.
 
-## Repository and documentation
+Completion criterion: a canonical generated image genuinely comparable to the
+reference from W4 and/or W8 using the updated iPhone XS Max pipeline. The old
+0.65 regression floors and inference completion are not quality acceptance.
 
-- [x] Verify current `origin/main` and create `refine/packing-v2-w4-w8`.
-- [x] Archive superseded operational documents.
-- [x] Install the refinement runbook.
-- [x] Refresh status, handoff, and test matrix after the result cycle.
-- [x] Preserve `DECISIONS.md` append-only and record refinement decisions.
+## Current phase
 
-## Determinism and legacy preservation
+Phase 1 — baseline evidence and runtime/oracle audit.
 
-- [x] Reset the selected simulator before pack-free CI tests.
-- [x] Run normal CI after runtime changes and confirm D072 determinism.
-- [x] Preserve the recovered v1 packer unchanged and record its SHA.
+## Phase 1 — reset and baseline
 
-## Packer v2 and verification
+- [x] Refresh `origin/main` and record base `45c28f4`.
+- [x] Preserve the live primary checkout and create `investigate/dit-quality-runtime`.
+- [x] Read historical decisions and verify latest W4/W8 metrics/provenance.
+- [x] Reset `TODO.md`, `STATUS.md`, and `TEST_MATRIX.md`.
+- [ ] Audit attention, DiT, oracle, and full-inference implementations.
+- [ ] Create and launch branch-only diagnostics.
 
-- [x] Implement dry-plan and bounded-memory/direct output writing.
-- [x] Keep ANMA v1, 16-KiB blobs, group 64, row-reset, and W4 nibble order.
-- [x] Use stored-FP16 scale/zero values when selecting Q.
-- [x] Implement deterministic W4 MSE clipping and W8 affine quantization.
-- [x] Implement precision maps, finite checks, streaming statistics, provenance,
-      per-blob SHA-256, and an independent verifier.
-- [x] Pass synthetic W4 `[2,68]` and W8 `[2,65]` parser/decoder regressions.
+## Phase 2 — same-W8 reference
 
-## Hugging Face and packing workflow
+- [ ] Generate exact-dequantized-W8 source evidence on Linux Actions.
+- [ ] Compare high-precision and Swift-like mixed precision at block 0.
+- [ ] Record cosine, RMSE, maxAbs, norms, and exact provenance.
 
-- [x] Resolve and pin source revision `f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b`.
-- [x] Confirm source LFS SHA `c0b905034510750a505d21aa96c81718f4ffcc500777318421f58a88636e2174`.
-- [x] Configure `HF_TOKEN` securely as a GitHub secret without logging it.
-- [x] Pack W4-v2 and W8-v2 on separate fresh Ubuntu jobs.
-- [x] Verify and publish both packs directly to dedicated HF model repos.
-- [x] Record exact HF revisions, sizes, and SHA-256 values.
+## Phase 3 — attention investigation
 
-## Runtime
+- [ ] Add minimal legacy and FP32-score/softmax diagnostic modes.
+- [ ] Add an independent deterministic attention precision comparison.
+- [ ] Run focused macOS attention and block-0 parity tests.
+- [ ] Reject or promote the attention hypothesis from evidence.
 
-- [x] Add one W4/W8 DiT matrix factory and central direct-matvec dispatch.
-- [x] Generalize preparation, adapter, block, and final-layer matrices.
-- [x] Add and test the W8 FP32 Metal matvec kernel.
-- [x] Confirm legacy W4 behavior remains unchanged.
+## Phase 4 — localize divergence
 
-## Full inference and decision
+- [ ] Produce same-W8 step-0 block drift evidence and machine-readable CSV.
+- [ ] Localize the first meaningful bad block/branch.
+- [ ] If attention is insufficient, test the next repeated precision/runtime boundary.
 
-- [x] Add exact-revision W4-v2/W8-v2 matrix inference workflow.
-- [x] Keep Qwen, VAE, prompt, seed/noise, sigmas, and graph identical.
-- [x] Complete both canonical inferences and capture generated/reference/
-      comparison PNGs plus metrics and timings.
-- [x] Visually compare legacy W4, W4-v2, and W8-v2.
-- [x] Select W8-v2; W4-v2 is rejected by the same 0.65 regression floor.
-- [x] Append the final decision and refresh all handoff documents.
+## Phase 5 — promote winners
+
+- [ ] Run eight-step W8 latent-only inference for earned candidates.
+- [ ] Run full canonical RGB inference only for strong latent candidates.
+- [ ] Inspect images for grid/etched/checker artifacts and natural detail.
+- [ ] Once shared runtime improves, compare corrected W4 and W8.
+
+## Phase 6 — production and acceptance
+
+- [ ] Select and simplify the production implementation/model format.
+- [ ] Preserve streaming, tiled attention, and bounded iPhone scratch memory.
+- [ ] Record before/after latent and RGB metrics plus image artifacts.
+- [ ] Pass generic iPhone build, simulator tests, and canonical inference.
+- [ ] Clean diagnostics, update manifest/docs/decisions, integrate latest main.
+- [ ] Open the final PR and complete the requirement-by-requirement audit.
+
+## Operational visibility
+
+- [ ] Send Telegram progress/final reports when `tg_send` becomes available.
+  Current environment exposes neither the command nor a Telegram connector;
+  persistent state and repository tracking are being updated instead.
