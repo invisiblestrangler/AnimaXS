@@ -80,6 +80,19 @@ def main() -> int:
         else:
             print(f"WARNING: exported file missing: {src}")
 
+    # Trajectory/source-oracle captures (per-step x_in/denoised, fp32
+    # cross-context, sigma list) are exported under their own names so the
+    # Linux source oracle can consume them without renaming.
+    for fname in os.listdir(exported_dir):
+        lname = fname.lower()
+        if (fname.startswith("step") and fname.endswith(".f32")) \
+                or lname == "cross-context.f32" or lname == "sigmas.txt":
+            src = os.path.join(exported_dir, fname)
+            dst = os.path.join(artifacts_dir, fname)
+            if os.path.isfile(src):
+                shutil.copyfile(src, dst)
+                print(f"mapped {fname} -> {fname}")
+
     missing = [c for c in targets.values() if not os.path.isfile(os.path.join(artifacts_dir, c))]
     if missing:
         print(f"ERROR: missing canonical artifacts: {missing}")

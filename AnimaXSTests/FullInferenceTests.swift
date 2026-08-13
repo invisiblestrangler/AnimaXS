@@ -139,6 +139,8 @@ final class FullInferenceTests: XCTestCase {
         var completedSteps = 0
         var blockCallbacks = 0
         var stepLatents: [[Float]] = []
+        let captureTrajectory = diagnosticConfig("capture_trajectory") == "1"
+        var trajectoryXIn: [Float]? = captureTrajectory ? read(initial) : nil
         let captureBlocks = Set((diagnosticConfig("capture_blocks") ??
             (diagnosticConfig("capture_block0") == "1" ? "0" : ""))
             .split(separator: ",").compactMap { Int($0) })
@@ -149,10 +151,33 @@ final class FullInferenceTests: XCTestCase {
             blockProgress: { _, _ in
                 blockCallbacks += 1
             },
-            stepCompleted: { step, _, _, _, latent in
+            stepCompleted: { step, _, _, denoised, latent in
                 stepSeconds.append(Date().timeIntervalSince(diffusionStart))
                 completedSteps += 1
                 stepLatents.append(self.read(latent))
+                if captureTrajectory {
+                    // Per-step source-oracle capture (handoff section 11/13):
+                    // x_i entering the step and the fp32 denoised output, from
+                    // which the oracle reconstructs Swift's velocity
+                    // v_i = (x_i - denoised_i) / sigma_i.
+                    if let xIn = trajectoryXIn {
+                        self.attachBuffer(from: xIn,
+                                          name: String(format: "step%02d_x_in.f32", step))
+                    }
+                    self.attachBuffer(denoised, bytes: DiffusionSampler.latentElements * 4,
+                                      name: String(format: "step%02d_denoised.f32", step))
+                    trajectoryXIn = self.read(latent)
+                    if step == 0 {
+                        self.attachBuffer(cross, bytes: 512 * 1_024 * 4,
+                                          name: "cross-context.f32")
+                        let sigmas = EulerSampler.sigmas.map { String(format: "%.8f", $0) }
+                            .joined(separator: ",")
+                        let sigmasAttachment = XCTAttachment(string: sigmas + "\n")
+                        sigmasAttachment.name = "sigmas.txt"
+                        sigmasAttachment.lifetime = .keepAlways
+                        self.add(sigmasAttachment)
+                    }
+                }
                 print("FULL_DIFFUSION_STEP_\(step)_SECONDS=\(String(format: "%.2f", stepSeconds[step]))")
             },
             diagnosticStepPrepared: { step, residual, embedding, adaln, crossHalf, rope in
@@ -416,6 +441,15 @@ final class FullInferenceTests: XCTestCase {
         precondition(buffer.length >= bytes)
         let attachment = XCTAttachment(
             data: Data(bytes: buffer.contents(), count: bytes),
+            uniformTypeIdentifier: UTType.data.identifier)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func attachBuffer(from values: [Float], name: String) {
+        let attachment = XCTAttachment(
+            data: values.withUnsafeBytes { Data($0) },
             uniformTypeIdentifier: UTType.data.identifier)
         attachment.name = name
         attachment.lifetime = .keepAlways
