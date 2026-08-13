@@ -55,7 +55,7 @@ jobs:
             --quant w8 --precision-map scripts/qwen-fp16-matrices.json \
             --source-repo "$SOURCE_REPO" --source-revision "$SOURCE_REVISION" \
             --source-sha256 "$SOURCE_SHA256" --report "$RUNNER_TEMP/qwen-pack-report.json" --verify
-          python scripts/verify_animapk.py "$out" --json > "$RUNNER_TEMP/qwen-verify.json"
+          python scripts/verify_animapk.py "$out" --report "$RUNNER_TEMP/qwen-verify.json"
           sha256sum "$out" | tee "$RUNNER_TEMP/qwen-pack.sha256"
       - name: Upload Qwen candidate
         uses: actions/upload-artifact@v4
