@@ -78,8 +78,8 @@ def parse_precision_map(path: str | None, default: str) -> tuple[str, list[dict[
     for entry in value.get("overrides", []):
         match = entry.get("match")
         storage = entry.get("storage")
-        if not isinstance(match, str) or storage not in ("w4", "w8"):
-            raise ValueError("precision-map overrides require match and w4/w8 storage")
+        if not isinstance(match, str) or storage not in ("w4", "w8", "fp16"):
+            raise ValueError("precision-map overrides require match and w4/w8/fp16 storage")
         overrides.append({"match": match, "storage": storage})
     return base, overrides, hashlib.sha256(raw).hexdigest()
 

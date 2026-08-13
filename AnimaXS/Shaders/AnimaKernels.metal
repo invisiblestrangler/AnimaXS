@@ -564,6 +564,36 @@ kernel void w8_matvec_f32(
     if (tid == 0) out[row] = partial[0];
 }
 
+kernel void fp16_matvec_f32(
+    device const half  *packed     [[buffer(0)]],
+    device const half  *unusedScale [[buffer(1)]],
+    device const half  *unusedZero [[buffer(2)]],
+    device const float *input      [[buffer(3)]],
+    device float       *out        [[buffer(4)]],
+    constant uint      &K          [[buffer(5)]],
+    constant uint      &rows       [[buffer(6)]],
+    constant uint      &rowStride  [[buffer(7)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint3 threads [[threads_per_threadgroup]])
+{
+    uint row = group.x;
+    if (row >= rows) return;
+    uint threadCount = threads.x;
+    float sum = 0.0f;
+    for (uint k = tid; k < K; k += threadCount) {
+        sum = fma(input[k], float(packed[row * rowStride + k]), sum);
+    }
+    threadgroup float partial[256];
+    partial[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) out[row] = partial[0];
+}
+
 // Stable row softmax. Scores/probabilities are fp16 at MPS boundaries, while
 // max, exp, and sum are evaluated and reduced in fp32.
 kernel void attention_softmax_rows(
