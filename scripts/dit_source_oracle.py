@@ -194,11 +194,16 @@ def apply_split_half_rope(q, k, rope):
 
 
 def adapter_rope(seq_len, head_dim=64, dtype=torch.float32):
-    """LLMAdapter RotaryEmbedding (anima/model.py:20-40), theta 10000."""
+    """LLMAdapter RotaryEmbedding (anima/model.py:20-40), theta 10000.
+    Returns (cos, sin) shaped [1, seq_len, head_dim] exactly like the
+    validated anima_adapter_oracle.py rotary_emb (batch-first), so
+    apply_rotate_half's unsqueeze(1) broadcasts with head-major q/k."""
     inv_freq = 1.0 / (10000.0 ** (torch.arange(0, head_dim, 2).float() / head_dim))
-    pos = torch.arange(seq_len).float().unsqueeze(1)
-    freqs = pos @ inv_freq.unsqueeze(0)
-    emb = torch.cat([freqs, freqs], dim=-1)
+    pos = torch.arange(seq_len).float().unsqueeze(0)  # [1, S]
+    inv_freq_expanded = inv_freq[None, :, None].float().expand(1, -1, 1)  # [1,32,1]
+    pos_expanded = pos[:, None, :].float()            # [1,1,S]
+    freqs = (inv_freq_expanded @ pos_expanded).transpose(1, 2)  # [1,S,32]
+    emb = torch.cat([freqs, freqs], dim=-1)           # [1,S,64]
     return emb.cos().to(dtype), emb.sin().to(dtype)
 
 
