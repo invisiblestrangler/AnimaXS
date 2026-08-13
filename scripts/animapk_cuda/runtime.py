@@ -3,16 +3,20 @@
 Two explicit CUDA/Python modes over the same validated source-oracle graph
 (scripts/dit_source_oracle.py):
 
-  decoded_reference  — decode all pack tensors into a normal weights dict,
-                       run the full graph.  Byte-faithful correctness oracle.
+  decoded_reference  — decode all pack tensors into a normal weights dict
+                       (CPU fp32), run the full graph.  Byte-faithful
+                       correctness oracle.
   streaming_animapk  — mmap the pack, copy the current execution range into a
-                       reusable device byte ring, decode W4/W8/FP16 into
-                       reusable fp16 scratch, run the stage, overwrite the ring
-                       for the next range.  Mirrors the production AnimaXS
-                       weight lifecycle (D047: serial one-slot loop).
+                       reusable device byte ring, decode W4/W8/FP16 into fp32
+                       scratch, run the stage, overwrite the ring for the next
+                       range.  Mirrors the production AnimaXS weight lifecycle
+                       (D047: serial one-slot loop — decode block N, run block
+                       N, ring overwritten by block N+1).
 
 Both modes run the IDENTICAL graph math and capture the same per-block and
-final-path tensors in one forward.
+final-path tensors in one forward.  Weights are held CPU-side and moved to the
+device per block at forward time, so peak GPU memory is one block's weights +
+activations (bounded), matching the production ring budget.
 """
 
 from __future__ import annotations
@@ -26,7 +30,6 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import dit_source_oracle as dso  # noqa: E402
 
-from .quant import fp16_bytes_to_tensor  # noqa: E402
 from .reader import build_execution_manifest  # noqa: E402
 
 GROUP = 64
@@ -84,30 +87,27 @@ def _weight_from_ring(ring, item, base_local):
 
 class LadderDiT:
     """Source-oracle DiT graph with per-block capture; weights come from a
-    stage provider so decoded_reference and streaming share one forward."""
+    stage provider so decoded_reference and streaming share one forward.
+
+    Provider contract: callable(keys) -> {stripped_name: fp32 CPU tensor}.
+    Blocks are built lazily per forward call (decode/run interleave).
+    """
 
     def __init__(self, provider, dtype, device):
         self.dtype = dtype
         self.device = device
-        self._provider = provider  # callable(list-of-keys) -> {name: tensor}
-        self.w = {}
-        self._load_static()
-        self.rope = dso.dit_rope().to(dtype).to(device)
-
-    def _load_static(self):
+        self._provider = provider
         w = self._provider(["x_embedder", "t_embedder", "t_embedding_norm"])
-        self.x_proj = w["x_embedder.proj.1.weight"].to(self.device)
+        self.x_proj = w["x_embedder.proj.1.weight"]
         self.t_emb = dso.DitTimestepEmbedding(w)
-        self.t_norm = w["t_embedding_norm.weight"].to(self.device)
-        self.t_emb.w1 = self.t_emb.w1.to(self.device)
-        self.t_emb.w2 = self.t_emb.w2.to(self.device)
-        self.blocks = []
-        for i in range(dso.NUM_BLOCKS):
-            wb = self._provider([f"blocks.{i}"])
-            self.blocks.append(dso.DitBlock(wb, i))
-        self.final = dso.DitFinalLayer(self._provider(["final_layer"]))
-        _to_device(self.blocks, self.device)
-        _to_device(self.final, self.device)
+        self.t_norm = w["t_embedding_norm.weight"]
+        self.final_w = self._provider(["final_layer"])
+        self.rope = dso.dit_rope().to(dtype)
+
+    def _block(self, i):
+        wb = self._provider([f"blocks.{i}"])
+        blk = dso.DitBlock(wb, i)
+        return _to_device(blk, self.device)
 
     def forward(self, x, sigma, context, capture=True):
         dt, dev = self.dtype, self.device
@@ -117,28 +117,35 @@ class LadderDiT:
         x17 = torch.cat([x, pm], dim=1)
         tokens = dso.DitModel.patchify(self, x17)
         caps["pre_x_embedder_tokens"] = tokens
-        emb_tok = dso.linear(tokens.reshape(1, dso.TOKENS, 68), self.x_proj)
+        emb_tok = dso.linear(tokens.reshape(1, dso.TOKENS, 68), self.x_proj.to(dev))
         emb_tok = emb_tok.reshape(1, 1, 32, 32, dso.DIM)
         caps["x_embedder_out"] = emb_tok
         t_emb_raw = dso.DitTimesteps()(torch.tensor([sigma], device=dev), dt)
+        self.t_emb.w1 = self.t_emb.w1.to(dev)
+        self.t_emb.w2 = self.t_emb.w2.to(dev)
         emb, adaln = self.t_emb(t_emb_raw)
         emb = emb.unsqueeze(1)
         adaln = adaln.unsqueeze(1)
-        emb = dso.rms_norm(emb, self.t_norm)
+        emb = dso.rms_norm(emb, self.t_norm.to(dev))
         caps["timestep_emb"] = emb
         caps["adaln_lora"] = adaln
         context = context.to(dev).to(dt)
         caps["context"] = context
         caps["rope_sha256"] = hashlib.sha256(self.rope.cpu().float().numpy().tobytes()).hexdigest()
-        for i, blk in enumerate(self.blocks):
+        for i in range(dso.NUM_BLOCKS):
+            blk = self._block(i)
             if capture:
                 caps[f"block{i:02d}_in"] = emb_tok.detach().float().cpu()
-            emb_tok = blk.forward(emb_tok, emb, adaln, context, self.rope)
+            emb_tok = blk.forward(emb_tok, emb, adaln, context, self.rope.to(dev))
             if capture:
                 caps[f"block{i:02d}_out"] = emb_tok.detach().float().cpu()
+            del blk
+            if dev.startswith("cuda"):
+                torch.cuda.empty_cache()
         emb_tok = emb_tok.to(context.dtype)
         caps["pre_final_norm"] = emb_tok.detach().float().cpu()
-        out = self.final.forward(emb_tok, emb, adaln)
+        final = _to_device(dso.DitFinalLayer(self.final_w), dev)
+        out = final.forward(emb_tok, emb, adaln)
         caps["post_final_projection_patched"] = out.detach().float().cpu()
         vel = self.model_unpatchify(out)
         caps["post_unpatchify_velocity"] = vel.detach().float().cpu()
@@ -154,31 +161,28 @@ class LadderDiT:
 
 
 class DecodedReference(LadderDiT):
-    """Mode 1: full decode into a plain weights dict."""
+    """Mode 1: full decode into a plain weights dict (CPU fp32)."""
 
-    def __init__(self, pack, dtype, device, decode_dtype=torch.float32):
+    def __init__(self, pack, dtype, device):
         self.pack = pack
         self.full = {}
+        from .quant import decode_tensor_from_pack
         for item in pack.tensor_meta:
             name = str(item["name"])
             if name.startswith("model.diffusion_model."):
                 name = name[len("model.diffusion_model."):]
-            self.full[name] = _decode_from_pack(pack, item, device, decode_dtype)
-        self._stage_keys = None
-
-        def provider(keys):
-            return {k: self.full[k] for k in keys}
-
-        super().__init__(provider, dtype, device)
-
-
-def _decode_from_pack(pack, item, device, dtype):
-    from .quant import decode_tensor_from_pack
-    return decode_tensor_from_pack(pack, item, device=device, dtype=dtype)
+            self.full[name] = decode_tensor_from_pack(pack, item, device="cpu")
+        super().__init__(lambda keys: {k: self.full[k] for k in keys}, dtype, device)
 
 
 class StreamingAnimapk(LadderDiT):
-    """Mode 2: lifecycle-faithful ring runtime (serial one-slot loop, D047)."""
+    """Mode 2: lifecycle-faithful ring runtime (serial one-slot loop, D047).
+
+    One reusable device ring holds the raw bytes of the current execution
+    range; each provider call overwrites the ring with the requested stage and
+    decodes into fresh fp32 scratch.  Bounded memory: max(raw range) ring +
+    per-stage scratch.  No stage results persist between calls.
+    """
 
     def __init__(self, pack, dtype, device):
         self.pack = pack
@@ -186,26 +190,20 @@ class StreamingAnimapk(LadderDiT):
         self.ranges = {r["key"]: r for r in self.manifest["ranges"]}
         self.max_range = max(r["end"] - r["start"] for r in self.manifest["ranges"])
         self.ring = torch.zeros(self.max_range, dtype=torch.uint8, device=device)
-        self._stage_cache = {}
 
         def provider(keys):
             out = {}
             for key in keys:
-                if key in self._stage_cache:
-                    out.update(self._stage_cache[key])
-                    continue
                 r = self.ranges[key]
                 raw = bytes(pack.blob[r["start"]:r["end"]])
                 n = len(raw)
                 src = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
                 self.ring[:n].copy_(src, non_blocking=True)
-                w = {}
+                ring_view = self.ring[:n]
                 for t in r["tensors"]:
                     item = pack.meta_by_offset(t["global_offset"])
                     local = t["global_offset"] - r["start"]
-                    w[t["name"]] = _weight_from_ring(self.ring[:n], item, local)
-                self._stage_cache[key] = w
-                out.update(w)
+                    out[t["name"]] = _weight_from_ring(ring_view, item, local).cpu()
             return out
 
         super().__init__(provider, dtype, device)
