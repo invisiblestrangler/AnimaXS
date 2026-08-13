@@ -109,6 +109,50 @@ final class AttentionExecutorTests: XCTestCase {
         print("ATTENTION_GQA_GROUPED=PASS mapping=0,0,1,1")
     }
 
+    func testFP32ScoresAndSoftmaxImprovesIndependentReferenceParity() async throws {
+        let context = try requireContext()
+        let queryCount = 19, keyCount = 37, dim = 64
+        let query = (0..<(queryCount * dim)).map {
+            Float16(sin(Float(($0 * 31 + 7) % 997) * 0.023) * 1.7)
+        }
+        let key = (0..<(keyCount * dim)).map {
+            Float16(cos(Float(($0 * 17 + 11) % 991) * 0.029) * 1.5)
+        }
+        let value = (0..<(keyCount * dim)).map {
+            Float16(sin(Float(($0 * 13 + 5) % 983) * 0.019) * 2.0)
+        }
+        let legacyOut = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * dim * 2, options: .storageModeShared))
+        let fp32Out = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * dim * 2, options: .storageModeShared))
+
+        let q = makeHalfBuffer(query, context: context)
+        let k = makeHalfBuffer(key, context: context)
+        let v = makeHalfBuffer(value, context: context)
+        try await AttentionExecutor(context: context, numerics: .legacy).execute(
+            query: q, key: k, value: v, output: legacyOut,
+            heads: 1, queryCount: queryCount, keyCount: keyCount, headDim: dim)
+        let fp32Executor = AttentionExecutor(context: context, numerics: .fp32ScoresAndSoftmax)
+        XCTAssertEqual(try fp32Executor.maximumScoreScratchBytes(keyCount: keyCount),
+                       128 * keyCount * 4)
+        try await fp32Executor.execute(
+            query: q, key: k, value: v, output: fp32Out,
+            heads: 1, queryCount: queryCount, keyCount: keyCount, headDim: dim)
+
+        let legacy = readHalf(legacyOut, count: queryCount * dim)
+        let fp32 = readHalf(fp32Out, count: queryCount * dim)
+        let reference = (0..<queryCount).flatMap {
+            attentionRowFP32(row: $0, query: query, key: key, value: value,
+                             keyCount: keyCount, dim: dim)
+        }
+        let legacyMetrics = metrics(legacy, reference)
+        let fp32Metrics = metrics(fp32, reference)
+        print("ATTN_MODE=legacy ATTN_COSINE=\(legacyMetrics.cosine) ATTN_RMSE=\(legacyMetrics.rmse) ATTN_MAX_ABS=\(legacyMetrics.maxAbs)")
+        print("ATTN_MODE=fp32_scores_softmax ATTN_COSINE=\(fp32Metrics.cosine) ATTN_RMSE=\(fp32Metrics.rmse) ATTN_MAX_ABS=\(fp32Metrics.maxAbs)")
+        XCTAssertLessThan(fp32Metrics.rmse, legacyMetrics.rmse)
+        XCTAssertLessThanOrEqual(fp32Metrics.maxAbs, legacyMetrics.maxAbs)
+    }
+
     private func attentionRow(
         row: Int, query: [Float16], key: [Float16], value: [Float16],
         keyCount: Int, dim: Int
@@ -133,5 +177,47 @@ final class AttentionExecutorTests: XCTestCase {
             }
         }
         return result.map { Float(Float16($0)) }
+    }
+
+    private func attentionRowFP32(
+        row: Int, query: [Float16], key: [Float16], value: [Float16],
+        keyCount: Int, dim: Int
+    ) -> [Float] {
+        let scale = 1 / sqrt(Float(dim))
+        var scores = [Float](repeating: 0, count: keyCount)
+        for keyRow in 0..<keyCount {
+            var dot: Float = 0
+            for column in 0..<dim {
+                dot += Float(query[row * dim + column]) * Float(key[keyRow * dim + column])
+            }
+            scores[keyRow] = dot * scale
+        }
+        let maximum = scores.max()!
+        let exponentials = scores.map { exp($0 - maximum) }
+        let sum = exponentials.reduce(0, +)
+        var result = [Float](repeating: 0, count: dim)
+        for keyRow in 0..<keyCount {
+            let probability = exponentials[keyRow] / sum
+            for column in 0..<dim {
+                result[column] += probability * Float(value[keyRow * dim + column])
+            }
+        }
+        return result
+    }
+
+    private func metrics(_ actual: [Float], _ expected: [Float])
+        -> (cosine: Float, rmse: Float, maxAbs: Float) {
+        var dot: Float = 0, actualNorm: Float = 0, expectedNorm: Float = 0
+        var squaredError: Float = 0, maxAbs: Float = 0
+        for (a, e) in zip(actual, expected) {
+            dot += a * e
+            actualNorm += a * a
+            expectedNorm += e * e
+            let error = abs(a - e)
+            squaredError += error * error
+            maxAbs = max(maxAbs, error)
+        }
+        return (dot / sqrt(actualNorm * expectedNorm),
+                sqrt(squaredError / Float(actual.count)), maxAbs)
     }
 }

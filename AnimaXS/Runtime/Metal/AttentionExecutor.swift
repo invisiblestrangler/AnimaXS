@@ -2,6 +2,11 @@ import Foundation
 import Metal
 import MetalPerformanceShaders
 
+enum AttentionNumerics: String, CaseIterable {
+    case legacy
+    case fp32ScoresAndSoftmax
+}
+
 /// Query-tiled scaled dot-product attention over tightly packed fp16 tensors.
 /// Layout is `[heads, rows, headDim]`; only one `[tileRows,keyCount]` score tile
 /// is retained. The executor is intentionally non-reentrant because it reuses scratch.
@@ -11,17 +16,22 @@ final class AttentionExecutor {
     private let context: MetalContext
     private let buffers: BufferPool
     let tileRows: Int
+    let numerics: AttentionNumerics
 
-    init(context: MetalContext, tileRows: Int = defaultTileRows) {
+    init(context: MetalContext, tileRows: Int = defaultTileRows,
+         numerics: AttentionNumerics = .legacy) {
         precondition(tileRows > 0)
         self.context = context
         self.buffers = BufferPool(device: context.device)
         self.tileRows = tileRows
+        self.numerics = numerics
     }
 
     func maximumScoreScratchBytes(keyCount: Int) throws -> Int {
         guard keyCount > 0 else { throw AnimapkError.validation("attention key count must be positive") }
-        return try checkedProduct(tileRows, keyCount, MemoryLayout<Float16>.stride)
+        let elementBytes = numerics == .legacy
+            ? MemoryLayout<Float16>.stride : MemoryLayout<Float>.stride
+        return try checkedProduct(tileRows, keyCount, elementBytes)
     }
 
     func encode(
@@ -47,6 +57,15 @@ final class AttentionExecutor {
         let headRowBytes = headDim * halfBytes
         let scoreRowBytes = keyCount * halfBytes
         let scale = 1 / sqrt(Double(headDim))
+
+        if numerics == .fp32ScoresAndSoftmax {
+            try encodeFP32(commandBuffer: commandBuffer, query: query, queryOffset: queryOffset,
+                           key: key, keyOffset: keyOffset, value: value, valueOffset: valueOffset,
+                           output: output, outputOffset: outputOffset, heads: heads,
+                           queryCount: queryCount, keyCount: keyCount, headDim: headDim,
+                           kvHeads: kvHeads, causal: causal)
+            return
+        }
 
         for head in 0..<heads {
             let kvHead = head / (heads / kvHeads)
@@ -104,6 +123,78 @@ final class AttentionExecutor {
                     alpha: 1, beta: 0).encode(
                         commandBuffer: commandBuffer, leftMatrix: scoreMatrix,
                         rightMatrix: valueMatrix, resultMatrix: outputMatrix)
+                queryBase += rows
+            }
+        }
+    }
+
+    private func encodeFP32(
+        commandBuffer: MTLCommandBuffer,
+        query: MTLBuffer, queryOffset: Int, key: MTLBuffer, keyOffset: Int,
+        value: MTLBuffer, valueOffset: Int, output: MTLBuffer, outputOffset: Int,
+        heads: Int, queryCount: Int, keyCount: Int, headDim: Int,
+        kvHeads: Int, causal: Bool
+    ) throws {
+        let halfBytes = MemoryLayout<Float16>.stride
+        let headRowBytes = headDim * halfBytes
+        let scoreScratch = buffers.buffer(
+            key: "attention.scores.fp32", bytes: try maximumScoreScratchBytes(keyCount: keyCount))
+        let qk = try context.pipeline(named: "attention_qk_f16_to_f32")
+        let softmax = try context.pipeline(named: "attention_softmax_rows_f32")
+        let pv = try context.pipeline(named: "attention_pv_f32_f16_to_f16")
+        let scale = Float(1 / sqrt(Double(headDim)))
+
+        for head in 0..<heads {
+            let kvHead = head / (heads / kvHeads)
+            var queryBase = 0
+            while queryBase < queryCount {
+                let rows = min(tileRows, queryCount - queryBase)
+                guard let qkEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                    throw AnimapkError.validation("failed to create FP32 attention QK encoder")
+                }
+                var rowCount = UInt32(rows), columns = UInt32(keyCount)
+                var dimension = UInt32(headDim)
+                qkEncoder.setComputePipelineState(qk)
+                qkEncoder.setBuffer(query, offset: queryOffset + (head * queryCount + queryBase) * headRowBytes, index: 0)
+                qkEncoder.setBuffer(key, offset: keyOffset + kvHead * keyCount * headRowBytes, index: 1)
+                qkEncoder.setBuffer(scoreScratch, offset: 0, index: 2)
+                qkEncoder.setBytes(&rowCount, length: 4, index: 3)
+                qkEncoder.setBytes(&columns, length: 4, index: 4)
+                qkEncoder.setBytes(&dimension, length: 4, index: 5)
+                var fpScale = scale
+                qkEncoder.setBytes(&fpScale, length: 4, index: 6)
+                qkEncoder.dispatchThreads(MTLSize(width: keyCount, height: rows, depth: 1),
+                                          threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+                qkEncoder.endEncoding()
+
+                guard let softmaxEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                    throw AnimapkError.validation("failed to create FP32 attention softmax encoder")
+                }
+                var base = UInt32(queryBase), causalFlag = causal ? UInt32(1) : UInt32(0)
+                softmaxEncoder.setComputePipelineState(softmax)
+                softmaxEncoder.setBuffer(scoreScratch, offset: 0, index: 0)
+                softmaxEncoder.setBytes(&rowCount, length: 4, index: 1)
+                softmaxEncoder.setBytes(&columns, length: 4, index: 2)
+                softmaxEncoder.setBytes(&base, length: 4, index: 3)
+                softmaxEncoder.setBytes(&causalFlag, length: 4, index: 4)
+                let threads = reductionThreads(limit: softmax.maxTotalThreadsPerThreadgroup)
+                softmaxEncoder.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1))
+                softmaxEncoder.endEncoding()
+
+                guard let pvEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                    throw AnimapkError.validation("failed to create FP32 attention PV encoder")
+                }
+                pvEncoder.setComputePipelineState(pv)
+                pvEncoder.setBuffer(scoreScratch, offset: 0, index: 0)
+                pvEncoder.setBuffer(value, offset: valueOffset + kvHead * keyCount * headRowBytes, index: 1)
+                pvEncoder.setBuffer(output, offset: outputOffset + (head * queryCount + queryBase) * headRowBytes, index: 2)
+                pvEncoder.setBytes(&rowCount, length: 4, index: 3)
+                pvEncoder.setBytes(&columns, length: 4, index: 4)
+                pvEncoder.setBytes(&dimension, length: 4, index: 5)
+                pvEncoder.dispatchThreads(MTLSize(width: headDim, height: rows, depth: 1),
+                                          threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+                pvEncoder.endEncoding()
                 queryBase += rows
             }
         }

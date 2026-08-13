@@ -1,0 +1,77 @@
+name: Quality investigation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "investigate/dit-quality-*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+
+jobs:
+  focused-metal:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Select Xcode and ensure Metal toolchain
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          if ! xcrun --find metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+            sudo xcode-select -s "$DEVELOPER_DIR"
+          fi
+          xcodebuild -version
+      - name: Install pinned XcodeGen
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip \
+            --output "$RUNNER_TEMP/xcodegen.zip"
+          echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
+          ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+      - name: Regenerate project and select simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/xcodegen/bin/xcodegen" generate
+          git diff --exit-code -- project.yml AnimaXS.xcodeproj
+          destination=$(xcrun simctl list devices available -j | python3 -c \
+            "import json,sys; d=json.load(sys.stdin); print(next(x['udid'] for r in d['devices'].values() for x in r if 'iPhone' in x['name'] and x['isAvailable']))")
+          echo "id=$destination" >> "$GITHUB_OUTPUT"
+      - name: Build tests once
+        run: |
+          set -euo pipefail
+          xcodebuild -project AnimaXS.xcodeproj -scheme AnimaXS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}" \
+            -derivedDataPath .derivedData CODE_SIGNING_ALLOWED=NO build-for-testing
+      - name: Run focused attention precision diagnostics
+        run: |
+          set -euo pipefail
+          xcodebuild -project AnimaXS.xcodeproj -scheme AnimaXS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}" \
+            -derivedDataPath .derivedData CODE_SIGNING_ALLOWED=NO \
+            -only-testing:AnimaXSTests/AttentionExecutorTests \
+            test-without-building 2>&1 | tee "$RUNNER_TEMP/attention-precision.log"
+          grep -q 'ATTN_MODE=legacy' "$RUNNER_TEMP/attention-precision.log"
+          grep -q 'ATTN_MODE=fp32_scores_softmax' "$RUNNER_TEMP/attention-precision.log"
+      - name: Upload focused evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attention-precision-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: error
+          path: ${{ runner.temp }}/attention-precision.log
