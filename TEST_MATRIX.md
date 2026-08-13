@@ -7,10 +7,10 @@
 | Pack fidelity | Exact W8 reconstruction, run `31666871623` | Linux | pack | Verified: cosine `0.999987`, RMSE `0.004517` |
 | Pack fidelity | Exact W4 reconstruction, run `31666871623` | Linux | pack | Verified: cosine `0.996461`, RMSE `0.070897` |
 | Cheap source/reference | Same-W8 block-0 precision modes | Linux | cheap diagnostic | Pending |
-| Attention numerics | Legacy vs FP32 score/softmax vs independent reference | macOS | focused | Pending |
+| Attention numerics | Legacy vs FP32 score/softmax vs independent reference, run `31675825761` | macOS | focused | PASS: RMSE `2.82e-4` → `5.41e-5`; maxAbs `1.19e-3` → `2.40e-4` |
 | Block parity | Same-input W8 block 0 | Linux + macOS | focused | Pending |
 | Multi-block parity | W8 step-0 block drift CSV | Linux + macOS | moderate | Pending |
-| Latent inference | Eight-step W8 candidate | macOS | expensive latent | Pending; baseline `0.7522` |
+| Latent inference | Eight-step W8 FP32-attention candidate, run `31676322657` | macOS | expensive latent | Rejected as insufficient: cosine `0.75267`, RMSE `0.92902`, maxAbs `4.03151`; only `+0.00047` cosine |
 | Full image | Canonical generated/reference/comparison PNG | macOS | full image | Pending; must be visibly reference-comparable |
 | Production regression | Generic iPhone build + simulator tests | macOS | normal CI | Historical main green; rerun required for final candidate |
 

@@ -9,7 +9,7 @@ reference from W4 and/or W8 using the updated iPhone XS Max pipeline. The old
 
 ## Current phase
 
-Phase 1 — baseline evidence and runtime/oracle audit.
+Phase 2/4 — same-W8 reference and first-divergence localization.
 
 ## Phase 1 — reset and baseline
 
@@ -17,8 +17,8 @@ Phase 1 — baseline evidence and runtime/oracle audit.
 - [x] Preserve the live primary checkout and create `investigate/dit-quality-runtime`.
 - [x] Read historical decisions and verify latest W4/W8 metrics/provenance.
 - [x] Reset `TODO.md`, `STATUS.md`, and `TEST_MATRIX.md`.
-- [ ] Audit attention, DiT, oracle, and full-inference implementations.
-- [ ] Create and launch branch-only diagnostics.
+- [x] Audit attention, DiT, oracle, and full-inference implementations.
+- [x] Create and launch branch-only diagnostics.
 
 ## Phase 2 — same-W8 reference
 
@@ -28,10 +28,12 @@ Phase 1 — baseline evidence and runtime/oracle audit.
 
 ## Phase 3 — attention investigation
 
-- [ ] Add minimal legacy and FP32-score/softmax diagnostic modes.
-- [ ] Add an independent deterministic attention precision comparison.
-- [ ] Run focused macOS attention and block-0 parity tests.
-- [ ] Reject or promote the attention hypothesis from evidence.
+- [x] Add minimal legacy and FP32-score/softmax diagnostic modes.
+- [x] Add an independent deterministic attention precision comparison.
+- [x] Run focused macOS attention precision tests.
+- [x] Reject FP32 attention as the primary fix — local RMSE improved ~5x,
+  but final W8 latent cosine improved only `+0.00047` in run `31676322657`.
+- [ ] Run same-W8 block-0 parity and first-divergence localization.
 
 ## Phase 4 — localize divergence
 
@@ -41,7 +43,7 @@ Phase 1 — baseline evidence and runtime/oracle audit.
 
 ## Phase 5 — promote winners
 
-- [ ] Run eight-step W8 latent-only inference for earned candidates.
+- [x] Run eight-step W8 FP32-attention latent-only inference; insufficient.
 - [ ] Run full canonical RGB inference only for strong latent candidates.
 - [ ] Inspect images for grid/etched/checker artifacts and natural detail.
 - [ ] Once shared runtime improves, compare corrected W4 and W8.
