@@ -1,0 +1,229 @@
+name: Full inference refinement (W4/W8)
+
+# Required end-to-end image evidence for both published DiT derivatives.
+# The DiT rows below are immutable HF revisions produced by pack-dit-v2.yml;
+# the Qwen/VAE assets remain the exact verified production release assets.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+
+jobs:
+  full-inference:
+    runs-on: macos-15
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: w4-v2
+            storage: w4
+            hf_repo: ScalingBiz/AnimaXS-DiT-W4
+            hf_revision: 06353ece23ae02bf71e89e3d7d68a814714e6216
+            dit_file: anima-turbo-v1.0-xsmax-w4-v2.animapk
+            dit_bytes: "1187479552"
+            dit_sha256: 9109e502a236822d168a3e0b5dc39beb3c03d213b4bf459865815af934c8b5cf
+          - variant: w8-v2
+            storage: w8
+            hf_repo: ScalingBiz/AnimaXS-DiT-W8
+            hf_revision: 589d028122f872e66ee20cdd12cb55eb3b816add
+            dit_file: anima-turbo-v1.0-xsmax-w8-v2.animapk
+            dit_bytes: "2232975360"
+            dit_sha256: 8b63c7fd9b5872805e5a2ba799ab6d79989c54a6a89a4f34edf022c59c9ed130
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select Xcode 26.3 and verify SDKs
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          xcrun --sdk iphonesimulator --show-sdk-version
+          df -h
+
+      - name: Ensure Metal toolchain
+        run: |
+          set -euo pipefail
+          if ! xcrun --find metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+            sudo xcode-select -s "$DEVELOPER_DIR"
+          fi
+
+      - name: Install pinned XcodeGen
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip" \
+            --output "$RUNNER_TEMP/xcodegen.zip"
+          echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
+          ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/xcodegen/bin/xcodegen" version
+
+      - name: Find and reset an iPhone simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          DEST=$(xcrun simctl list devices available -j \
+            | python3 -c "import sys,json;d=json.load(sys.stdin);[print(dv['udid']) for rt in d['devices'].values() for dv in rt if 'iPhone' in dv['name'] and dv['isAvailable']]" \
+            | head -1)
+          [ -n "$DEST" ] || { echo "::error::No available iPhone simulator"; exit 1; }
+          xcrun simctl shutdown "$DEST" 2>/dev/null || true
+          xcrun simctl erase "$DEST"
+          echo "sim=$DEST" >> "$GITHUB_OUTPUT"
+
+      - name: Download and verify exact inference fixtures
+        env:
+          DIT_REPO: ${{ matrix.hf_repo }}
+          DIT_REVISION: ${{ matrix.hf_revision }}
+          DIT_FILE: ${{ matrix.dit_file }}
+          DIT_EXPECTED_BYTES: ${{ matrix.dit_bytes }}
+          DIT_EXPECTED_SHA: ${{ matrix.dit_sha256 }}
+        run: |
+          set -euo pipefail
+          MODEL_DIR="$RUNNER_TEMP/animaxs-refine-models"
+          mkdir -p "$MODEL_DIR"
+          echo "MODEL_DIR=$MODEL_DIR" >> "$GITHUB_ENV"
+
+          verify() {
+            local path="$1" expected_bytes="$2" expected_sha="$3"
+            local actual_bytes actual_sha
+            actual_bytes="$(wc -c < "$path" | tr -d ' ')"
+            actual_sha="$(shasum -a 256 "$path" | awk '{print $1}')"
+            printf '%s bytes expected=%s actual=%s\n' "$(basename "$path")" "$expected_bytes" "$actual_bytes"
+            printf '%s sha expected=%s actual=%s\n' "$(basename "$path")" "$expected_sha" "$actual_sha"
+            [ "$actual_bytes" = "$expected_bytes" ] || { echo "::error::size mismatch: $path"; exit 1; }
+            [ "$actual_sha" = "$expected_sha" ] || { echo "::error::SHA-256 mismatch: $path"; exit 1; }
+          }
+
+          dit="$MODEL_DIR/$DIT_FILE"
+          dit_url="https://huggingface.co/$DIT_REPO/resolve/$DIT_REVISION/$DIT_FILE?download=true"
+          curl --fail --location --retry 3 --retry-all-errors -sS -o "$dit" "$dit_url"
+          verify "$dit" "$DIT_EXPECTED_BYTES" "$DIT_EXPECTED_SHA"
+
+          release_base="https://github.com/invisiblestrangler/AnimaXS/releases/download/model-assets-v1"
+          qwen="$MODEL_DIR/qwen3-0.6b-xsmax-w8.animapk"
+          vae="$MODEL_DIR/qwen-image-vae-xsmax-fp16.animapk"
+          curl --fail --location --retry 3 --retry-all-errors -sS -o "$qwen" \
+            "$release_base/qwen3-0.6b-xsmax-w8.animapk"
+          curl --fail --location --retry 3 --retry-all-errors -sS -o "$vae" \
+            "$release_base/qwen-image-vae-xsmax-fp16.animapk"
+          verify "$qwen" "635305984" "ba59e4d1797de5f6512aeafcecf3f38e1f62a47313a2a400b949c9018d84ceab"
+          verify "$vae" "256163840" "10171af0b826927b75fecf4482aaa0e268254874e694a0788ebdd8c4254fc447"
+          df -h
+
+      - name: Bundle packs and exact provenance for the test host
+        env:
+          DIT_REPO: ${{ matrix.hf_repo }}
+          DIT_REVISION: ${{ matrix.hf_revision }}
+          DIT_FILE: ${{ matrix.dit_file }}
+          DIT_BYTES: ${{ matrix.dit_bytes }}
+          DIT_SHA: ${{ matrix.dit_sha256 }}
+          DIT_STORAGE: ${{ matrix.storage }}
+        run: |
+          set -euo pipefail
+          fixture="AnimaXSTests/Fixtures/Case1Binary"
+          cp "$MODEL_DIR/qwen3-0.6b-xsmax-w8.animapk" "$fixture/"
+          cp "$MODEL_DIR/qwen-image-vae-xsmax-fp16.animapk" "$fixture/"
+          cp "$MODEL_DIR/$DIT_FILE" "$fixture/anima-turbo-refine.animapk"
+          python3 - "$fixture/pack-metadata.json" <<'PY'
+          import json
+          import os
+          import sys
+          payload = {
+              "variant": os.environ["DIT_STORAGE"] + "-v2",
+              "hf_repo": os.environ["DIT_REPO"],
+              "hf_revision": os.environ["DIT_REVISION"],
+              "sha256": os.environ["DIT_SHA"],
+              "bytes": os.environ["DIT_BYTES"],
+              "storage": os.environ["DIT_STORAGE"],
+          }
+          with open(sys.argv[1], "w", encoding="utf-8") as handle:
+              json.dump(payload, handle, indent=2, sort_keys=True)
+              handle.write("\n")
+          PY
+
+          # The pack files are ignored and never committed. Regeneration makes
+          # them test-bundle resources, which is reliable across Xcode's
+          # simulator environment-variable forwarding behavior.
+          xcodegen generate
+
+      - name: Boot simulator
+        run: |
+          set -euo pipefail
+          xcrun simctl boot "${{ steps.sim.outputs.sim }}" 2>/dev/null || true
+          xcrun simctl bootstatus "${{ steps.sim.outputs.sim }}" -b
+
+      - name: Run required full inference
+        env:
+          ANIMAXS_REQUIRE_FULL_INFERENCE: "1"
+          ANIMAXS_QWEN_PACK: "${{ runner.temp }}/animaxs-refine-models/qwen3-0.6b-xsmax-w8.animapk"
+          ANIMAXS_DIFFUSION_PACK: "${{ runner.temp }}/animaxs-refine-models/${{ matrix.dit_file }}"
+          ANIMAXS_VAE_PACK: "${{ runner.temp }}/animaxs-refine-models/qwen-image-vae-xsmax-fp16.animapk"
+          ANIMAXS_NOISE_FILE: "${{ github.workspace }}/AnimaXSTests/Fixtures/Case1Binary/case1_noise.f32"
+          ANIMAXS_DIT_VARIANT: ${{ matrix.variant }}
+          ANIMAXS_DIT_HF_REPO: ${{ matrix.hf_repo }}
+          ANIMAXS_DIT_HF_REVISION: ${{ matrix.hf_revision }}
+          ANIMAXS_DIT_SHA256: ${{ matrix.dit_sha256 }}
+          ANIMAXS_DIT_BYTES: ${{ matrix.dit_bytes }}
+          ANIMAXS_DIT_STORAGE: ${{ matrix.storage }}
+        run: |
+          set -euo pipefail
+          set +e
+          xcodebuild \
+            -project AnimaXS.xcodeproj \
+            -scheme AnimaXS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.sim }}" \
+            -derivedDataPath .derivedData \
+            -resultBundlePath "$RUNNER_TEMP/${{ matrix.variant }}.xcresult" \
+            -only-testing:AnimaXSTests/FullInferenceTests \
+            CODE_SIGNING_ALLOWED=NO \
+            test 2>&1 | tee "$RUNNER_TEMP/${{ matrix.variant }}-full-inference.log"
+          result=${PIPESTATUS[0]}
+          set -e
+          [ "$result" -eq 0 ] || exit "$result"
+          grep -q 'FULL_INFERENCE=PASS' "$RUNNER_TEMP/${{ matrix.variant }}-full-inference.log"
+          ! grep -q 'SKIPPED_NO_METAL' "$RUNNER_TEMP/${{ matrix.variant }}-full-inference.log"
+        timeout-minutes: 90
+
+      - name: Export generated/reference/comparison/metrics attachments
+        run: |
+          set -euo pipefail
+          exported="$RUNNER_TEMP/${{ matrix.variant }}-exported"
+          artifacts="$RUNNER_TEMP/${{ matrix.variant }}-artifacts"
+          mkdir -p "$exported" "$artifacts"
+          xcrun xcresulttool export attachments \
+            --path "$RUNNER_TEMP/${{ matrix.variant }}.xcresult" \
+            --output-path "$exported"
+          python3 scripts/export_full_inference_attachments.py "$exported" "$artifacts"
+          for file in generated.png reference.png comparison.png metrics.txt pack-metadata.json; do
+            [ -s "$artifacts/$file" ] || { echo "::error::missing artifact $file"; exit 1; }
+          done
+          sed -i '' "s|^commit: .*|commit: ${{ github.sha }}|" "$artifacts/metrics.txt"
+          sed -i '' "s|^run_id: .*|run_id: ${{ github.run_id }}|" "$artifacts/metrics.txt"
+          cat "$artifacts/metrics.txt"
+          cat "$artifacts/pack-metadata.json"
+
+      - name: Upload full inference evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: anima-xs-refine-${{ matrix.variant }}-images
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/${{ matrix.variant }}-artifacts/generated.png
+            ${{ runner.temp }}/${{ matrix.variant }}-artifacts/reference.png
+            ${{ runner.temp }}/${{ matrix.variant }}-artifacts/comparison.png
+            ${{ runner.temp }}/${{ matrix.variant }}-artifacts/metrics.txt
+            ${{ runner.temp }}/${{ matrix.variant }}-artifacts/pack-metadata.json
+          if-no-files-found: error
+
+      - name: Disk report
+        if: always()
+        run: df -h
