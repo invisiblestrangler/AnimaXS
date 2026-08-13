@@ -378,7 +378,8 @@ struct LLMAdapterLocator {
         }
         let bytesPerRow = UInt64(columns * MemoryLayout<Float16>.stride)
         guard embedding.data.length == UInt64(rows) * bytesPerRow,
-              embedding.scale == nil, embedding.zero == nil else {
+              (embedding.scale?.length ?? 0) == 0,
+              (embedding.zero?.length ?? 0) == 0 else {
             throw AnimapkError.validation("adapter FP16 embedding row layout does not match metadata")
         }
         return AnimapkRelativeSpan(
