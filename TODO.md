@@ -9,7 +9,7 @@ reference from W4 and/or W8 using the updated iPhone XS Max pipeline. The old
 
 ## Current phase
 
-Phase 2/4 — same-W8 reference and first-divergence localization.
+Phase 4/6 — upstream conditioning isolation after runtime/weight ceilings.
 
 ## Phase 1 — reset and baseline
 
@@ -36,17 +36,19 @@ Phase 2/4 — same-W8 reference and first-divergence localization.
 - [x] Reject FP32 attention as the primary fix — local RMSE improved ~5x,
   but final W8 latent cosine improved only `+0.00047` in run `31676322657`.
 - [x] Run same-W8 block-0 parity.
-- [ ] Run first-divergence localization across later blocks/steps.
+- [x] Run sparse first-divergence localization across blocks 0/7/14/21/27.
 
 ## Phase 4 — localize divergence
 
-- [ ] Produce same-W8 step-0 block drift evidence and machine-readable CSV.
-- [ ] Localize the first meaningful bad block/branch.
-- [ ] If attention is insufficient, test the next repeated precision/runtime boundary.
+- [x] Produce same-W8 step-0 branch-delta evidence and machine-readable CSV.
+- [x] Reject selective late-branch FP16, all-block FP16, and all-DiT FP16 ceilings.
+- [x] Reject BF16 residual-boundary emulation.
+- [ ] Inject canonical pre-adapter Qwen context and measure end-to-end amplification.
 
 ## Phase 5 — promote winners
 
 - [x] Run eight-step W8 FP32-attention latent-only inference; insufficient.
+- [x] Run full-image source-FP16 weight ceilings; visible grid persists.
 - [ ] Run full canonical RGB inference only for strong latent candidates.
 - [ ] Inspect images for grid/etched/checker artifacts and natural detail.
 - [ ] Once shared runtime improves, compare corrected W4 and W8.

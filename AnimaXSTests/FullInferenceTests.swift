@@ -85,7 +85,22 @@ final class FullInferenceTests: XCTestCase {
         let qwenOutput = try XCTUnwrap(context.device.makeBuffer(
             length: qwenTokenIDs.count * QwenEncoderMetal.hidden * 4, options: .storageModeShared))
         let qwenStart = Date()
-        try await qwen.execute(tokenIDs: qwenTokenIDs, output: qwenOutput, layerCompleted: nil)
+        if diagnosticConfig("golden_qwen_context") == "1" {
+            let goldenURL = try requiredFixture(
+                envKey: "ANIMAXS_QWEN_CONTEXT_FILE", name: "case1_cond_context.f32")
+            let golden = try floats(from: goldenURL)
+            XCTAssertEqual(golden.count, qwenTokenIDs.count * QwenEncoderMetal.hidden)
+            golden.withUnsafeBytes { bytes in
+                if let base = bytes.baseAddress {
+                    memcpy(qwenOutput.contents(), base, bytes.count)
+                }
+            }
+            print("FULL_QWEN_CONTEXT=golden")
+        } else {
+            try await qwen.execute(
+                tokenIDs: qwenTokenIDs, output: qwenOutput, layerCompleted: nil)
+            print("FULL_QWEN_CONTEXT=production")
+        }
         let qwenSeconds = Date().timeIntervalSince(qwenStart)
         XCTAssertTrue(isFinite(qwenOutput), "Qwen output must be finite")
 
