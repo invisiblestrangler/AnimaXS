@@ -139,7 +139,11 @@ jobs:
           ((${#parts[@]} > 0)) || { echo "::error::no DiT pack chunks found"; exit 1; }
           cat "${parts[@]}" > "$RUNNER_TEMP/$DIT_FILE"
           expected=$(awk '{print $1}' "$RUNNER_TEMP/candidates/dit-pack.sha256")
-          printf '%s  %s\n' "$expected" "$RUNNER_TEMP/$DIT_FILE" | sha256sum --check
+          actual=$(shasum -a 256 "$RUNNER_TEMP/$DIT_FILE" | awk '{print $1}')
+          test "$actual" = "$expected" || {
+            echo "::error::DiT pack digest mismatch: expected $expected, got $actual"
+            exit 1
+          }
           cp "$RUNNER_TEMP/$DIT_FILE" "$fixture/anima-turbo-refine.animapk"
           curl --fail --location --retry 3 --retry-all-errors -o "$fixture/qwen-image-vae-xsmax-fp16.animapk" \
             https://github.com/invisiblestrangler/AnimaXS/releases/download/model-assets-v1/qwen-image-vae-xsmax-fp16.animapk
