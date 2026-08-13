@@ -55,7 +55,7 @@ def main():
                 "max_rel": float((diff.abs() / denom).max()),
                 "src_zeros": int((ref == 0).sum()),
                 "new_zeros": int((conv == 0).sum()) - int((ref == 0).sum()),
-                "fp16_subnormals": int((conv.abs() > 0) & (conv.abs() < 2 ** -14)),
+                "fp16_subnormals": int(((conv.abs() > 0) & (conv.abs() < 2 ** -14)).sum().item()),
                 "inf": int((conv == float("inf")).sum()) + int((conv == float("-inf")).sum()),
                 "nan": int(torch.isnan(conv).sum()),
                 "mag_min": float(conv.abs().min()),
