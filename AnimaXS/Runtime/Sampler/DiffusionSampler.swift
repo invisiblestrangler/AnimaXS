@@ -23,10 +23,12 @@ final class DiffusionSampler {
     private let stateLock = NSLock()
     private var running = false
 
-    init(context: MetalContext, file: AnimapkFile) throws {
+    init(context: MetalContext, file: AnimapkFile,
+         attentionNumerics: AttentionNumerics = .legacy) throws {
         self.context = context
         preparation = try DiTPreparationExecutor(context: context, file: file)
-        forward = try DitForward(context: context, file: file)
+        forward = try DitForward(
+            context: context, file: file, attentionNumerics: attentionNumerics)
         euler = EulerSampler(context: context)
         buffers = BufferPool(device: context.device)
 

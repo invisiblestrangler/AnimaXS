@@ -1,0 +1,91 @@
+name: Quality W8 latent candidate
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-w8-latent-${{ github.sha }}
+  cancel-in-progress: false
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+  W8_REPO: ScalingBiz/AnimaXS-DiT-W8
+  W8_REVISION: 589d028122f872e66ee20cdd12cb55eb3b816add
+  W8_FILE: anima-turbo-v1.0-xsmax-w8-v2.animapk
+  W8_BYTES: "2232975360"
+  W8_SHA: 8b63c7fd9b5872805e5a2ba799ab6d79989c54a6a89a4f34edf022c59c9ed130
+
+jobs:
+  fp32-attention-latent:
+    runs-on: macos-15
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v7
+      - name: Select Xcode and ensure Metal toolchain
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          if ! xcrun --find metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+            sudo xcode-select -s "$DEVELOPER_DIR"
+          fi
+      - name: Install pinned XcodeGen
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip \
+            --output "$RUNNER_TEMP/xcodegen.zip"
+          echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
+          ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP"
+      - name: Download and verify exact W8 and Qwen packs
+        run: |
+          set -euo pipefail
+          model_dir="$RUNNER_TEMP/models"
+          fixture="AnimaXSTests/Fixtures/Case1Binary"
+          mkdir -p "$model_dir"
+          curl --fail --location --retry 3 --retry-all-errors -sS \
+            -o "$model_dir/$W8_FILE" \
+            "https://huggingface.co/$W8_REPO/resolve/$W8_REVISION/$W8_FILE?download=true"
+          test "$(wc -c < "$model_dir/$W8_FILE" | tr -d ' ')" = "$W8_BYTES"
+          echo "$W8_SHA  $model_dir/$W8_FILE" | shasum -a 256 --check
+          qwen="$model_dir/qwen3-0.6b-xsmax-w8.animapk"
+          curl --fail --location --retry 3 --retry-all-errors -sS -o "$qwen" \
+            https://github.com/invisiblestrangler/AnimaXS/releases/download/model-assets-v1/qwen3-0.6b-xsmax-w8.animapk
+          test "$(wc -c < "$qwen" | tr -d ' ')" = "635305984"
+          echo "ba59e4d1797de5f6512aeafcecf3f38e1f62a47313a2a400b949c9018d84ceab  $qwen" | shasum -a 256 --check
+          cp "$qwen" "$fixture/qwen3-0.6b-xsmax-w8.animapk"
+          cp "$model_dir/$W8_FILE" "$fixture/anima-turbo-refine.animapk"
+          printf '%s\n' '{"attention_numerics":"fp32ScoresAndSoftmax","latent_only":"1"}' \
+            > "$fixture/quality-diagnostic.json"
+          "$RUNNER_TEMP/xcodegen/bin/xcodegen" generate
+      - name: Select simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          destination=$(xcrun simctl list devices available -j | python3 -c \
+            "import json,sys; d=json.load(sys.stdin); print(next(x['udid'] for r in d['devices'].values() for x in r if 'iPhone' in x['name'] and x['isAvailable']))")
+          echo "id=$destination" >> "$GITHUB_OUTPUT"
+      - name: Run W8 FP32-attention latent inference
+        run: |
+          set -euo pipefail
+          xcodebuild -project AnimaXS.xcodeproj -scheme AnimaXS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}" \
+            -derivedDataPath .derivedData CODE_SIGNING_ALLOWED=NO \
+            -only-testing:AnimaXSTests/FullInferenceTests/testCanonicalProductionInference \
+            test 2>&1 | tee "$RUNNER_TEMP/w8-fp32-attention-latent.log"
+          grep -q 'FULL_ATTENTION_NUMERICS=fp32ScoresAndSoftmax' "$RUNNER_TEMP/w8-fp32-attention-latent.log"
+          grep -q 'FULL_LATENT_ONLY=PASS' "$RUNNER_TEMP/w8-fp32-attention-latent.log"
+          grep -q 'FULL_FINAL_LATENT_COSINE=' "$RUNNER_TEMP/w8-fp32-attention-latent.log"
+        timeout-minutes: 90
+      - name: Upload latent evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: w8-fp32-attention-latent-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: error
+          path: ${{ runner.temp }}/w8-fp32-attention-latent.log

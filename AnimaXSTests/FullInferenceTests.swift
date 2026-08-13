@@ -52,8 +52,6 @@ final class FullInferenceTests: XCTestCase {
             envKey: "ANIMAXS_QWEN_PACK", name: "qwen3-0.6b-xsmax-w8.animapk")
         let ditURL = try requiredFixture(
             envKey: "ANIMAXS_DIFFUSION_PACK", name: "anima-turbo-refine.animapk")
-        let vaeURL = try requiredFixture(
-            envKey: "ANIMAXS_VAE_PACK", name: "qwen-image-vae-xsmax-fp16.animapk")
         let noiseURL = try requiredFixture(
             envKey: "ANIMAXS_NOISE_FILE", name: "case1_noise.f32")
 
@@ -109,7 +107,13 @@ final class FullInferenceTests: XCTestCase {
         let initial = makeBuffer(noiseValues, on: context.device)
         let finalLatent = try XCTUnwrap(context.device.makeBuffer(
             length: DiffusionSampler.latentElements * 4, options: .storageModeShared))
-        let sampler = try DiffusionSampler(context: context, file: AnimapkFile(url: ditURL))
+        let attentionNumerics = AttentionNumerics(
+            rawValue: diagnosticConfig("attention_numerics") ?? "legacy")
+            ?? .legacy
+        print("FULL_ATTENTION_NUMERICS=\(attentionNumerics.rawValue)")
+        let sampler = try DiffusionSampler(
+            context: context, file: AnimapkFile(url: ditURL),
+            attentionNumerics: attentionNumerics)
         let diffusionStart = Date()
         var stepSeconds: [Double] = []
         var completedSteps = 0
@@ -168,7 +172,15 @@ final class FullInferenceTests: XCTestCase {
             XCTFail("final latent reference fixture is missing")
         }
 
+        if diagnosticConfig("latent_only") == "1" {
+            print("FULL_LATENT_ONLY=PASS")
+            print("FULL_INFERENCE=PASS")
+            return
+        }
+
         // ---- 5. VAE decode → DecodedRGBA8 ----
+        let vaeURL = try requiredFixture(
+            envKey: "ANIMAXS_VAE_PACK", name: "qwen-image-vae-xsmax-fp16.animapk")
         let vae = try VAEDecoder(context: context, file: AnimapkFile(url: vaeURL))
         let vaeStart = Date()
         let image = try await vae.decode(latent: finalLatent)
@@ -322,6 +334,16 @@ final class FullInferenceTests: XCTestCase {
                 at: root, includingPropertiesForKeys: nil) else { return nil }
         for case let url as URL in enumerator where url.lastPathComponent == name { return url }
         return nil
+    }
+
+    private func diagnosticConfig(_ key: String) -> String? {
+        if let environment = ProcessInfo.processInfo.environment[
+            "ANIMAXS_" + key.uppercased()] { return environment }
+        guard let url = bundledFixture(named: "quality-diagnostic.json"),
+              let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: String]
+        else { return nil }
+        return object[key]
     }
 
     private func floats(from url: URL) throws -> [Float] {

@@ -25,7 +25,8 @@ final class DiTBlockExecutor {
     private let linear: LinearExecutor
     private let attention: AttentionExecutor
 
-    init(context: MetalContext, file: AnimapkFile) throws {
+    init(context: MetalContext, file: AnimapkFile,
+         attentionNumerics: AttentionNumerics = .legacy) throws {
         let locator = try DiTBlockLocator(file: file)
         guard let maximum = locator.blocks.map(\.length).max(), maximum <= UInt64(Int.max) else {
             throw AnimapkError.validation("invalid DiT execution ranges")
@@ -36,7 +37,7 @@ final class DiTBlockExecutor {
         self.streamer = try WeightStreamer(device: context.device, capacity: Int(maximum))
         self.buffers = BufferPool(device: context.device)
         self.linear = LinearExecutor(context: context)
-        self.attention = AttentionExecutor(context: context)
+        self.attention = AttentionExecutor(context: context, numerics: attentionNumerics)
     }
 
     /// Mutates `residual` in place. All input buffers are tightly packed and use these types:
