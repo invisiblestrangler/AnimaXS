@@ -111,7 +111,7 @@ def make_plan(
         rank = len(shape)
         storage = choose_storage(name, rank, default_quant, overrides)
         count = product(shape)
-        if rank <= 1:
+        if rank <= 1 or storage == "fp16":
             data_size = count * 2
             scale_size = zero_size = 0
             logical = "fp16"
