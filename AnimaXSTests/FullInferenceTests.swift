@@ -246,7 +246,7 @@ final class FullInferenceTests: XCTestCase {
             "run_id": "<injected-by-workflow>",
             "prompt": prompt,
             "case": "case1_danbooru_seed1337",
-            "packs": "qwen3-0.6b-xsmax-w8 / \(env("ANIMAXS_DIT_VARIANT") ?? "unknown-dit") / qwen-image-vae-xsmax-fp16",
+            "packs": "qwen3-0.6b-xsmax-w8 / \(packMetadataValue(envKey: "ANIMAXS_DIT_VARIANT", jsonKey: "variant")) / qwen-image-vae-xsmax-fp16",
             "latent_cosine": latentCosineText,
             "latent_rmse": latentRMSText,
             "latent_maxabs": latentMaxAbsText,
@@ -501,10 +501,12 @@ final class FullInferenceTests: XCTestCase {
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         let raw = ctx.data!.bindMemory(to: UInt8.self, capacity: canvasWidth * canvasHeight * 4)
 
-        // Left half = generated RGBA (row 0 = top of image).
+        // CGContext's byte buffer is written in the same top-to-bottom row
+        // order used by makePNG above. Keep both halves upright so the
+        // comparison attachment is directly inspectable.
         for y in 0..<height {
             let srcRow = y * width * 4
-            let dstRow = (canvasHeight - 1 - y) * canvasWidth * 4
+            let dstRow = y * canvasWidth * 4
             for x in 0..<width {
                 let si = srcRow + x * 4
                 let di = dstRow + x * 4
@@ -517,7 +519,7 @@ final class FullInferenceTests: XCTestCase {
         // Right half = reference RGB8 (alpha 255).
         for y in 0..<height {
             let srcRow = y * width * 3
-            let dstRow = (canvasHeight - 1 - y) * canvasWidth * 4
+            let dstRow = y * canvasWidth * 4
             for x in 0..<width {
                 let si = srcRow + x * 3
                 let di = dstRow + (width + x) * 4
