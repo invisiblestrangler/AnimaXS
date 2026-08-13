@@ -78,8 +78,8 @@ def parse_precision_map(path: str | None, default: str) -> tuple[str, list[dict[
     for entry in value.get("overrides", []):
         match = entry.get("match")
         storage = entry.get("storage")
-        if not isinstance(match, str) or storage not in ("w4", "w8"):
-            raise ValueError("precision-map overrides require match and w4/w8 storage")
+        if not isinstance(match, str) or storage not in ("w4", "w8", "fp16"):
+            raise ValueError("precision-map overrides require match and w4/w8/fp16 storage")
         overrides.append({"match": match, "storage": storage})
     return base, overrides, hashlib.sha256(raw).hexdigest()
 
@@ -111,7 +111,7 @@ def make_plan(
         rank = len(shape)
         storage = choose_storage(name, rank, default_quant, overrides)
         count = product(shape)
-        if rank <= 1:
+        if rank <= 1 or storage == "fp16":
             data_size = count * 2
             scale_size = zero_size = 0
             logical = "fp16"

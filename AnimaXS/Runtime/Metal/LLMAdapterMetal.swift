@@ -75,7 +75,13 @@ final class LLMAdapterMetal {
     private func gatherEmbedding(_ ids: [Int], output: MTLBuffer) async throws {
         let rows = ids.count
         let storage = locator.embedding.tensor.storage
-        let packedRowBytes = storage == .w4 ? (Self.hidden + 1) / 2 : Self.hidden
+        let packedRowBytes: Int
+        switch storage {
+        case .w4: packedRowBytes = (Self.hidden + 1) / 2
+        case .w8: packedRowBytes = Self.hidden
+        case .fp16: packedRowBytes = Self.hidden * MemoryLayout<Float16>.stride
+        default: throw AnimapkError.validation("unsupported adapter embedding storage")
+        }
         let groupsPerRow = (Self.hidden + DiTQuantizedWeightFactory.groupSize - 1)
             / DiTQuantizedWeightFactory.groupSize
         let packed = buffers.buffer(
@@ -84,37 +90,51 @@ final class LLMAdapterMetal {
         let scale = buffers.buffer(key: "adapter.embedding.scale", bytes: parameterBytes)
         let zero = buffers.buffer(key: "adapter.embedding.zero", bytes: parameterBytes)
         for (destinationRow, id) in ids.enumerated() {
-            let spans = try locator.embeddingRow(id)
-            try copy(spans.data, to: packed, destinationOffset: destinationRow * packedRowBytes)
-            try copy(spans.scale, to: scale,
-                     destinationOffset: destinationRow * groupsPerRow * MemoryLayout<Float16>.stride)
-            try copy(spans.zero, to: zero,
-                     destinationOffset: destinationRow * groupsPerRow * MemoryLayout<Float16>.stride)
+            if storage == .fp16 {
+                let data = try locator.embeddingDataRow(id)
+                try copy(data, to: packed, destinationOffset: destinationRow * packedRowBytes)
+            } else {
+                let spans = try locator.embeddingRow(id)
+                try copy(spans.data, to: packed, destinationOffset: destinationRow * packedRowBytes)
+                try copy(spans.scale, to: scale,
+                         destinationOffset: destinationRow * groupsPerRow * MemoryLayout<Float16>.stride)
+                try copy(spans.zero, to: zero,
+                         destinationOffset: destinationRow * groupsPerRow * MemoryLayout<Float16>.stride)
+            }
         }
         let half = buffers.buffer(key: "adapter.embedding.f16", bytes: rows * Self.hidden * 2)
         guard let command = context.commandQueue.makeCommandBuffer() else {
             throw AnimapkError.validation("failed to create adapter embedding command buffer")
         }
-        let pipelineName = storage == .w4 ? "dequant_w4_to_half" : "dequant_w8_to_half"
-        let pipeline = try context.pipeline(named: pipelineName)
-        guard let encoder = command.makeComputeCommandEncoder() else {
-            throw AnimapkError.validation("failed to create adapter embedding decoder")
+        if storage == .fp16 {
+            guard let blit = command.makeBlitCommandEncoder() else {
+                throw AnimapkError.validation("failed to create adapter FP16 embedding copy encoder")
+            }
+            blit.copy(from: packed, sourceOffset: 0, to: half, destinationOffset: 0,
+                      size: rows * Self.hidden * MemoryLayout<Float16>.stride)
+            blit.endEncoding()
+        } else {
+            let pipelineName = storage == .w4 ? "dequant_w4_to_half" : "dequant_w8_to_half"
+            let pipeline = try context.pipeline(named: pipelineName)
+            guard let encoder = command.makeComputeCommandEncoder() else {
+                throw AnimapkError.validation("failed to create adapter embedding decoder")
+            }
+            var columns = UInt32(Self.hidden), stride = UInt32(packedRowBytes), rowCount = UInt32(rows)
+            var outputStride = UInt32(Self.hidden)
+            encoder.setComputePipelineState(pipeline)
+            encoder.setBuffer(packed, offset: 0, index: 0)
+            encoder.setBuffer(scale, offset: 0, index: 1)
+            encoder.setBuffer(zero, offset: 0, index: 2)
+            encoder.setBuffer(half, offset: 0, index: 3)
+            encoder.setBytes(&columns, length: 4, index: 4)
+            encoder.setBytes(&stride, length: 4, index: 5)
+            encoder.setBytes(&rowCount, length: 4, index: 6)
+            encoder.setBytes(&outputStride, length: 4, index: 7)
+            encoder.dispatchThreads(
+                MTLSize(width: Self.hidden, height: rows, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+            encoder.endEncoding()
         }
-        var columns = UInt32(Self.hidden), stride = UInt32(packedRowBytes), rowCount = UInt32(rows)
-        var outputStride = UInt32(Self.hidden)
-        encoder.setComputePipelineState(pipeline)
-        encoder.setBuffer(packed, offset: 0, index: 0)
-        encoder.setBuffer(scale, offset: 0, index: 1)
-        encoder.setBuffer(zero, offset: 0, index: 2)
-        encoder.setBuffer(half, offset: 0, index: 3)
-        encoder.setBytes(&columns, length: 4, index: 4)
-        encoder.setBytes(&stride, length: 4, index: 5)
-        encoder.setBytes(&rowCount, length: 4, index: 6)
-        encoder.setBytes(&outputStride, length: 4, index: 7)
-        encoder.dispatchThreads(
-            MTLSize(width: Self.hidden, height: rows, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
-        encoder.endEncoding()
         try encodeUnary(command, "half_to_float", half, output, rows * Self.hidden)
         try await commit(command)
     }

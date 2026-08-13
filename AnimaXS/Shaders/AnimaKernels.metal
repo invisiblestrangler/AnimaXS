@@ -96,6 +96,45 @@ kernel void half_to_float(
     if (gid < count) destination[gid] = float(source[gid]);
 }
 
+// Round-to-nearest-even BF16 boundary while retaining fp32 storage. Preserve
+// infinities and NaNs rather than allowing the integer bias to alter them.
+kernel void round_f32_to_bf16(
+    device const float *source [[buffer(0)]],
+    device float *destination [[buffer(1)]],
+    constant uint &count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) return;
+    uint bits = as_type<uint>(source[gid]);
+    uint exponent = bits & 0x7f800000u;
+    if (exponent != 0x7f800000u) {
+        bits += 0x00007fffu + ((bits >> 16) & 1u);
+        bits &= 0xffff0000u;
+    }
+    destination[gid] = as_type<float>(bits);
+}
+
+// Round a fp16 value through BF16 while retaining the Apple5-friendly fp16
+// storage format. Every BF16 value in the finite fp16 range is exactly
+// representable as fp16, so this is a lossless storage conversion after the
+// intended BF16 mantissa truncation. The kernel is safe in-place.
+kernel void round_half_to_bf16(
+    device const half *source [[buffer(0)]],
+    device half *destination [[buffer(1)]],
+    constant uint &count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) return;
+    float value = float(source[gid]);
+    uint bits = as_type<uint>(value);
+    uint exponent = bits & 0x7f800000u;
+    if (exponent != 0x7f800000u) {
+        bits += 0x00007fffu + ((bits >> 16) & 1u);
+        bits &= 0xffff0000u;
+    }
+    destination[gid] = half(as_type<float>(bits));
+}
+
 // Convert between projection layout [tokens,heads,headDim] and the head-major
 // [heads,tokens,headDim] layout consumed by AttentionExecutor. The same kernel
 // handles both directions so the layouts cannot drift independently.
@@ -564,6 +603,36 @@ kernel void w8_matvec_f32(
     if (tid == 0) out[row] = partial[0];
 }
 
+kernel void fp16_matvec_f32(
+    device const half  *packed     [[buffer(0)]],
+    device const half  *unusedScale [[buffer(1)]],
+    device const half  *unusedZero [[buffer(2)]],
+    device const float *input      [[buffer(3)]],
+    device float       *out        [[buffer(4)]],
+    constant uint      &K          [[buffer(5)]],
+    constant uint      &rows       [[buffer(6)]],
+    constant uint      &rowStride  [[buffer(7)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint3 threads [[threads_per_threadgroup]])
+{
+    uint row = group.x;
+    if (row >= rows) return;
+    uint threadCount = threads.x;
+    float sum = 0.0f;
+    for (uint k = tid; k < K; k += threadCount) {
+        sum = fma(input[k], float(packed[row * rowStride + k]), sum);
+    }
+    threadgroup float partial[256];
+    partial[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) out[row] = partial[0];
+}
+
 // Stable row softmax. Scores/probabilities are fp16 at MPS boundaries, while
 // max, exp, and sum are evaluated and reduced in fp32.
 kernel void attention_softmax_rows(
@@ -615,6 +684,91 @@ kernel void attention_softmax_rows(
         }
         scores[row * columns + column] = half(probability);
     }
+}
+
+// Diagnostic high-precision tiled attention. Q/K/V and the final branch boundary
+// remain fp16, but scores, softmax probabilities, and both dot-product
+// accumulations stay fp32. This deliberately favors numerical evidence over speed.
+kernel void attention_qk_f16_to_f32(
+    device const half *query [[buffer(0)]],
+    device const half *key [[buffer(1)]],
+    device float *scores [[buffer(2)]],
+    constant uint &rows [[buffer(3)]],
+    constant uint &columns [[buffer(4)]],
+    constant uint &headDim [[buffer(5)]],
+    constant float &scale [[buffer(6)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= columns || gid.y >= rows) return;
+    float sum = 0.0f;
+    for (uint d = 0; d < headDim; ++d) {
+        sum = fma(float(query[gid.y * headDim + d]),
+                  float(key[gid.x * headDim + d]), sum);
+    }
+    scores[gid.y * columns + gid.x] = sum * scale;
+}
+
+kernel void attention_softmax_rows_f32(
+    device float *scores [[buffer(0)]],
+    constant uint &rows [[buffer(1)]],
+    constant uint &columns [[buffer(2)]],
+    constant uint &queryBase [[buffer(3)]],
+    constant uint &causal [[buffer(4)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint3 threads [[threads_per_threadgroup]])
+{
+    uint row = group.x;
+    if (row >= rows) return;
+    uint threadCount = threads.x;
+    threadgroup float partial[256];
+    float localMax = -INFINITY;
+    for (uint column = tid; column < columns; column += threadCount) {
+        if (causal == 0 || column <= queryBase + row)
+            localMax = max(localMax, scores[row * columns + column]);
+    }
+    partial[tid] = localMax;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] = max(partial[tid], partial[tid + stride]);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float rowMax = partial[0];
+    float localSum = 0.0f;
+    for (uint column = tid; column < columns; column += threadCount) {
+        if (causal == 0 || column <= queryBase + row)
+            localSum += exp(scores[row * columns + column] - rowMax);
+    }
+    partial[tid] = localSum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inverseSum = 1.0f / partial[0];
+    for (uint column = tid; column < columns; column += threadCount) {
+        scores[row * columns + column] =
+            (causal == 0 || column <= queryBase + row)
+            ? exp(scores[row * columns + column] - rowMax) * inverseSum : 0.0f;
+    }
+}
+
+kernel void attention_pv_f32_f16_to_f16(
+    device const float *probabilities [[buffer(0)]],
+    device const half *value [[buffer(1)]],
+    device half *output [[buffer(2)]],
+    constant uint &rows [[buffer(3)]],
+    constant uint &keyCount [[buffer(4)]],
+    constant uint &headDim [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= headDim || gid.y >= rows) return;
+    float sum = 0.0f;
+    for (uint keyRow = 0; keyRow < keyCount; ++keyRow) {
+        sum = fma(probabilities[gid.y * keyCount + keyRow],
+                  float(value[keyRow * headDim + gid.x]), sum);
+    }
+    output[gid.y * headDim + gid.x] = half(sum);
 }
 
 // ---------------------------------------------------------------------------

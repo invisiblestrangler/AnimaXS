@@ -1,0 +1,219 @@
+name: Quality investigation
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant_matrix:
+        description: >-
+          JSON array of variants, each {name, activation_numerics,
+          golden_qwen_context}. Leave empty to run a single variant from the
+          two inputs below. Default matrix (empty): bf16 production + golden.
+        required: false
+        default: ""
+        type: string
+      activation_numerics:
+        description: "Single-variant DiT activation policy (used when variant_matrix is empty)"
+        required: false
+        default: "legacy"
+        type: choice
+        options:
+          - legacy
+          - bf16_compute
+          - bf16_boundaries
+      golden_qwen_context:
+        description: "Single-variant golden Qwen context flag (used when variant_matrix is empty)"
+        required: false
+        default: "0"
+        type: choice
+        options:
+          - "0"
+          - "1"
+      pack_artifact_run_id:
+        description: >-
+          Reuse the packed candidates from this prior run ID (skips the
+          multi-GB repack; macOS matrix consumes the existing artifact).
+        required: false
+        default: ""
+        type: string
+      pack_artifact_sha:
+        description: "Commit SHA the reused pack artifact was uploaded under"
+        required: false
+        default: ""
+        type: string
+      capture_trajectory:
+        description: >-
+          Attach per-step trajectory captures to each full-image artifact and
+          run the Linux source-oracle parity + end-to-end source run.
+        required: false
+        default: "0"
+        type: choice
+        options:
+          - "0"
+          - "1"
+  # NOTE: the push trigger was intentionally removed during the quality
+  # investigation so a source/workflow commit does not automatically launch
+  # another expensive pack + full-image run (handoff section 6.1). The
+  # multi-GB pack and full inference run only on manual dispatch. Restore a
+  # guarded push trigger during final cleanup if desired.
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: >-
+    quality-${{ github.ref }}-${{ github.sha }}-
+    ${{ inputs.variant_matrix ||
+        format('[{0}-golden{1}]', inputs.activation_numerics || 'legacy', inputs.golden_qwen_context || '0') }}-
+    ${{ inputs.pack_artifact_run_id || 'repack' }}
+  cancel-in-progress: false
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+
+jobs:
+  qwen-fp16-candidate:
+    uses: ./.github/workflows/quality-qwen-fp16.yml
+    with:
+      variant_matrix: ${{ inputs.variant_matrix || '' }}
+      activation_numerics: ${{ inputs.activation_numerics || 'legacy' }}
+      golden_qwen_context: ${{ inputs.golden_qwen_context || '0' }}
+      pack_artifact_run_id: ${{ inputs.pack_artifact_run_id || '' }}
+      pack_artifact_sha: ${{ inputs.pack_artifact_sha || '' }}
+      capture_trajectory: ${{ inputs.capture_trajectory || '0' }}
+    secrets: inherit
+
+  source-oracle:
+    needs: qwen-fp16-candidate
+    if: inputs.capture_trajectory == '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      SOURCE_REPO: circlestone-labs/Anima
+      SOURCE_REVISION: f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b
+      SOURCE_FILE: split_files/diffusion_models/anima-turbo-v1.0.safetensors
+      SOURCE_SHA256: c0b905034510750a505d21aa96c81718f4ffcc500777318421f58a88636e2174
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install torch and safetensors
+        run: |
+          set -euo pipefail
+          python -m pip install numpy safetensors
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Download full-image artifacts (incl. trajectory captures)
+        uses: actions/download-artifact@v5
+        with:
+          path: ${{ runner.temp }}/artifacts
+          pattern: qwen-fp16-full-*
+          github-token: ${{ github.token }}
+      - name: Download and verify pinned DiT source
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${HF_TOKEN:-}" || { echo "::error::HF_TOKEN missing"; exit 1; }
+          source="$RUNNER_TEMP/dit-source.safetensors"
+          curl --fail --location --retry 3 --retry-all-errors --progress-bar \
+            -H "Authorization: Bearer $HF_TOKEN" -o "$source" \
+            "https://huggingface.co/$SOURCE_REPO/resolve/$SOURCE_REVISION/$SOURCE_FILE?download=true"
+          echo "$SOURCE_SHA256  $source" | sha256sum --check
+          echo "SOURCE=$source" >> "$GITHUB_ENV"
+      - name: Run source trajectory parity + end-to-end oracle
+        run: |
+          set -u
+          mkdir -p "$RUNNER_TEMP/oracle-evidence"
+          failures=0
+          for dir in "$RUNNER_TEMP"/artifacts/qwen-fp16-full-*; do
+            name=$(basename "$dir" | sed 's/qwen-fp16-full-//')
+            [ -f "$dir/step00_x_in.f32" ] || { echo "skip $name: no trajectory capture"; continue; }
+            out="$RUNNER_TEMP/oracle-evidence/$name"
+            mkdir -p "$out"
+            for dt in bf16 fp32; do
+              echo "=== trajectory parity ($dt): $name ==="
+              python3 scripts/dit_source_oracle.py --source "$RUNNER_TEMP/dit-source.safetensors" \
+                --mode trajectory --capture "$dir" --out "$out" --dtype $dt || { echo "FAILED trajectory $name $dt"; failures=$((failures+1)); }
+            done
+            if [ -f "$dir/w8-step0-block0-input.f32" ]; then
+              echo "=== blocks parity (fp32): $name ==="
+              python3 scripts/dit_source_oracle.py --source "$RUNNER_TEMP/dit-source.safetensors" \
+                --mode blocks --capture "$dir" --out "$out" --dtype fp32 || { echo "FAILED blocks $name"; failures=$((failures+1)); }
+            fi
+          done
+          for dt in bf16 fp32; do
+            echo "=== end-to-end source run ($dt) vs golden ==="
+            python3 scripts/dit_source_oracle.py --source "$RUNNER_TEMP/dit-source.safetensors" \
+              --mode endtoend --fixtures AnimaXSTests/Fixtures/Case1Binary \
+              --out "$RUNNER_TEMP/oracle-evidence" --dtype $dt || { echo "FAILED endtoend $dt"; failures=$((failures+1)); }
+          done
+          echo "oracle failures: $failures"
+          exit "$failures"
+      - name: Upload oracle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-oracle-evidence-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: error
+          path: ${{ runner.temp }}/oracle-evidence
+
+  focused-metal:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Select Xcode and ensure Metal toolchain
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          if ! xcrun --find metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+            sudo xcode-select -s "$DEVELOPER_DIR"
+          fi
+          xcodebuild -version
+      - name: Install pinned XcodeGen
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            https://github.com/yonaskolb/XcodeGen/releases/download/2.46.0/xcodegen.zip \
+            --output "$RUNNER_TEMP/xcodegen.zip"
+          echo "4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
+          ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+      - name: Regenerate project and select simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/xcodegen/bin/xcodegen" generate
+          git diff --exit-code -- project.yml AnimaXS.xcodeproj
+          destination=$(xcrun simctl list devices available -j | python3 -c \
+            "import json,sys; d=json.load(sys.stdin); print(next(x['udid'] for r in d['devices'].values() for x in r if 'iPhone' in x['name'] and x['isAvailable']))")
+          echo "id=$destination" >> "$GITHUB_OUTPUT"
+      - name: Build tests once
+        run: |
+          set -euo pipefail
+          xcodebuild -project AnimaXS.xcodeproj -scheme AnimaXS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}" \
+            -derivedDataPath .derivedData CODE_SIGNING_ALLOWED=NO build-for-testing
+      - name: Run focused attention precision diagnostics
+        run: |
+          set -euo pipefail
+          xcodebuild -project AnimaXS.xcodeproj -scheme AnimaXS \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}" \
+            -derivedDataPath .derivedData CODE_SIGNING_ALLOWED=NO \
+            -only-testing:AnimaXSTests/AttentionExecutorTests \
+            test-without-building 2>&1 | tee "$RUNNER_TEMP/attention-precision.log"
+          grep -q 'ATTN_MODE=legacy' "$RUNNER_TEMP/attention-precision.log"
+          grep -q 'ATTN_MODE=fp32_scores_softmax' "$RUNNER_TEMP/attention-precision.log"
+      - name: Upload focused evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: attention-precision-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: error
+          path: ${{ runner.temp }}/attention-precision.log

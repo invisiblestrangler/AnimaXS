@@ -7,9 +7,14 @@ final class DitForward {
     private let block: DiTBlockExecutor
     private let finalLayer: DiTFinalLayerExecutor
 
-    init(context: MetalContext, file: AnimapkFile) throws {
-        block = try DiTBlockExecutor(context: context, file: file)
-        finalLayer = try DiTFinalLayerExecutor(context: context, file: file)
+    init(context: MetalContext, file: AnimapkFile,
+         attentionNumerics: AttentionNumerics = .legacy,
+         activationNumerics: ActivationNumerics = .legacy) throws {
+        block = try DiTBlockExecutor(
+            context: context, file: file, attentionNumerics: attentionNumerics,
+            activationNumerics: activationNumerics)
+        finalLayer = try DiTFinalLayerExecutor(
+            context: context, file: file, activationNumerics: activationNumerics)
     }
 
     /// Mutates the tightly packed fp32 `[1024,2048]` residual in place.
@@ -21,12 +26,24 @@ final class DitForward {
         adalnLora: MTLBuffer,
         crossContext: MTLBuffer,
         rope: MTLBuffer,
-        blockCompleted: ((Int, MTLBuffer) throws -> Void)? = nil
+        blockCompleted: ((Int, MTLBuffer) throws -> Void)? = nil,
+        diagnosticBranchFilter: ((Int) -> Bool)? = nil,
+        diagnosticBranchCompleted: ((Int, String, MTLBuffer) throws -> Void)? = nil
     ) async throws {
         for logicalIndex in 0..<DiTBlockLocator.blockCount {
+            let branchCallback: DiTBlockExecutor.DiagnosticBranchCompleted?
+            if diagnosticBranchFilter?(logicalIndex) ?? true,
+               let diagnosticBranchCompleted {
+                branchCallback = { branch, current in
+                    try diagnosticBranchCompleted(logicalIndex, branch, current)
+                }
+            } else {
+                branchCallback = nil
+            }
             try await block.execute(
                 blockIndex: logicalIndex, residual: residual, emb: emb,
-                adalnLora: adalnLora, crossContext: crossContext, rope: rope)
+                adalnLora: adalnLora, crossContext: crossContext, rope: rope,
+                diagnosticBranchCompleted: branchCallback)
             try blockCompleted?(logicalIndex, residual)
         }
     }

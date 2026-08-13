@@ -1,55 +1,72 @@
-# AnimaXS Refine TODO
+# AnimaXS Final Quality TODO
 
-This checklist is the execution index for `RUNBOOK.md`. A box is checked only
-when its validation evidence exists in the repository, workflow, or recorded
-artifact.
+Reset on 2026-08-13 at base `45c28f4` for the final image-quality investigation.
+Historical work remains in git history and `DECISIONS.md`.
 
-## Repository and documentation
+Completion criterion: a canonical generated image genuinely comparable to the
+reference from W4 and/or W8 using the updated iPhone XS Max pipeline. The old
+0.65 regression floors and inference completion are not quality acceptance.
 
-- [x] Verify current `origin/main` and create `refine/packing-v2-w4-w8`.
-- [x] Archive superseded operational documents.
-- [x] Install the refinement runbook.
-- [x] Refresh status, handoff, and test matrix after the result cycle.
-- [x] Preserve `DECISIONS.md` append-only and record refinement decisions.
+## Current phase
 
-## Determinism and legacy preservation
+Phase 4/6 — BF16 compute-mode matrix running (true `bf16_compute` was the
+missing highest-priority experiment; run #29 was a legacy control).
 
-- [x] Reset the selected simulator before pack-free CI tests.
-- [x] Run normal CI after runtime changes and confirm D072 determinism.
-- [x] Preserve the recovered v1 packer unchanged and record its SHA.
+## Phase 1 — reset and baseline
 
-## Packer v2 and verification
+- [x] Refresh `origin/main` and record base `45c28f4`.
+- [x] Preserve the live primary checkout and create `investigate/dit-quality-runtime`.
+- [x] Read historical decisions and verify latest W4/W8 metrics/provenance.
+- [x] Reset `TODO.md`, `STATUS.md`, and `TEST_MATRIX.md`.
+- [x] Audit attention, DiT, oracle, and full-inference implementations.
+- [x] Create and launch branch-only diagnostics.
 
-- [x] Implement dry-plan and bounded-memory/direct output writing.
-- [x] Keep ANMA v1, 16-KiB blobs, group 64, row-reset, and W4 nibble order.
-- [x] Use stored-FP16 scale/zero values when selecting Q.
-- [x] Implement deterministic W4 MSE clipping and W8 affine quantization.
-- [x] Implement precision maps, finite checks, streaming statistics, provenance,
-      per-blob SHA-256, and an independent verifier.
-- [x] Pass synthetic W4 `[2,68]` and W8 `[2,65]` parser/decoder regressions.
+## Phase 2 — same-W8 reference
 
-## Hugging Face and packing workflow
+- [x] Generate exact-dequantized-W8 source evidence on Linux Actions.
+- [x] Compare high-precision and Swift-like mixed precision at block 0.
+- [x] Record cosine, RMSE, maxAbs, norms, and exact provenance (run
+  `31678571617`). Metal-vs-exact-W8 relative L2 is `0.00019` self,
+  `0.00088` cross, and `0.00023` MLP; block 0 runtime is healthy.
 
-- [x] Resolve and pin source revision `f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b`.
-- [x] Confirm source LFS SHA `c0b905034510750a505d21aa96c81718f4ffcc500777318421f58a88636e2174`.
-- [x] Configure `HF_TOKEN` securely as a GitHub secret without logging it.
-- [x] Pack W4-v2 and W8-v2 on separate fresh Ubuntu jobs.
-- [x] Verify and publish both packs directly to dedicated HF model repos.
-- [x] Record exact HF revisions, sizes, and SHA-256 values.
+## Phase 3 — attention investigation
 
-## Runtime
+- [x] Add minimal legacy and FP32-score/softmax diagnostic modes.
+- [x] Add an independent deterministic attention precision comparison.
+- [x] Run focused macOS attention precision tests.
+- [x] Reject FP32 attention as the primary fix — local RMSE improved ~5x,
+  but final W8 latent cosine improved only `+0.00047` in run `31676322657`.
+- [x] Run same-W8 block-0 parity.
+- [x] Run sparse first-divergence localization across blocks 0/7/14/21/27.
 
-- [x] Add one W4/W8 DiT matrix factory and central direct-matvec dispatch.
-- [x] Generalize preparation, adapter, block, and final-layer matrices.
-- [x] Add and test the W8 FP32 Metal matvec kernel.
-- [x] Confirm legacy W4 behavior remains unchanged.
+## Phase 4 — localize divergence
 
-## Full inference and decision
+- [x] Produce same-W8 step-0 branch-delta evidence and machine-readable CSV.
+- [x] Reject selective late-branch FP16, all-block FP16, and all-DiT FP16 ceilings.
+- [x] Reject BF16 residual-boundary emulation (`31690018615`).
+- [x] Confirm run #29 (`31701142683`) was legacy/production, not BF16.
+- [x] Fix workflow efficiency (manual-only dispatch, pack once + macOS matrix,
+      pack reuse) and artifact provenance (provenance.json, real commit/run_id).
+- [x] Add `scripts/measure_grid_carrier.py` and record the defective baseline.
+- [ ] Run the true `bf16_compute` full-image matrix (production + golden Qwen)
+      with a legacy-golden control (pack reuse from run #29).
+- [ ] Apply the BF16/golden decision tree (handoff §9).
 
-- [x] Add exact-revision W4-v2/W8-v2 matrix inference workflow.
-- [x] Keep Qwen, VAE, prompt, seed/noise, sigmas, and graph identical.
-- [x] Complete both canonical inferences and capture generated/reference/
-      comparison PNGs plus metrics and timings.
-- [x] Visually compare legacy W4, W4-v2, and W8-v2.
-- [x] Select W8-v2; W4-v2 is rejected by the same 0.65 regression floor.
-- [x] Append the final decision and refresh all handoff documents.
+## Phase 5 — promote winners
+
+- [x] Run eight-step W8 FP32-attention latent-only inference; insufficient.
+- [x] Run full-image source-FP16 weight ceilings; visible grid persists.
+- [ ] Run full canonical RGB inference only for strong latent candidates.
+- [ ] Inspect images for grid/etched/checker artifacts and natural detail.
+- [ ] Once shared runtime improves, compare corrected W4 and W8.
+- [ ] If BF16 is insufficient: per-step trajectory exports + source scheduler
+      oracle + sampler/preconditioning audit (handoff §11–§16).
+
+## Phase 6 — production and acceptance
+
+- [ ] Select and simplify the production implementation/model format.
+- [ ] Preserve streaming, tiled attention, and bounded iPhone scratch memory.
+- [ ] Record before/after latent and RGB metrics plus image artifacts.
+- [ ] Pass generic iPhone build, simulator tests, and canonical inference.
+- [ ] Clean diagnostics, update manifest/docs/decisions, integrate latest main.
+- [ ] Open the final PR and complete the requirement-by-requirement audit.

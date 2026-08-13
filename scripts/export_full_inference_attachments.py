@@ -36,6 +36,7 @@ def main() -> int:
         "pack-metadata": "pack-metadata.json",
     }
     found = {}
+    exported_by_suggested = {}
 
     manifest_path = os.path.join(exported_dir, "manifest.json")
     if os.path.isfile(manifest_path):
@@ -46,7 +47,6 @@ def main() -> int:
         # with exportedFileName + suggestedHumanReadableName. Older versions
         # may use a flat dict {id: entry} or a flat list of entries. Walk all
         # nested dicts and collect every exported-file/suggested-name pair.
-        exported_by_suggested = {}
         stack = [manifest]
         while stack:
             node = stack.pop()
@@ -79,6 +79,38 @@ def main() -> int:
             print(f"mapped {fname} -> {canonical}")
         else:
             print(f"WARNING: exported file missing: {src}")
+
+    # Trajectory/source-oracle captures (per-step x_in/denoised, fp32
+    # cross-context, sigma list, step-0 block captures) are exported under
+    # their own names so the Linux source oracle can consume them without
+    # renaming. XCTest mangles suggested names with a "_0_<UUID>" suffix;
+    # strip it back to the canonical name (step07_x_in_0_UUID.f32 ->
+    # step07_x_in.f32).
+    for sname, fname in exported_by_suggested.items():
+        lname = sname.lower()
+        if (sname.startswith("step") and sname.endswith(".f32")) \
+                or lname.startswith("cross-context") or lname.startswith("sigmas") \
+                or lname.startswith("w8-step0-"):
+            src = os.path.join(exported_dir, fname)
+            dst = os.path.join(artifacts_dir, sname)
+            if os.path.isfile(src):
+                shutil.copyfile(src, dst)
+                print(f"mapped {fname} -> {sname}")
+            canonical = sname.split("_0_")[0] + os.path.splitext(sname)[1]
+            if canonical != sname:
+                cdst = os.path.join(artifacts_dir, canonical)
+                if not os.path.isfile(cdst):
+                    shutil.copyfile(src, cdst)
+                    print(f"mapped {fname} -> {canonical}")
+
+    # Fallback for a missing manifest: scan exported files by extension only
+    # (ambiguous but better than nothing for the f32 trajectory tensors).
+    if not exported_by_suggested:
+        for fname in os.listdir(exported_dir):
+            if fname.startswith("step") and fname.endswith(".f32"):
+                shutil.copyfile(os.path.join(exported_dir, fname),
+                                os.path.join(artifacts_dir, fname))
+                print(f"fallback mapped {fname}")
 
     missing = [c for c in targets.values() if not os.path.isfile(os.path.join(artifacts_dir, c))]
     if missing:
