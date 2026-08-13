@@ -29,7 +29,9 @@ def main() -> int:
     parser.add_argument("--sha-file", required=True)
     args = parser.parse_args()
 
-    token = os.environ.get("HF_TOKEN")
+    # Secrets supplied from files can contain a trailing newline.  HTTP
+    # headers reject that byte, so normalize the token at the process edge.
+    token = os.environ.get("HF_TOKEN", "").strip()
     if not token:
         raise SystemExit("HF_TOKEN is missing")
     from huggingface_hub import HfApi
