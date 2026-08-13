@@ -81,6 +81,11 @@ jobs:
             --report "$RUNNER_TEMP/dit-pack-report.json" --verify
           python scripts/verify_animapk.py "$out" --report "$RUNNER_TEMP/dit-verify.json"
           sha256sum "$out" | tee "$RUNNER_TEMP/dit-pack.sha256"
+          # actions/download-artifact cannot reliably extract a single >4 GB
+          # binary on macOS. Upload bounded chunks and reassemble on the
+          # consumer runner instead.
+          split -b 1G --numeric-suffixes=0 --suffix-length=2 "$out" "$out.part-"
+          rm "$out"
       - name: Upload candidates
         uses: actions/upload-artifact@v4
         with:
@@ -92,7 +97,7 @@ jobs:
             ${{ runner.temp }}/qwen-pack-report.json
             ${{ runner.temp }}/qwen-verify.json
             ${{ runner.temp }}/qwen-pack.sha256
-            ${{ runner.temp }}/${{ env.DIT_FILE }}
+            ${{ runner.temp }}/${{ env.DIT_FILE }}.part-*
             ${{ runner.temp }}/dit-pack-report.json
             ${{ runner.temp }}/dit-verify.json
             ${{ runner.temp }}/dit-pack.sha256
@@ -129,8 +134,13 @@ jobs:
           set -euo pipefail
           fixture="AnimaXSTests/Fixtures/Case1Binary"
           cp "$RUNNER_TEMP/candidates/$QWEN_FILE" "$fixture/qwen3-0.6b-xsmax-w8.animapk"
-          cp "$RUNNER_TEMP/candidates/$DIT_FILE" "$fixture/anima-turbo-refine.animapk"
-          (cd "$RUNNER_TEMP/candidates" && sha256sum -c dit-pack.sha256)
+          shopt -s nullglob
+          parts=("$RUNNER_TEMP/candidates/$DIT_FILE.part-"*)
+          ((${#parts[@]} > 0)) || { echo "::error::no DiT pack chunks found"; exit 1; }
+          cat "${parts[@]}" > "$RUNNER_TEMP/$DIT_FILE"
+          expected=$(awk '{print $1}' "$RUNNER_TEMP/candidates/dit-pack.sha256")
+          printf '%s  %s\n' "$expected" "$RUNNER_TEMP/$DIT_FILE" | sha256sum --check
+          cp "$RUNNER_TEMP/$DIT_FILE" "$fixture/anima-turbo-refine.animapk"
           curl --fail --location --retry 3 --retry-all-errors -o "$fixture/qwen-image-vae-xsmax-fp16.animapk" \
             https://github.com/invisiblestrangler/AnimaXS/releases/download/model-assets-v1/qwen-image-vae-xsmax-fp16.animapk
           echo "10171af0b826927b75fecf4482aaa0e268254874e694a0788ebdd8c4254fc447  $fixture/qwen-image-vae-xsmax-fp16.animapk" | shasum -a 256 --check
