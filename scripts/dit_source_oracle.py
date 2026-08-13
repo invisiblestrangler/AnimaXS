@@ -394,6 +394,8 @@ class AdapterAttention:
         self.k_norm = w[f"{prefix}.k_norm.weight"]
 
     def forward(self, x, context, cos, sin, cos_ctx, sin_ctx, mask=None):
+        if context is None:
+            context = x
         b, s, _ = x.shape
         cs = context.shape[1]
         q = linear(x, self.q_proj).view(b, s, 16, 64)
