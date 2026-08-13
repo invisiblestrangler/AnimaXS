@@ -16,8 +16,10 @@ final class DiTPreparationExecutor {
     private let streamer: WeightStreamer
     private let linear: LinearExecutor
     private let buffers: BufferPool
+    private let activationNumerics: ActivationNumerics
 
-    init(context: MetalContext, file: AnimapkFile) throws {
+    init(context: MetalContext, file: AnimapkFile,
+         activationNumerics: ActivationNumerics = .legacy) throws {
         let locator = try DiTPreparationLocator(file: file)
         guard file.quantGroup == 64 else {
             throw AnimapkError.validation("DiT preparation requires quant group 64")
@@ -28,6 +30,7 @@ final class DiTPreparationExecutor {
         self.streamer = try WeightStreamer(device: context.device, capacity: Int(locator.range.length))
         self.linear = LinearExecutor(context: context)
         self.buffers = BufferPool(device: context.device)
+        self.activationNumerics = activationNumerics
     }
 
     /// Outputs fp32 residual `[1024,2048]`, timestep embedding `[2048]`, and
@@ -82,6 +85,12 @@ final class DiTPreparationExecutor {
         try encodeMatvec(command, weights.timestep1, raw, hidden)
         try encodeUnary(command, "silu", hidden, activated, Self.hidden)
         try encodeMatvec(command, weights.timestep2, activated, adalnLora)
+        if activationNumerics == .bf16Boundaries {
+            try encodeUnary(command, "round_f32_to_bf16", residual, residual,
+                            Self.tokens * Self.hidden)
+            try encodeUnary(command, "round_f32_to_bf16", embedding, embedding, Self.hidden)
+            try encodeUnary(command, "round_f32_to_bf16", adalnLora, adalnLora, Self.adaln)
+        }
         try await commit(command)
     }
 

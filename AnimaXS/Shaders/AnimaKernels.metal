@@ -96,6 +96,24 @@ kernel void half_to_float(
     if (gid < count) destination[gid] = float(source[gid]);
 }
 
+// Round-to-nearest-even BF16 boundary while retaining fp32 storage. Preserve
+// infinities and NaNs rather than allowing the integer bias to alter them.
+kernel void round_f32_to_bf16(
+    device const float *source [[buffer(0)]],
+    device float *destination [[buffer(1)]],
+    constant uint &count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) return;
+    uint bits = as_type<uint>(source[gid]);
+    uint exponent = bits & 0x7f800000u;
+    if (exponent != 0x7f800000u) {
+        bits += 0x00007fffu + ((bits >> 16) & 1u);
+        bits &= 0xffff0000u;
+    }
+    destination[gid] = as_type<float>(bits);
+}
+
 // Convert between projection layout [tokens,heads,headDim] and the head-major
 // [heads,tokens,headDim] layout consumed by AttentionExecutor. The same kernel
 // handles both directions so the layouts cannot drift independently.

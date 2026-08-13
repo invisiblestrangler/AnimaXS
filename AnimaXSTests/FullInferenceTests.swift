@@ -111,9 +111,14 @@ final class FullInferenceTests: XCTestCase {
             rawValue: diagnosticConfig("attention_numerics") ?? "legacy")
             ?? .legacy
         print("FULL_ATTENTION_NUMERICS=\(attentionNumerics.rawValue)")
+        let activationNumerics = ActivationNumerics(
+            rawValue: diagnosticConfig("activation_numerics") ?? "legacy")
+            ?? .legacy
+        print("FULL_ACTIVATION_NUMERICS=\(activationNumerics.rawValue)")
         let sampler = try DiffusionSampler(
             context: context, file: AnimapkFile(url: ditURL),
-            attentionNumerics: attentionNumerics)
+            attentionNumerics: attentionNumerics,
+            activationNumerics: activationNumerics)
         let diffusionStart = Date()
         var stepSeconds: [Double] = []
         var completedSteps = 0

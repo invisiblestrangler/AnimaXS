@@ -25,9 +25,11 @@ final class DiTBlockExecutor {
     private let buffers: BufferPool
     private let linear: LinearExecutor
     private let attention: AttentionExecutor
+    private let activationNumerics: ActivationNumerics
 
     init(context: MetalContext, file: AnimapkFile,
-         attentionNumerics: AttentionNumerics = .legacy) throws {
+         attentionNumerics: AttentionNumerics = .legacy,
+         activationNumerics: ActivationNumerics = .legacy) throws {
         let locator = try DiTBlockLocator(file: file)
         guard let maximum = locator.blocks.map(\.length).max(), maximum <= UInt64(Int.max) else {
             throw AnimapkError.validation("invalid DiT execution ranges")
@@ -39,6 +41,7 @@ final class DiTBlockExecutor {
         self.buffers = BufferPool(device: context.device)
         self.linear = LinearExecutor(context: context)
         self.attention = AttentionExecutor(context: context, numerics: attentionNumerics)
+        self.activationNumerics = activationNumerics
     }
 
     /// Mutates `residual` in place. All input buffers are tightly packed and use these types:
@@ -175,6 +178,7 @@ final class DiTBlockExecutor {
                           output: branch, inputRows: Self.tokens)
         try encodeGateAdd(command, residual: residual, branch: branch, modulation: modulation,
                           count: Self.tokens * Self.dim)
+        try encodeActivationBoundary(command, residual)
     }
 
     private func encodeMLP(
@@ -206,6 +210,15 @@ final class DiTBlockExecutor {
                           weight: weights.mlp2, output: branch, inputRows: Self.tokens)
         try encodeGateAdd(command, residual: residual, branch: branch, modulation: modulation,
                           count: Self.tokens * Self.dim)
+        try encodeActivationBoundary(command, residual)
+    }
+
+    private func encodeActivationBoundary(
+        _ command: MTLCommandBuffer, _ residual: MTLBuffer
+    ) throws {
+        guard activationNumerics == .bf16Boundaries else { return }
+        try encodeUnary(command, kernel: "round_f32_to_bf16", input: residual,
+                        output: residual, count: Self.tokens * Self.dim)
     }
 
     private func encodeModulation(

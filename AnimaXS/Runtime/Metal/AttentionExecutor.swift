@@ -7,6 +7,13 @@ enum AttentionNumerics: String, CaseIterable {
     case fp32ScoresAndSoftmax
 }
 
+/// Diagnostic activation-boundary policy. `bf16Boundaries` stores BF16-rounded
+/// values in fp32 buffers because Apple5 GPUs do not expose native bfloat16.
+enum ActivationNumerics: String, CaseIterable {
+    case legacy
+    case bf16Boundaries = "bf16_boundaries"
+}
+
 /// Query-tiled scaled dot-product attention over tightly packed fp16 tensors.
 /// Layout is `[heads, rows, headDim]`; only one `[tileRows,keyCount]` score tile
 /// is retained. The executor is intentionally non-reentrant because it reuses scratch.

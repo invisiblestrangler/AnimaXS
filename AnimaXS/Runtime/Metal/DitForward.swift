@@ -8,9 +8,11 @@ final class DitForward {
     private let finalLayer: DiTFinalLayerExecutor
 
     init(context: MetalContext, file: AnimapkFile,
-         attentionNumerics: AttentionNumerics = .legacy) throws {
+         attentionNumerics: AttentionNumerics = .legacy,
+         activationNumerics: ActivationNumerics = .legacy) throws {
         block = try DiTBlockExecutor(
-            context: context, file: file, attentionNumerics: attentionNumerics)
+            context: context, file: file, attentionNumerics: attentionNumerics,
+            activationNumerics: activationNumerics)
         finalLayer = try DiTFinalLayerExecutor(context: context, file: file)
     }
 

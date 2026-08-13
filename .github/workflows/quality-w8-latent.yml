@@ -72,7 +72,7 @@ jobs:
           echo "ba59e4d1797de5f6512aeafcecf3f38e1f62a47313a2a400b949c9018d84ceab  $qwen" | shasum -a 256 --check
           cp "$qwen" "$fixture/qwen3-0.6b-xsmax-w8.animapk"
           cp "$model_dir/$W8_FILE" "$fixture/anima-turbo-refine.animapk"
-          printf '%s\n' '{"attention_numerics":"legacy","latent_only":"1","capture_blocks":"0,7,14,21,27"}' \
+          printf '%s\n' '{"attention_numerics":"legacy","activation_numerics":"bf16_boundaries","latent_only":"1","capture_blocks":"0,7,14,21,27"}' \
             > "$fixture/quality-diagnostic.json"
           "$RUNNER_TEMP/xcodegen/bin/xcodegen" generate
       - name: Select simulator
@@ -93,6 +93,7 @@ jobs:
             -only-testing:AnimaXSTests/FullInferenceTests/testCanonicalProductionInference \
             test 2>&1 | tee "$RUNNER_TEMP/w8-block0-capture.log"
           grep -q 'FULL_ATTENTION_NUMERICS=legacy' "$RUNNER_TEMP/w8-block0-capture.log"
+          grep -q 'FULL_ACTIVATION_NUMERICS=bf16_boundaries' "$RUNNER_TEMP/w8-block0-capture.log"
           grep -q 'FULL_LATENT_ONLY=PASS' "$RUNNER_TEMP/w8-block0-capture.log"
         timeout-minutes: 90
       - name: Export block-0 attachments and provenance
@@ -119,6 +120,7 @@ jobs:
                      "w8_revision": os.environ["W8_REVISION"], "w8_sha256": os.environ["W8_SHA"],
                      "source_revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
                      "source_sha256": "c0b905034510750a505d21aa96c81718f4ffcc500777318421f58a88636e2174",
+                     "activation_numerics": "bf16_boundaries",
                      "byte_order": "little", "files": files}
           with open(destination, "w") as handle: json.dump(payload, handle, indent=2, sort_keys=True)
           PY
@@ -226,7 +228,7 @@ jobs:
             for mode in source quant emulation; do mkdir -p "$RUNNER_TEMP/results/$mode/$block"; done
             python scripts/dit_block0_oracle.py --in "$RUNNER_TEMP/source/$block" --out "$RUNNER_TEMP/results/source/$block" --golden "$RUNNER_TEMP/no-golden" --skip-swift --checkpoints --weight-domain source-BF16
             python scripts/dit_block0_oracle.py --in "$RUNNER_TEMP/quant/$block" --out "$RUNNER_TEMP/results/quant/$block" --golden "$RUNNER_TEMP/no-golden" --skip-swift --checkpoints --weight-domain exact-W8
-            python scripts/dit_block0_oracle.py --in "$RUNNER_TEMP/emulation/$block" --out "$RUNNER_TEMP/results/emulation/$block" --golden "$RUNNER_TEMP/no-golden" --skip-swift --checkpoints --weight-domain Swift-emulation --boundary-dtype fp16 --legacy-attention
+            python scripts/dit_block0_oracle.py --in "$RUNNER_TEMP/emulation/$block" --out "$RUNNER_TEMP/results/emulation/$block" --golden "$RUNNER_TEMP/no-golden" --skip-swift --checkpoints --weight-domain Swift-BF16-boundary-emulation --boundary-dtype fp16 --residual-dtype bf16 --legacy-attention
           done
       - name: Compare branch update deltas
         run: |

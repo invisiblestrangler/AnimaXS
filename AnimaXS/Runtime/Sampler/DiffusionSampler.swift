@@ -34,11 +34,14 @@ final class DiffusionSampler {
     private var running = false
 
     init(context: MetalContext, file: AnimapkFile,
-         attentionNumerics: AttentionNumerics = .legacy) throws {
+         attentionNumerics: AttentionNumerics = .legacy,
+         activationNumerics: ActivationNumerics = .legacy) throws {
         self.context = context
-        preparation = try DiTPreparationExecutor(context: context, file: file)
+        preparation = try DiTPreparationExecutor(
+            context: context, file: file, activationNumerics: activationNumerics)
         forward = try DitForward(
-            context: context, file: file, attentionNumerics: attentionNumerics)
+            context: context, file: file, attentionNumerics: attentionNumerics,
+            activationNumerics: activationNumerics)
         euler = EulerSampler(context: context)
         buffers = BufferPool(device: context.device)
 
