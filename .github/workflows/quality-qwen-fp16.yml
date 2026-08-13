@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
@@ -69,7 +70,7 @@ jobs:
             ${{ runner.temp }}/qwen-verify.json
             ${{ runner.temp }}/qwen-pack.sha256
 
-  latent:
+  full-image:
     needs: pack-qwen
     runs-on: macos-15
     timeout-minutes: 110
@@ -96,17 +97,24 @@ jobs:
         with:
           name: qwen-fp16-pack-${{ github.sha }}
           path: ${{ runner.temp }}/qwen-candidate
-      - name: Download exact W8 DiT and prepare fixtures
+      - name: Download existing source-FP16 DiT candidate
+        uses: actions/download-artifact@v5
+        with:
+          name: w8-sensitive-pack-07ac546932e18c7016468a3ed6d13a99425a6afc
+          path: ${{ runner.temp }}/dit-candidate
+          run-id: "31688194943"
+          github-token: ${{ github.token }}
+      - name: Prepare highest-fidelity fixtures
         run: |
           set -euo pipefail
           fixture="AnimaXSTests/Fixtures/Case1Binary"
-          dit="$RUNNER_TEMP/$W8_FILE"
-          curl --fail --location --retry 3 --retry-all-errors --progress-bar -o "$dit" \
-            "https://huggingface.co/$W8_REPO/resolve/$W8_REVISION/$W8_FILE?download=true"
-          echo "$W8_SHA256  $dit" | shasum -a 256 --check
           cp "$RUNNER_TEMP/qwen-candidate/$QWEN_FILE" "$fixture/qwen3-0.6b-xsmax-w8.animapk"
-          cp "$dit" "$fixture/anima-turbo-refine.animapk"
-          printf '%s\n' '{"attention_numerics":"legacy","activation_numerics":"legacy","latent_only":"1"}' \
+          cp "$RUNNER_TEMP/dit-candidate/anima-w8-sensitive-fp16.animapk" "$fixture/anima-turbo-refine.animapk"
+          (cd "$RUNNER_TEMP/dit-candidate" && shasum -a 256 --check sha256.txt)
+          curl --fail --location --retry 3 --retry-all-errors -o "$fixture/qwen-image-vae-xsmax-fp16.animapk" \
+            https://github.com/invisiblestrangler/AnimaXS/releases/download/model-assets-v1/qwen-image-vae-xsmax-fp16.animapk
+          echo "10171af0b826927b75fecf4482aaa0e268254874e694a0788ebdd8c4254fc447  $fixture/qwen-image-vae-xsmax-fp16.animapk" | shasum -a 256 --check
+          printf '%s\n' '{"attention_numerics":"legacy","activation_numerics":"legacy"}' \
             > "$fixture/quality-diagnostic.json"
           "$RUNNER_TEMP/xcodegen/bin/xcodegen" generate
       - name: Select simulator
@@ -116,23 +124,34 @@ jobs:
           destination=$(xcrun simctl list devices available -j | python3 -c \
             "import json,sys; d=json.load(sys.stdin); print(next(x['udid'] for r in d['devices'].values() for x in r if 'iPhone' in x['name'] and x['isAvailable']))")
           echo "id=$destination" >> "$GITHUB_OUTPUT"
-      - name: Run canonical latent inference
+      - name: Run canonical full-image inference
         run: |
           set -euo pipefail
           xcodebuild -project AnimaXS.xcodeproj -scheme AnimaXS \
             -configuration Debug \
             -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}" \
             -derivedDataPath .derivedData CODE_SIGNING_ALLOWED=NO \
+            -resultBundlePath "$RUNNER_TEMP/qwen-fp16-full.xcresult" \
             -only-testing:AnimaXSTests/FullInferenceTests/testCanonicalProductionInference \
-            test 2>&1 | tee "$RUNNER_TEMP/qwen-fp16-latent.log"
-          grep -q 'FULL_QWEN_CONTEXT=production' "$RUNNER_TEMP/qwen-fp16-latent.log"
-          grep -q 'FULL_LATENT_ONLY=PASS' "$RUNNER_TEMP/qwen-fp16-latent.log"
+            test 2>&1 | tee "$RUNNER_TEMP/qwen-fp16-full.log"
+          grep -q 'FULL_QWEN_CONTEXT=production' "$RUNNER_TEMP/qwen-fp16-full.log"
+          grep -q 'FULL_INFERENCE=PASS' "$RUNNER_TEMP/qwen-fp16-full.log"
         timeout-minutes: 90
-      - name: Upload latent evidence
+      - name: Export full-image evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/exported" "$RUNNER_TEMP/full-image"
+          xcrun xcresulttool export attachments \
+            --path "$RUNNER_TEMP/qwen-fp16-full.xcresult" --output-path "$RUNNER_TEMP/exported"
+          python3 scripts/export_full_inference_attachments.py \
+            "$RUNNER_TEMP/exported" "$RUNNER_TEMP/full-image"
+          cp "$RUNNER_TEMP/qwen-fp16-full.log" "$RUNNER_TEMP/full-image/"
+      - name: Upload full-image evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: qwen-fp16-latent-${{ github.sha }}
+          name: qwen-fp16-full-${{ github.sha }}
           retention-days: 14
           if-no-files-found: error
-          path: ${{ runner.temp }}/qwen-fp16-latent.log
+          path: ${{ runner.temp }}/full-image
