@@ -141,6 +141,7 @@ final class FullInferenceTests: XCTestCase {
         // committed case1_final_latent.f32 (== golden NPZ final_latent). ----
         let finalValues = read(finalLatent)
         var latentCosineText = "n/a", latentRMSText = "n/a", latentMaxAbsText = "n/a"
+        var inferencePassed = true
         if let reference = bundledFixture(named: "case1_final_latent.f32") {
             let refValues = try floats(from: reference)
             if refValues.count == finalValues.count {
@@ -155,9 +156,16 @@ final class FullInferenceTests: XCTestCase {
                 print("FULL_FINAL_LATENT_MAXABS=\(maxAbs)")
                 // The authoritative floor is cosine ≥ 0.65 (D057/D059). The
                 // W4 recurrent path deviates from source-BF16 by design.
+                if cosine < 0.65 { inferencePassed = false }
                 XCTAssertGreaterThanOrEqual(cosine, 0.65,
                                             "final latent cosine must meet the D057 floor")
+            } else {
+                inferencePassed = false
+                XCTFail("final latent reference element count mismatch")
             }
+        } else {
+            inferencePassed = false
+            XCTFail("final latent reference fixture is missing")
         }
 
         // ---- 5. VAE decode → DecodedRGBA8 ----
@@ -168,11 +176,22 @@ final class FullInferenceTests: XCTestCase {
         let totalSeconds = Date().timeIntervalSince(overall)
 
         // ---- Image health assertions ----
+        if image.width != 512 || image.height != 512
+            || image.bytes.count != 512 * 512 * 4
+            || isMonochrome(image.bytes)
+            || dynamicRange(image.bytes) <= 32 {
+            inferencePassed = false
+        }
         XCTAssertEqual(image.width, 512, "decoded image width")
         XCTAssertEqual(image.height, 512, "decoded image height")
         XCTAssertEqual(image.bytes.count, 512 * 512 * 4, "RGBA byte count")
-        for pixel in 0..<(512 * 512) {
-            XCTAssertEqual(image.bytes[pixel * 4 + 3], 255, "alpha at pixel \(pixel)")
+        if image.bytes.count == 512 * 512 * 4 {
+            for pixel in 0..<(512 * 512) {
+                if image.bytes[pixel * 4 + 3] != 255 {
+                    inferencePassed = false
+                }
+                XCTAssertEqual(image.bytes[pixel * 4 + 3], 255, "alpha at pixel \(pixel)")
+            }
         }
         XCTAssertFalse(isMonochrome(image.bytes), "image must not be a single constant color")
         XCTAssertGreaterThan(dynamicRange(image.bytes), 32,
@@ -219,11 +238,16 @@ final class FullInferenceTests: XCTestCase {
                 print("FULL_RGB_RMSE=\(rmse)")
                 print("FULL_RGB_MAE=\(mae)")
                 print("FULL_RGB_MAXABS=\(maxAbs)")
+                if cosine < 0.65 { inferencePassed = false }
                 XCTAssertGreaterThanOrEqual(cosine, 0.65,
                                             "final RGB cosine must meet the 0.65 regression floor (D074)")
             } else {
+                inferencePassed = false
                 XCTFail("RGB8 reference byte count mismatch (got \(rgbBytes.count), ref \(refRGB.count))")
             }
+        } else {
+            inferencePassed = false
+            XCTFail("RGB8 reference fixture is missing")
         }
 
         // ---- Observational metrics ----
@@ -259,10 +283,10 @@ final class FullInferenceTests: XCTestCase {
             "diffusion_seconds": String(format: "%.2f", diffusionSeconds),
             "vae_seconds": String(format: "%.2f", vaeSeconds),
             "total_seconds": String(format: "%.2f", totalSeconds),
-            "full_inference": "PASS",
+            "full_inference": inferencePassed ? "PASS" : "FAIL",
         ])
 
-        print("FULL_INFERENCE=PASS")
+        print("FULL_INFERENCE=\(inferencePassed ? "PASS" : "FAIL")")
     }
 
     // MARK: - Required-mode fixture resolution
