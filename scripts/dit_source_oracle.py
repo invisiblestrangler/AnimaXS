@@ -106,11 +106,17 @@ def silu(x):
 
 
 def scaled_dot_product(q, k, v):
-    """optimized_attention: scale 1/sqrt(head_dim), fp32 softmax, bf16 PV."""
+    """optimized_attention (skip_reshape=True): heads folded into the batch,
+    scale 1/sqrt(head_dim), fp32 softmax, bf16 PV."""
     scale = HEAD_DIM ** -0.5
-    scores = (q.float() @ k.float().transpose(-2, -1)) * scale
+    b, s_q, h, d = q.shape
+    s_k = k.shape[1]
+    q2 = q.reshape(b * h, s_q, d)
+    k2 = k.reshape(b * h, s_k, d)
+    v2 = v.reshape(b * h, s_k, d)
+    scores = (q2.float() @ k2.float().transpose(-2, -1)) * scale
     probs = F.softmax(scores, dim=-1)
-    out = (probs.to(q.dtype) @ v).to(q.dtype)
+    out = (probs.to(q.dtype) @ v2).reshape(b, s_q, h, d)
     return out
 
 

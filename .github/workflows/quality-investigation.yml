@@ -123,28 +123,28 @@ jobs:
           echo "SOURCE=$source" >> "$GITHUB_ENV"
       - name: Run source trajectory parity + end-to-end oracle
         run: |
-          set -euo pipefail
+          set -u
           mkdir -p "$RUNNER_TEMP/oracle-evidence"
+          failures=0
           for dir in "$RUNNER_TEMP"/artifacts/qwen-fp16-full-*; do
             name=$(basename "$dir" | sed 's/qwen-fp16-full-//')
             [ -f "$dir/step00_x_in.f32" ] || { echo "skip $name: no trajectory capture"; continue; }
             out="$RUNNER_TEMP/oracle-evidence/$name"
             mkdir -p "$out"
-            echo "=== trajectory parity (bf16): $name ==="
-            python3 scripts/dit_source_oracle.py --source "$RUNNER_TEMP/dit-source.safetensors" \
-              --mode trajectory --capture "$dir" --out "$out" --dtype bf16
-            echo "=== trajectory parity (fp32): $name ==="
-            python3 scripts/dit_source_oracle.py --source "$RUNNER_TEMP/dit-source.safetensors" \
-              --mode trajectory --capture "$dir" --out "$out" --dtype fp32
+            for dt in bf16 fp32; do
+              echo "=== trajectory parity ($dt): $name ==="
+              python3 scripts/dit_source_oracle.py --source "$RUNNER_TEMP/dit-source.safetensors" \
+                --mode trajectory --capture "$dir" --out "$out" --dtype $dt || { echo "FAILED trajectory $name $dt"; failures=$((failures+1)); }
+            done
           done
-          echo "=== end-to-end source run (bf16) vs golden ==="
-          python3 scripts/dit_source_oracle.py --source "$RUNNER_TEMP/dit-source.safetensors" \
-            --mode endtoend --fixtures AnimaXSTests/Fixtures/Case1Binary \
-            --out "$RUNNER_TEMP/oracle-evidence" --dtype bf16
-          echo "=== end-to-end source run (fp32) vs golden ==="
-          python3 scripts/dit_source_oracle.py --source "$RUNNER_TEMP/dit-source.safetensors" \
-            --mode endtoend --fixtures AnimaXSTests/Fixtures/Case1Binary \
-            --out "$RUNNER_TEMP/oracle-evidence" --dtype fp32
+          for dt in bf16 fp32; do
+            echo "=== end-to-end source run ($dt) vs golden ==="
+            python3 scripts/dit_source_oracle.py --source "$RUNNER_TEMP/dit-source.safetensors" \
+              --mode endtoend --fixtures AnimaXSTests/Fixtures/Case1Binary \
+              --out "$RUNNER_TEMP/oracle-evidence" --dtype $dt || { echo "FAILED endtoend $dt"; failures=$((failures+1)); }
+          done
+          echo "oracle failures: $failures"
+          exit "$failures"
       - name: Upload oracle evidence
         if: always()
         uses: actions/upload-artifact@v4
