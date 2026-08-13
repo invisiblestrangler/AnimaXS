@@ -123,7 +123,7 @@ final class FullInferenceTests: XCTestCase {
         var capturedStep0 = false
         var capturedBlock0 = false
         var capturedBranches: Set<String> = []
-        try await sampler.execute(
+        try await sampler.executeDiagnostic(
             initialLatent: initial, crossContext: cross, outputLatent: finalLatent,
             blockProgress: { _, _ in
                 blockCallbacks += 1

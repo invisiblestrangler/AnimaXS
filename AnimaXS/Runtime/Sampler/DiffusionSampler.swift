@@ -70,6 +70,20 @@ final class DiffusionSampler {
         outputLatent: MTLBuffer,
         startStep: Int = 0,
         blockProgress: BlockProgress? = nil,
+        stepCompleted: StepCompleted? = nil
+    ) async throws {
+        try await executeDiagnostic(
+            initialLatent: initialLatent, crossContext: crossContext,
+            outputLatent: outputLatent, startStep: startStep,
+            blockProgress: blockProgress, stepCompleted: stepCompleted)
+    }
+
+    func executeDiagnostic(
+        initialLatent: MTLBuffer,
+        crossContext: MTLBuffer,
+        outputLatent: MTLBuffer,
+        startStep: Int = 0,
+        blockProgress: BlockProgress? = nil,
         stepCompleted: StepCompleted? = nil,
         diagnosticStepPrepared: DiagnosticStepPrepared? = nil,
         diagnosticBlockCompleted: DiagnosticBlockCompleted? = nil,
