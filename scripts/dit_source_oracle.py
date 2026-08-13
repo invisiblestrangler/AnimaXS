@@ -597,6 +597,78 @@ def mode_trajectory(model, w, capture, out_dir, dtype):
     print("wrote", os.path.join(out_dir, "trajectory-parity.json"))
 
 
+def mode_blocks(model, w, capture, out_dir, dtype):
+    """Same-input per-block parity: run the source forward from Swift's
+    captured step-0 x_in and compare prep outputs and block residuals against
+    Swift's w8-step0-* captures (capture_blocks diagnostic)."""
+    os.makedirs(out_dir, exist_ok=True)
+    x_in = load_f32(capture_file(capture, "step00_x_in.f32"),
+                    LATENT_EL).view(1, 16, 1, 64, 64)
+    context = load_f32(capture_file(capture, "cross-context.f32"),
+                       CTX_TOKENS * CTX_DIM).view(1, CTX_TOKENS, CTX_DIM)
+    sigma = float(open(capture_file(capture, "sigmas.txt")).read().split(",")[0])
+    dt = dtype
+
+    def capt(name, count):
+        p = os.path.join(capture, name)
+        if not os.path.isfile(p):
+            return None
+        return load_f32(p, count).float()
+
+    src = {}
+    with torch.no_grad():
+        x = x_in.to(dt)
+        pm = torch.zeros(x.shape[0], 1, x.shape[2], x.shape[3], x.shape[4],
+                         dtype=dt, device=x.device)
+        x17 = torch.cat([x, pm], dim=1)
+        tokens = model.patchify(x17)
+        emb_tok = linear(tokens.reshape(1, TOKENS, 68), model.x_proj)
+        emb_tok = emb_tok.reshape(1, 1, 32, 32, DIM)
+        t_emb_raw = model.t_steps(torch.tensor([sigma]), dt)
+        emb, adaln = model.t_emb(t_emb_raw)
+        emb = emb.unsqueeze(1)
+        adaln = adaln.unsqueeze(1)
+        emb = rms_norm(emb, model.t_norm)
+        context = context.to(dt)
+
+        rows = []
+        # prep comparisons
+        for sname, scount, cname in [
+                ("embedding", DIM, "w8-step0-embedding.f32"),
+                ("adaln", 6 * DIM, "w8-step0-adaln.f32"),
+                ("block0_input", TOKENS * DIM, "w8-step0-block0-input.f32")]:
+            swift = capt(cname, scount)
+            if swift is None:
+                continue
+            if sname == "embedding":
+                srcv = emb.reshape(-1).float()
+            elif sname == "adaln":
+                srcv = adaln.reshape(-1).float()
+            else:
+                srcv = emb_tok.reshape(-1).float()
+            cos, rmse, maxabs = compare(srcv, swift)
+            rows.append({"name": sname, "cosine": cos, "rmse": rmse,
+                         "maxabs": maxabs})
+            print(f"{sname}: cosine={cos:.6f} rmse={rmse:.6f} "
+                  f"maxabs={maxabs:.6f}", flush=True)
+        # block residuals
+        for i, blk in enumerate(model.blocks):
+            emb_tok = blk.forward(emb_tok, emb, adaln, context, model.rope)
+            swift_out = capt(f"w8-step0-block{i}-output.f32", TOKENS * DIM)
+            if swift_out is None:
+                continue
+            srcv = emb_tok.reshape(-1).float()
+            cos, rmse, maxabs = compare(srcv, swift_out)
+            rows.append({"name": f"block{i}", "cosine": cos, "rmse": rmse,
+                         "maxabs": maxabs})
+            print(f"block{i}: cosine={cos:.6f} rmse={rmse:.6f} "
+                  f"maxabs={maxabs:.6f}", flush=True)
+    with open(os.path.join(out_dir, "blocks-parity.json"), "w") as fh:
+        json.dump({"dtype": str(dtype), "sigma": sigma, "rows": rows},
+                  fh, indent=2)
+    print("wrote", os.path.join(out_dir, "blocks-parity.json"))
+
+
 def mode_endtoend(model, adapter, fixtures, out_dir, dtype):
     os.makedirs(out_dir, exist_ok=True)
     noise = load_f32(os.path.join(fixtures, "case1_noise.f32"),
@@ -638,7 +710,8 @@ def mode_endtoend(model, adapter, fixtures, out_dir, dtype):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--source", required=True)
-    ap.add_argument("--mode", required=True, choices=["trajectory", "endtoend"])
+    ap.add_argument("--mode", required=True,
+                    choices=["trajectory", "endtoend", "blocks"])
     ap.add_argument("--capture", default=None)
     ap.add_argument("--fixtures", default=None)
     ap.add_argument("--out", required=True)
@@ -656,6 +729,9 @@ def main():
     if args.mode == "trajectory":
         assert args.capture, "--capture required"
         mode_trajectory(model, w, args.capture, args.out, dtype)
+    elif args.mode == "blocks":
+        assert args.capture, "--capture required"
+        mode_blocks(model, w, args.capture, args.out, dtype)
     else:
         assert args.fixtures, "--fixtures required"
         adapter = Adapter(w, dtype)
