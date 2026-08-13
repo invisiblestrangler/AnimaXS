@@ -89,6 +89,9 @@ jobs:
           curl --fail --location --retry 3 --retry-all-errors -o "$fixture/qwen3-0.6b-xsmax-w8.animapk" \
             https://github.com/invisiblestrangler/AnimaXS/releases/download/model-assets-v1/qwen3-0.6b-xsmax-w8.animapk
           echo "ba59e4d1797de5f6512aeafcecf3f38e1f62a47313a2a400b949c9018d84ceab  $fixture/qwen3-0.6b-xsmax-w8.animapk" | shasum -a 256 --check
+          curl --fail --location --retry 3 --retry-all-errors -o "$fixture/qwen-image-vae-xsmax-fp16.animapk" \
+            https://github.com/invisiblestrangler/AnimaXS/releases/download/model-assets-v1/qwen-image-vae-xsmax-fp16.animapk
+          echo "10171af0b826927b75fecf4482aaa0e268254874e694a0788ebdd8c4254fc447  $fixture/qwen-image-vae-xsmax-fp16.animapk" | shasum -a 256 --check
           printf '%s\n' '{"attention_numerics":"legacy"}' > "$fixture/quality-diagnostic.json"
           "$RUNNER_TEMP/xcodegen/bin/xcodegen" generate
       - name: Run canonical latent inference
