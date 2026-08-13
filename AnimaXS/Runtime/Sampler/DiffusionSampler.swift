@@ -13,6 +13,16 @@ final class DiffusionSampler {
         _ step: Int, _ sigma: Float, _ nextSigma: Float,
         _ denoised: MTLBuffer, _ latent: MTLBuffer
     ) throws -> Void
+    typealias DiagnosticStepPrepared = (
+        _ step: Int, _ residual: MTLBuffer, _ embedding: MTLBuffer,
+        _ adalnLora: MTLBuffer, _ crossContextHalf: MTLBuffer, _ rope: MTLBuffer
+    ) throws -> Void
+    typealias DiagnosticBlockCompleted = (
+        _ step: Int, _ block: Int, _ residual: MTLBuffer
+    ) throws -> Void
+    typealias DiagnosticBranchCompleted = (
+        _ step: Int, _ block: Int, _ branch: String, _ residual: MTLBuffer
+    ) throws -> Void
 
     private let context: MetalContext
     private let preparation: DiTPreparationExecutor
@@ -60,7 +70,10 @@ final class DiffusionSampler {
         outputLatent: MTLBuffer,
         startStep: Int = 0,
         blockProgress: BlockProgress? = nil,
-        stepCompleted: StepCompleted? = nil
+        stepCompleted: StepCompleted? = nil,
+        diagnosticStepPrepared: DiagnosticStepPrepared? = nil,
+        diagnosticBlockCompleted: DiagnosticBlockCompleted? = nil,
+        diagnosticBranchCompleted: DiagnosticBranchCompleted? = nil
     ) async throws {
         try beginRun()
         defer { endRun() }
@@ -101,12 +114,17 @@ final class DiffusionSampler {
             try await preparation.execute(
                 latent: latent, sigma: sigma, residual: residual,
                 embedding: embedding, adalnLora: adaln)
+            try diagnosticStepPrepared?(
+                step, residual, embedding, adaln, crossHalf, rope)
             try await forward.execute(
                 residual: residual, emb: embedding, adalnLora: adaln,
-                crossContext: crossHalf, rope: rope
-            ) { block, _ in
+                crossContext: crossHalf, rope: rope,
+                blockCompleted: { block, _ in
                 try blockProgress?(step, block)
-            }
+                try diagnosticBlockCompleted?(step, block, residual)
+            }, diagnosticBranchCompleted: { block, branch, current in
+                try diagnosticBranchCompleted?(step, block, branch, current)
+            })
             try await forward.executeVelocityFinalLayer(
                 residual: residual, emb: embedding, adalnLora: adaln,
                 velocity: velocity)

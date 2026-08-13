@@ -6,6 +6,7 @@ import Metal
 /// This object is intentionally non-reentrant because every activation and weight scratch
 /// allocation is reused between operations and calls.
 final class DiTBlockExecutor {
+    typealias DiagnosticBranchCompleted = (_ branch: String, _ residual: MTLBuffer) throws -> Void
     static let tokens = 1_024
     static let contextTokens = 512
     static let dim = 2_048
@@ -48,7 +49,8 @@ final class DiTBlockExecutor {
         emb: MTLBuffer,
         adalnLora: MTLBuffer,
         crossContext: MTLBuffer,
-        rope: MTLBuffer
+        rope: MTLBuffer,
+        diagnosticBranchCompleted: DiagnosticBranchCompleted? = nil
     ) async throws {
         try validateInputs(residual: residual, emb: emb, adalnLora: adalnLora,
                            crossContext: crossContext, rope: rope)
@@ -64,11 +66,20 @@ final class DiTBlockExecutor {
         try encodeAttentionBranch(command, residual: residual, crossContext: crossContext,
                                   rope: rope, siluEmb: siluEmb, adalnLora: adalnLora,
                                   weights: weights, cross: false)
+        let selfSnapshot = try diagnosticBranchCompleted.map { _ in
+            try encodeSnapshot(command, source: residual, key: "dit.diagnostic.afterSelf.f32")
+        }
         try encodeAttentionBranch(command, residual: residual, crossContext: crossContext,
                                   rope: rope, siluEmb: siluEmb, adalnLora: adalnLora,
                                   weights: weights, cross: true)
+        let crossSnapshot = try diagnosticBranchCompleted.map { _ in
+            try encodeSnapshot(command, source: residual, key: "dit.diagnostic.afterCross.f32")
+        }
         try encodeMLP(command, residual: residual, siluEmb: siluEmb,
                       adalnLora: adalnLora, weights: weights)
+        let mlpSnapshot = try diagnosticBranchCompleted.map { _ in
+            try encodeSnapshot(command, source: residual, key: "dit.diagnostic.afterMLP.f32")
+        }
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             command.addCompletedHandler { completed in
@@ -77,6 +88,24 @@ final class DiTBlockExecutor {
             }
             command.commit()
         }
+        if let diagnosticBranchCompleted {
+            try diagnosticBranchCompleted("self", selfSnapshot!)
+            try diagnosticBranchCompleted("cross", crossSnapshot!)
+            try diagnosticBranchCompleted("mlp", mlpSnapshot!)
+        }
+    }
+
+    private func encodeSnapshot(
+        _ command: MTLCommandBuffer, source: MTLBuffer, key: String
+    ) throws -> MTLBuffer {
+        let bytes = Self.tokens * Self.dim * MemoryLayout<Float>.stride
+        let snapshot = buffers.buffer(key: key, bytes: bytes)
+        guard let encoder = command.makeBlitCommandEncoder() else {
+            throw AnimapkError.validation("failed to create DiT diagnostic snapshot encoder")
+        }
+        encoder.copy(from: source, sourceOffset: 0, to: snapshot, destinationOffset: 0, size: bytes)
+        encoder.endEncoding()
+        return snapshot
     }
 
     private func encodeAttentionBranch(

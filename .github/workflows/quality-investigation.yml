@@ -17,6 +17,9 @@ env:
   DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
 
 jobs:
+  w8-block0-capture:
+    uses: ./.github/workflows/quality-w8-latent.yml
+
   focused-metal:
     runs-on: macos-15
     timeout-minutes: 45

@@ -119,6 +119,10 @@ final class FullInferenceTests: XCTestCase {
         var completedSteps = 0
         var blockCallbacks = 0
         var stepLatents: [[Float]] = []
+        let captureBlock0 = diagnosticConfig("capture_block0") == "1"
+        var capturedStep0 = false
+        var capturedBlock0 = false
+        var capturedBranches: Set<String> = []
         try await sampler.execute(
             initialLatent: initial, crossContext: cross, outputLatent: finalLatent,
             blockProgress: { _, _ in
@@ -129,6 +133,32 @@ final class FullInferenceTests: XCTestCase {
                 completedSteps += 1
                 stepLatents.append(self.read(latent))
                 print("FULL_DIFFUSION_STEP_\(step)_SECONDS=\(String(format: "%.2f", stepSeconds[step]))")
+            },
+            diagnosticStepPrepared: { step, residual, embedding, adaln, crossHalf, rope in
+                guard captureBlock0, step == 0, !capturedStep0 else { return }
+                capturedStep0 = true
+                self.attachBuffer(residual, bytes: 1_024 * 2_048 * 4,
+                                  name: "w8-step0-block0-input.f32")
+                self.attachBuffer(embedding, bytes: 2_048 * 4,
+                                  name: "w8-step0-embedding.f32")
+                self.attachBuffer(adaln, bytes: 6_144 * 4,
+                                  name: "w8-step0-adaln.f32")
+                self.attachBuffer(crossHalf, bytes: 512 * 1_024 * 2,
+                                  name: "w8-cross-context.f16")
+                self.attachBuffer(rope, bytes: 1_024 * 64 * 4 * 4,
+                                  name: "w8-rope.f32")
+            },
+            diagnosticBlockCompleted: { step, block, residual in
+                guard captureBlock0, step == 0, block == 0, !capturedBlock0 else { return }
+                capturedBlock0 = true
+                self.attachBuffer(residual, bytes: 1_024 * 2_048 * 4,
+                                  name: "w8-step0-block0-output.f32")
+            },
+            diagnosticBranchCompleted: { step, block, branch, residual in
+                guard captureBlock0, step == 0, block == 0,
+                      capturedBranches.insert(branch).inserted else { return }
+                self.attachBuffer(residual, bytes: 1_024 * 2_048 * 4,
+                                  name: "w8-step0-block0-after-\(branch).f32")
             })
         let diffusionSeconds = Date().timeIntervalSince(diffusionStart)
         XCTAssertEqual(completedSteps, 8, "exactly 8 Euler steps completed")
@@ -344,6 +374,16 @@ final class FullInferenceTests: XCTestCase {
               let object = try? JSONSerialization.jsonObject(with: data) as? [String: String]
         else { return nil }
         return object[key]
+    }
+
+    private func attachBuffer(_ buffer: MTLBuffer, bytes: Int, name: String) {
+        precondition(buffer.length >= bytes)
+        let attachment = XCTAttachment(
+            data: Data(bytes: buffer.contents(), count: bytes),
+            uniformTypeIdentifier: UTType.data.identifier)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     private func floats(from url: URL) throws -> [Float] {

@@ -59,7 +59,7 @@ jobs:
           echo "ba59e4d1797de5f6512aeafcecf3f38e1f62a47313a2a400b949c9018d84ceab  $qwen" | shasum -a 256 --check
           cp "$qwen" "$fixture/qwen3-0.6b-xsmax-w8.animapk"
           cp "$model_dir/$W8_FILE" "$fixture/anima-turbo-refine.animapk"
-          printf '%s\n' '{"attention_numerics":"fp32ScoresAndSoftmax","latent_only":"1"}' \
+          printf '%s\n' '{"attention_numerics":"legacy","latent_only":"1","capture_block0":"1"}' \
             > "$fixture/quality-diagnostic.json"
           "$RUNNER_TEMP/xcodegen/bin/xcodegen" generate
       - name: Select simulator
@@ -76,17 +76,52 @@ jobs:
             -configuration Debug \
             -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.id }}" \
             -derivedDataPath .derivedData CODE_SIGNING_ALLOWED=NO \
+            -resultBundlePath "$RUNNER_TEMP/w8-block0.xcresult" \
             -only-testing:AnimaXSTests/FullInferenceTests/testCanonicalProductionInference \
-            test 2>&1 | tee "$RUNNER_TEMP/w8-fp32-attention-latent.log"
-          grep -q 'FULL_ATTENTION_NUMERICS=fp32ScoresAndSoftmax' "$RUNNER_TEMP/w8-fp32-attention-latent.log"
-          grep -q 'FULL_LATENT_ONLY=PASS' "$RUNNER_TEMP/w8-fp32-attention-latent.log"
-          grep -q 'FULL_FINAL_LATENT_COSINE=' "$RUNNER_TEMP/w8-fp32-attention-latent.log"
+            test 2>&1 | tee "$RUNNER_TEMP/w8-block0-capture.log"
+          grep -q 'FULL_ATTENTION_NUMERICS=legacy' "$RUNNER_TEMP/w8-block0-capture.log"
+          grep -q 'FULL_LATENT_ONLY=PASS' "$RUNNER_TEMP/w8-block0-capture.log"
         timeout-minutes: 90
+      - name: Export block-0 attachments and provenance
+        if: always()
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/w8-block0-capture"
+          raw="$RUNNER_TEMP/w8-block0-export"
+          mkdir -p "$out" "$raw"
+          xcrun xcresulttool export attachments \
+            --path "$RUNNER_TEMP/w8-block0.xcresult" --output-path "$raw"
+          for name in \
+            w8-step0-block0-input.f32 w8-step0-embedding.f32 w8-step0-adaln.f32 \
+            w8-cross-context.f16 w8-rope.f32 w8-step0-block0-after-self.f32 \
+            w8-step0-block0-after-cross.f32 w8-step0-block0-after-mlp.f32 \
+            w8-step0-block0-output.f32; do
+            found=$(find "$raw" -type f -name "$name" -print -quit)
+            test -n "$found" || { echo "::error::missing $name"; exit 1; }
+            cp "$found" "$out/$name"
+          done
+          cp "$RUNNER_TEMP/w8-block0-capture.log" "$out/"
+          python3 - "$out/provenance.json" "$out" <<'PY'
+          import hashlib, json, os, sys
+          destination, root = sys.argv[1:]
+          files = {}
+          for name in sorted(os.listdir(root)):
+              path = os.path.join(root, name)
+              if os.path.isfile(path):
+                  with open(path, "rb") as handle:
+                      files[name] = {"bytes": os.path.getsize(path), "sha256": hashlib.sha256(handle.read()).hexdigest()}
+          payload = {"git_sha": os.environ["GITHUB_SHA"], "attention": "legacy", "sigma": 1.0,
+                     "w8_revision": os.environ["W8_REVISION"], "w8_sha256": os.environ["W8_SHA"],
+                     "source_revision": "f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b",
+                     "source_sha256": "c0b905034510750a505d21aa96c81718f4ffcc500777318421f58a88636e2174",
+                     "byte_order": "little", "files": files}
+          with open(destination, "w") as handle: json.dump(payload, handle, indent=2, sort_keys=True)
+          PY
       - name: Upload latent evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: w8-fp32-attention-latent-${{ github.sha }}
+          name: w8-block0-capture-${{ github.sha }}
           retention-days: 14
           if-no-files-found: error
-          path: ${{ runner.temp }}/w8-fp32-attention-latent.log
+          path: ${{ runner.temp }}/w8-block0-capture
