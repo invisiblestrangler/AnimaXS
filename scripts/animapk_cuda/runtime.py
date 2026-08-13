@@ -89,7 +89,9 @@ class LadderDiT:
     """Source-oracle DiT graph with per-block capture; weights come from a
     stage provider so decoded_reference and streaming share one forward.
 
-    Provider contract: callable(keys) -> {stripped_name: fp32 CPU tensor}.
+    Provider contract: callable(prefix) -> {stripped_name: fp32 CPU tensor}
+    for every tensor whose name starts with prefix (e.g. "x_embedder",
+    "t_embedder", "blocks.7", "final_layer").
     Blocks are built lazily per forward call (decode/run interleave).
     """
 
@@ -97,15 +99,17 @@ class LadderDiT:
         self.dtype = dtype
         self.device = device
         self._provider = provider
-        w = self._provider(["x_embedder", "t_embedder", "t_embedding_norm"])
+        w = {}
+        for prefix in ("x_embedder", "t_embedder", "t_embedding_norm"):
+            w.update(self._provider(prefix))
         self.x_proj = w["x_embedder.proj.1.weight"]
         self.t_emb = dso.DitTimestepEmbedding(w)
         self.t_norm = w["t_embedding_norm.weight"]
-        self.final_w = self._provider(["final_layer"])
+        self.final_w = self._provider("final_layer")
         self.rope = dso.dit_rope().to(dtype)
 
     def _block(self, i):
-        wb = self._provider([f"blocks.{i}"])
+        wb = self._provider(f"blocks.{i}")
         blk = dso.DitBlock(wb, i)
         return _to_device(blk, self.device)
 
@@ -172,7 +176,9 @@ class DecodedReference(LadderDiT):
             if name.startswith("model.diffusion_model."):
                 name = name[len("model.diffusion_model."):]
             self.full[name] = decode_tensor_from_pack(pack, item, device="cpu")
-        super().__init__(lambda keys: {k: self.full[k] for k in keys}, dtype, device)
+        super().__init__(
+            lambda prefix: {k: v for k, v in self.full.items() if k.startswith(prefix)},
+            dtype, device)
 
 
 class StreamingAnimapk(LadderDiT):
@@ -191,19 +197,19 @@ class StreamingAnimapk(LadderDiT):
         self.max_range = max(r["end"] - r["start"] for r in self.manifest["ranges"])
         self.ring = torch.zeros(self.max_range, dtype=torch.uint8, device=device)
 
-        def provider(keys):
+        def provider(prefix):
             out = {}
-            for key in keys:
-                r = self.ranges[key]
-                raw = bytes(pack.blob[r["start"]:r["end"]])
-                n = len(raw)
-                src = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
-                self.ring[:n].copy_(src, non_blocking=True)
-                ring_view = self.ring[:n]
-                for t in r["tensors"]:
-                    item = pack.meta_by_offset(t["global_offset"])
-                    local = t["global_offset"] - r["start"]
-                    out[t["name"]] = _weight_from_ring(ring_view, item, local).cpu()
+            for key, r in self.ranges.items():
+                if key == prefix or key.startswith(prefix + "."):
+                    raw = bytes(pack.blob[r["start"]:r["end"]])
+                    n = len(raw)
+                    src = torch.frombuffer(bytearray(raw), dtype=torch.uint8)
+                    self.ring[:n].copy_(src, non_blocking=True)
+                    ring_view = self.ring[:n]
+                    for t in r["tensors"]:
+                        item = pack.meta_by_offset(t["global_offset"])
+                        local = t["global_offset"] - r["start"]
+                        out[t["name"]] = _weight_from_ring(ring_view, item, local).cpu()
             return out
 
         super().__init__(provider, dtype, device)
