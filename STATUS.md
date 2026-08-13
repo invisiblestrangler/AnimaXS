@@ -1,6 +1,6 @@
 # STATUS — AnimaXS (keep short & current)
 
-- **Current milestone:** Implementation, model distribution (L002), and CI-verifiable inference work are COMPLETE. Normal CI is green on the final HEAD. L003 full-inference runs have executed the full production chain on the simulator (calibration metrics recorded); final L003 acceptance run in progress. Physical A12 acceptance remains explicitly PENDING (no iPhone XS Max hardware available).
+- **Current milestone:** The project has entered the runbook-defined refine-and-improve phase. Legacy three-pack inference is connected and captured, but its patterned/dull W4 image is not the refinement target. Work is now focused on reproducible DiT W4-v2/W8 packing, one shared W4/W8 runtime graph, and canonical visual comparison.
 - **Final HEAD:** `bbf5cc1` (main, origin/main). Last source commit `3dae37d`; regenerated `AnimaXS.xcodeproj` bot commit `bbf5cc1`.
 - **Normal CI:** run `31634877232` (workflow_dispatch on `bbf5cc1`): **SUCCESS** — project-consistency ✓, iphone-build ✓, simulator-tests ✓ (151 tests, 13 expected fixture-gated skips, 0 failures). (An earlier run `31633936959` failed only `DiagnosticsTests.testSelfTestsArePassOrSkippedNotFailByDefault` because the runner VM's simulator Application Support retained valid packs from a prior pack-backed workflow, so pack validation legitimately returned PASS — an environmental flake, confirmed by the clean re-run; see D072.)
 - **L002 release verification:** `model-assets-v1` — all three packs independently re-downloaded unauthenticated and SHA-256-verified; manifest, LICENSE, NOTICE confirmed (see DECISIONS D070).
@@ -10,5 +10,7 @@
 - **Known incomplete / in progress:** none CI-verifiable. J005 tiled VAE deferred pending physical-device evidence.
 - **Device-only unknowns (NOT CI-provable):** A12 speed, memory/jetsam, Apple5 behavior, watchdog limits, page cache, thermal stability, second-generation stability, real-device install/launch. Hosted Metal functional success does not answer them.
 - **Next tasks:**
-  1. Physical A12 acceptance — build in Xcode, install on iPhone XS Max, record timings/memory/thermal.
-  2. Nothing else CI-verifiable remains open.
+  1. Complete the v2 packer/verifier and W8 runtime generalization.
+  2. Pack and publish exact-source W4-v2/W8 on separate HF-backed CI jobs.
+  3. Run both canonical image captures and choose the visually acceptable variant.
+  4. Physical A12 acceptance remains outside this refinement cycle and is still pending.

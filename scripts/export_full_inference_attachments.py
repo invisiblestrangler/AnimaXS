@@ -10,7 +10,7 @@ Usage:
   export_full_inference_attachments.py <exported_dir> <artifacts_dir>
 
 Required outputs in <artifacts_dir>:
-  generated.png, reference.png, comparison.png, metrics.txt
+  generated.png, reference.png, comparison.png, metrics.txt, pack-metadata.json
 """
 
 import json
@@ -33,6 +33,7 @@ def main() -> int:
         "reference": "reference.png",
         "comparison": "comparison.png",
         "metrics": "metrics.txt",
+        "pack-metadata": "pack-metadata.json",
     }
     found = {}
 

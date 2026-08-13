@@ -74,25 +74,33 @@ final class LLMAdapterMetal {
 
     private func gatherEmbedding(_ ids: [Int], output: MTLBuffer) async throws {
         let rows = ids.count
-        let packed = buffers.buffer(key: "adapter.embedding.packed", bytes: rows * 512)
-        let parameterBytes = rows * 16 * 2
+        let storage = locator.embedding.tensor.storage
+        let packedRowBytes = storage == .w4 ? (Self.hidden + 1) / 2 : Self.hidden
+        let groupsPerRow = (Self.hidden + DiTQuantizedWeightFactory.groupSize - 1)
+            / DiTQuantizedWeightFactory.groupSize
+        let packed = buffers.buffer(
+            key: "adapter.embedding.packed", bytes: rows * packedRowBytes)
+        let parameterBytes = rows * groupsPerRow * MemoryLayout<Float16>.stride
         let scale = buffers.buffer(key: "adapter.embedding.scale", bytes: parameterBytes)
         let zero = buffers.buffer(key: "adapter.embedding.zero", bytes: parameterBytes)
         for (destinationRow, id) in ids.enumerated() {
             let spans = try locator.embeddingRow(id)
-            try copy(spans.data, to: packed, destinationOffset: destinationRow * 512)
-            try copy(spans.scale, to: scale, destinationOffset: destinationRow * 32)
-            try copy(spans.zero, to: zero, destinationOffset: destinationRow * 32)
+            try copy(spans.data, to: packed, destinationOffset: destinationRow * packedRowBytes)
+            try copy(spans.scale, to: scale,
+                     destinationOffset: destinationRow * groupsPerRow * MemoryLayout<Float16>.stride)
+            try copy(spans.zero, to: zero,
+                     destinationOffset: destinationRow * groupsPerRow * MemoryLayout<Float16>.stride)
         }
         let half = buffers.buffer(key: "adapter.embedding.f16", bytes: rows * Self.hidden * 2)
         guard let command = context.commandQueue.makeCommandBuffer() else {
             throw AnimapkError.validation("failed to create adapter embedding command buffer")
         }
-        let pipeline = try context.pipeline(named: "dequant_w4_to_half")
+        let pipelineName = storage == .w4 ? "dequant_w4_to_half" : "dequant_w8_to_half"
+        let pipeline = try context.pipeline(named: pipelineName)
         guard let encoder = command.makeComputeCommandEncoder() else {
             throw AnimapkError.validation("failed to create adapter embedding decoder")
         }
-        var columns = UInt32(Self.hidden), stride = UInt32(512), rowCount = UInt32(rows)
+        var columns = UInt32(Self.hidden), stride = UInt32(packedRowBytes), rowCount = UInt32(rows)
         var outputStride = UInt32(Self.hidden)
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(packed, offset: 0, index: 0)
@@ -553,18 +561,12 @@ private struct LLMAdapterBlockWeights {
             spans[String(item.tensor.name.dropFirst(prefix.count))] = item
         }
         func matrix(_ name: String, _ rows: Int, _ columns: Int) throws -> QuantizedLinearWeightBuffers {
-            guard let item = spans[name], item.tensor.shape == [rows, columns],
-                  item.tensor.storage == .w4, let scale = item.scale, let zero = item.zero,
-                  item.data.length % UInt64(rows) == 0,
-                  item.data.offset <= UInt64(Int.max), scale.offset <= UInt64(Int.max),
-                  zero.offset <= UInt64(Int.max) else {
-                throw AnimapkError.validation("invalid adapter matrix \(prefix)\(name)")
+            guard let item = spans[name] else {
+                throw AnimapkError.validation("missing adapter matrix \(prefix)\(name)")
             }
-            return QuantizedLinearWeightBuffers(
-                storage: .w4, packed: ring, packedOffset: Int(item.data.offset),
-                scale: ring, scaleOffset: Int(scale.offset), zero: ring,
-                zeroOffset: Int(zero.offset), rows: rows, columns: columns,
-                packedRowStride: Int(item.data.length / UInt64(rows)))
+            return try DiTQuantizedWeightFactory.makeMatrix(
+                item, ring: ring, rows: rows, columns: columns,
+                label: "adapter \(prefix)\(name)")
         }
         func vector(_ name: String, _ count: Int) throws -> Int {
             guard let item = spans[name], item.tensor.shape == [count],
@@ -608,17 +610,12 @@ private struct LLMAdapterFinalWeights {
         let spans = Dictionary(uniqueKeysWithValues: range.tensors.map {
             (String($0.tensor.name.dropFirst(prefix.count)), $0)
         })
-        guard let item = spans["out_proj.weight"], item.tensor.shape == [1_024, 1_024],
-              item.tensor.storage == .w4, let scale = item.scale, let zero = item.zero,
-              item.data.offset <= UInt64(Int.max), scale.offset <= UInt64(Int.max),
-              zero.offset <= UInt64(Int.max) else {
-            throw AnimapkError.validation("invalid adapter final projection")
+        guard let item = spans["out_proj.weight"] else {
+            throw AnimapkError.validation("missing adapter final projection")
         }
-        projection = QuantizedLinearWeightBuffers(
-            storage: .w4, packed: ring, packedOffset: Int(item.data.offset),
-            scale: ring, scaleOffset: Int(scale.offset), zero: ring,
-            zeroOffset: Int(zero.offset), rows: 1_024, columns: 1_024,
-            packedRowStride: Int(item.data.length / 1_024))
+        projection = try DiTQuantizedWeightFactory.makeMatrix(
+            item, ring: ring, rows: 1_024, columns: 1_024,
+            label: "adapter final projection")
         func vector(_ name: String) throws -> Int {
             guard let value = spans[name], value.tensor.shape == [1_024],
                   value.tensor.storage == .fp16, value.data.length == 2_048,

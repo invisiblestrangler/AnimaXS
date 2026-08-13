@@ -332,14 +332,17 @@ struct LLMAdapterLocator {
 
     func embeddingRow(_ row: Int) throws -> AnimapkQuantizedRowSpans {
         let tensor = embedding.tensor
-        guard tensor.shape.count == 2, tensor.storage == .w4 else {
-            throw AnimapkError.validation("adapter embedding must be rank-2 W4")
+        guard tensor.shape.count == 2,
+              (tensor.storage == .w4 || tensor.storage == .w8) else {
+            throw AnimapkError.validation("adapter embedding must be rank-2 W4 or W8")
         }
         let rows = tensor.shape[0], columns = tensor.shape[1]
-        guard rows > 0, row >= 0, row < rows, columns > 0, columns.isMultiple(of: 2) else {
+        guard rows > 0, row >= 0, row < rows, columns > 0 else {
             throw AnimapkError.validation("adapter embedding row \(row) is out of range")
         }
-        let dataBytesPerRow = UInt64(columns / 2)
+        let dataBytesPerRow = tensor.storage == .w4
+            ? UInt64((columns + 1) / 2)
+            : UInt64(columns)
         let groupsPerRow = (columns + quantGroup - 1) / quantGroup
         let parameterBytesPerRow = UInt64(groupsPerRow * MemoryLayout<UInt16>.size)
         guard embedding.data.length == UInt64(rows) * dataBytesPerRow,

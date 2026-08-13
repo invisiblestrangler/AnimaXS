@@ -51,7 +51,7 @@ final class FullInferenceTests: XCTestCase {
         let qwenURL = try requiredFixture(
             envKey: "ANIMAXS_QWEN_PACK", name: "qwen3-0.6b-xsmax-w8.animapk")
         let ditURL = try requiredFixture(
-            envKey: "ANIMAXS_DIFFUSION_PACK", name: "anima-turbo-v1.0-xsmax-w4.animapk")
+            envKey: "ANIMAXS_DIFFUSION_PACK", name: "anima-turbo-refine.animapk")
         let vaeURL = try requiredFixture(
             envKey: "ANIMAXS_VAE_PACK", name: "qwen-image-vae-xsmax-fp16.animapk")
         let noiseURL = try requiredFixture(
@@ -246,7 +246,7 @@ final class FullInferenceTests: XCTestCase {
             "run_id": "<injected-by-workflow>",
             "prompt": prompt,
             "case": "case1_danbooru_seed1337",
-            "packs": "qwen3-0.6b-xsmax-w8 / anima-turbo-v1.0-xsmax-w4 / qwen-image-vae-xsmax-fp16",
+            "packs": "qwen3-0.6b-xsmax-w8 / \(env("ANIMAXS_DIT_VARIANT") ?? "unknown-dit") / qwen-image-vae-xsmax-fp16",
             "latent_cosine": latentCosineText,
             "latent_rmse": latentRMSText,
             "latent_maxabs": latentMaxAbsText,
@@ -417,6 +417,23 @@ final class FullInferenceTests: XCTestCase {
         textAttachment.name = "metrics.txt"
         textAttachment.lifetime = .keepAlways
         add(textAttachment)
+
+        let metadata: [String: String] = [
+            "variant": env("ANIMAXS_DIT_VARIANT") ?? "unknown",
+            "hf_repo": env("ANIMAXS_DIT_HF_REPO") ?? "unknown",
+            "hf_revision": env("ANIMAXS_DIT_HF_REVISION") ?? "unknown",
+            "sha256": env("ANIMAXS_DIT_SHA256") ?? "unknown",
+            "bytes": env("ANIMAXS_DIT_BYTES") ?? "unknown",
+            "storage": env("ANIMAXS_DIT_STORAGE") ?? "unknown",
+            "group": "64",
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys]),
+           let text = String(data: data, encoding: .utf8) {
+            let metadataAttachment = XCTAttachment(string: text + "\n")
+            metadataAttachment.name = "pack-metadata.json"
+            metadataAttachment.lifetime = .keepAlways
+            add(metadataAttachment)
+        }
     }
 
     /// Encodes interleaved RGBA8 bytes into a PNG (lossless) via CoreGraphics.
