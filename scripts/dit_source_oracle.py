@@ -545,9 +545,9 @@ def mode_trajectory(model, w, capture, out_dir, dtype):
         with torch.no_grad():
             src_v = model.forward(x_in, sigma, context)
         cos, rmse, maxabs = compare(src_v, swift_v)
-        err = (src_v - swift_v).squeeze(0)
+        err = (src_v - swift_v)[0, :, 0]          # [16,64,64]
         nyq = nyquist_energy(err)
-        nyq_v = nyquist_energy(swift_v.squeeze(0))
+        nyq_v = nyquist_energy(swift_v[0, :, 0])
         rows.append({"step": step, "sigma": sigma, "cosine": cos,
                      "rmse": rmse, "maxabs": maxabs,
                      "err_nyquist_row": nyq[0], "err_nyquist_col": nyq[1],
@@ -589,8 +589,8 @@ def mode_endtoend(model, adapter, fixtures, out_dir, dtype):
             d = (x - denoised) / sigma
             x = x + d * (sigmas[i + 1] - sigma)
     cos, rmse, maxabs = compare(x, ref)
-    nyq = nyquist_energy(x.squeeze(0))
-    nyq_ref = nyquist_energy(ref.view(1, 16, 1, 64, 64).squeeze(0))
+    nyq = nyquist_energy(x[0, :, 0])
+    nyq_ref = nyquist_energy(ref.view(1, 16, 1, 64, 64)[0, :, 0])
     result = {"dtype": str(dtype), "final_cosine": cos, "final_rmse": rmse,
               "final_maxabs": maxabs,
               "final_nyquist_row": nyq[0], "final_nyquist_col": nyq[1],
