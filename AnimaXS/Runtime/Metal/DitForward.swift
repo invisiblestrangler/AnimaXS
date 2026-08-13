@@ -13,7 +13,8 @@ final class DitForward {
         block = try DiTBlockExecutor(
             context: context, file: file, attentionNumerics: attentionNumerics,
             activationNumerics: activationNumerics)
-        finalLayer = try DiTFinalLayerExecutor(context: context, file: file)
+        finalLayer = try DiTFinalLayerExecutor(
+            context: context, file: file, activationNumerics: activationNumerics)
     }
 
     /// Mutates the tightly packed fp32 `[1024,2048]` residual in place.

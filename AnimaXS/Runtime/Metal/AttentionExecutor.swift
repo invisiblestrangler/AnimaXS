@@ -5,6 +5,10 @@ import MetalPerformanceShaders
 enum AttentionNumerics: String, CaseIterable {
     case legacy
     case fp32ScoresAndSoftmax
+    /// Emulate a BF16 scaled-dot-product attention on Apple5, which has no
+    /// native BF16 storage. Q/K/V, scores, probabilities, and the PV result
+    /// are rounded to BF16 while the buffers remain fp16 for MPS.
+    case bf16Compute = "bf16_compute"
 }
 
 /// Diagnostic activation-boundary policy. `bf16Boundaries` stores BF16-rounded
@@ -12,6 +16,10 @@ enum AttentionNumerics: String, CaseIterable {
 enum ActivationNumerics: String, CaseIterable {
     case legacy
     case bf16Boundaries = "bf16_boundaries"
+    /// Full BF16 model arithmetic emulation. Unlike `bf16Boundaries`, this
+    /// rounds every compute boundary while retaining the model residual in
+    /// its selected dtype (BF16), rather than rounding only residual adds.
+    case bf16Compute = "bf16_compute"
 }
 
 /// Query-tiled scaled dot-product attention over tightly packed fp16 tensors.
@@ -103,6 +111,11 @@ final class AttentionExecutor {
                         commandBuffer: commandBuffer, leftMatrix: queryMatrix,
                         rightMatrix: keyMatrix, resultMatrix: scoreMatrix)
 
+                if numerics == .bf16Compute {
+                    try encodeRoundHalf(commandBuffer, input: scoreScratch,
+                                        output: scoreScratch, count: rows * keyCount)
+                }
+
                 guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
                     throw AnimapkError.validation("failed to create attention softmax encoder")
                 }
@@ -119,6 +132,11 @@ final class AttentionExecutor {
                                              threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1))
                 encoder.endEncoding()
 
+                if numerics == .bf16Compute {
+                    try encodeRoundHalf(commandBuffer, input: scoreScratch,
+                                        output: scoreScratch, count: rows * keyCount)
+                }
+
                 let outputMatrix = MPSMatrix(
                     buffer: output,
                     offset: outputOffset + (head * queryCount + queryBase) * headRowBytes,
@@ -130,9 +148,33 @@ final class AttentionExecutor {
                     alpha: 1, beta: 0).encode(
                         commandBuffer: commandBuffer, leftMatrix: scoreMatrix,
                         rightMatrix: valueMatrix, resultMatrix: outputMatrix)
+                if numerics == .bf16Compute {
+                    try encodeRoundHalf(commandBuffer, input: output,
+                                        output: output, count: rows * headDim,
+                                        offset: outputOffset + (head * queryCount + queryBase) * headRowBytes)
+                }
                 queryBase += rows
             }
         }
+    }
+
+    private func encodeRoundHalf(
+        _ commandBuffer: MTLCommandBuffer, input: MTLBuffer, output: MTLBuffer,
+        count: Int, offset: Int = 0
+    ) throws {
+        let pipeline = try context.pipeline(named: "round_half_to_bf16")
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create BF16 attention boundary encoder")
+        }
+        var count = UInt32(count)
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(input, offset: offset, index: 0)
+        encoder.setBuffer(output, offset: offset, index: 1)
+        encoder.setBytes(&count, length: 4, index: 2)
+        let width = min(pipeline.threadExecutionWidth, pipeline.maxTotalThreadsPerThreadgroup)
+        encoder.dispatchThreads(MTLSize(width: Int(count), height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+        encoder.endEncoding()
     }
 
     private func encodeFP32(

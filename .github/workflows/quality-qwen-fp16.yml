@@ -2,6 +2,15 @@ name: Quality Qwen FP16 matrices
 
 on:
   workflow_call:
+    inputs:
+      activation_numerics:
+        required: false
+        type: string
+        default: "legacy"
+      golden_qwen_context:
+        required: false
+        type: string
+        default: "0"
     secrets:
       HF_TOKEN:
         required: true
@@ -148,7 +157,7 @@ jobs:
           curl --fail --location --retry 3 --retry-all-errors -o "$fixture/qwen-image-vae-xsmax-fp16.animapk" \
             https://github.com/invisiblestrangler/AnimaXS/releases/download/model-assets-v1/qwen-image-vae-xsmax-fp16.animapk
           echo "10171af0b826927b75fecf4482aaa0e268254874e694a0788ebdd8c4254fc447  $fixture/qwen-image-vae-xsmax-fp16.animapk" | shasum -a 256 --check
-          printf '%s\n' '{"attention_numerics":"legacy","activation_numerics":"legacy"}' \
+          printf '%s\n' '{"attention_numerics":"legacy","activation_numerics":"${{ inputs.activation_numerics }}","golden_qwen_context":"${{ inputs.golden_qwen_context }}"}' \
             > "$fixture/quality-diagnostic.json"
           "$RUNNER_TEMP/xcodegen/bin/xcodegen" generate
       - name: Select simulator

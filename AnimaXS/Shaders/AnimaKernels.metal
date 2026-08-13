@@ -114,6 +114,27 @@ kernel void round_f32_to_bf16(
     destination[gid] = as_type<float>(bits);
 }
 
+// Round a fp16 value through BF16 while retaining the Apple5-friendly fp16
+// storage format. Every BF16 value in the finite fp16 range is exactly
+// representable as fp16, so this is a lossless storage conversion after the
+// intended BF16 mantissa truncation. The kernel is safe in-place.
+kernel void round_half_to_bf16(
+    device const half *source [[buffer(0)]],
+    device half *destination [[buffer(1)]],
+    constant uint &count [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) return;
+    float value = float(source[gid]);
+    uint bits = as_type<uint>(value);
+    uint exponent = bits & 0x7f800000u;
+    if (exponent != 0x7f800000u) {
+        bits += 0x00007fffu + ((bits >> 16) & 1u);
+        bits &= 0xffff0000u;
+    }
+    destination[gid] = half(as_type<float>(bits));
+}
+
 // Convert between projection layout [tokens,heads,headDim] and the head-major
 // [heads,tokens,headDim] layout consumed by AttentionExecutor. The same kernel
 // handles both directions so the layouts cannot drift independently.

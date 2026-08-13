@@ -2,6 +2,24 @@ name: Quality investigation
 
 on:
   workflow_dispatch:
+    inputs:
+      activation_numerics:
+        description: "DiT activation policy for the full FP16 candidate"
+        required: false
+        default: "legacy"
+        type: choice
+        options:
+          - legacy
+          - bf16_compute
+          - bf16_boundaries
+      golden_qwen_context:
+        description: "Use the canonical pre-adapter Qwen fixture"
+        required: false
+        default: "0"
+        type: choice
+        options:
+          - "0"
+          - "1"
   push:
     branches:
       - "investigate/dit-quality-*"
@@ -20,6 +38,9 @@ env:
 jobs:
   qwen-fp16-candidate:
     uses: ./.github/workflows/quality-qwen-fp16.yml
+    with:
+      activation_numerics: ${{ inputs.activation_numerics || 'legacy' }}
+      golden_qwen_context: ${{ inputs.golden_qwen_context || '0' }}
     secrets: inherit
 
   focused-metal:
