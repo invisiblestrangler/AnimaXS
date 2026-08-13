@@ -33,6 +33,13 @@ on:
         required: false
         type: string
         default: ""
+      capture_trajectory:
+        description: >-
+          Attach per-step x_in/denoised + cross-context + sigmas to the
+          full-image artifact for the Linux source-oracle parity job.
+        required: false
+        type: string
+        default: ""
     secrets:
       HF_TOKEN:
         required: true
@@ -247,7 +254,7 @@ jobs:
           curl --fail --location --retry 3 --retry-all-errors -o "$fixture/$VAE_FILE" \
             https://github.com/invisiblestrangler/AnimaXS/releases/download/$VAE_RELEASE/$VAE_FILE
           echo "$VAE_SHA256  $fixture/$VAE_FILE" | shasum -a 256 --check
-          printf '%s\n' "{\"attention_numerics\":\"legacy\",\"activation_numerics\":\"${{ matrix.activation_numerics }}\",\"golden_qwen_context\":\"${{ matrix.golden_qwen_context }}\"}" \
+          printf '%s\n' "{\"attention_numerics\":\"legacy\",\"activation_numerics\":\"${{ matrix.activation_numerics }}\",\"golden_qwen_context\":\"${{ matrix.golden_qwen_context }}\",\"capture_trajectory\":\"${{ inputs.capture_trajectory }}\"}" \
             > "$fixture/quality-diagnostic.json"
           # ---- exact self-describing provenance (handoff section 7) ----
           qwen_sha=$(awk '{print $1}' "$RUNNER_TEMP/candidates/qwen-pack.sha256")

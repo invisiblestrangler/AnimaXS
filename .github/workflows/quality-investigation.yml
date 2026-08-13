@@ -40,6 +40,16 @@ on:
         required: false
         default: ""
         type: string
+      capture_trajectory:
+        description: >-
+          Attach per-step trajectory captures to each full-image artifact and
+          run the Linux source-oracle parity + end-to-end source run.
+        required: false
+        default: "0"
+        type: choice
+        options:
+          - "0"
+          - "1"
   # NOTE: the push trigger was intentionally removed during the quality
   # investigation so a source/workflow commit does not automatically launch
   # another expensive pack + full-image run (handoff section 6.1). The
@@ -70,7 +80,79 @@ jobs:
       golden_qwen_context: ${{ inputs.golden_qwen_context || '0' }}
       pack_artifact_run_id: ${{ inputs.pack_artifact_run_id || '' }}
       pack_artifact_sha: ${{ inputs.pack_artifact_sha || '' }}
+      capture_trajectory: ${{ inputs.capture_trajectory || '0' }}
     secrets: inherit
+
+  source-oracle:
+    needs: qwen-fp16-candidate
+    if: inputs.capture_trajectory == '1'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      SOURCE_REPO: circlestone-labs/Anima
+      SOURCE_REVISION: f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b
+      SOURCE_FILE: split_files/diffusion_models/anima-turbo-v1.0.safetensors
+      SOURCE_SHA256: c0b905034510750a505d21aa96c81718f4ffcc500777318421f58a88636e2174
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install torch and safetensors
+        run: |
+          set -euo pipefail
+          python -m pip install numpy safetensors
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Download full-image artifacts (incl. trajectory captures)
+        uses: actions/download-artifact@v5
+        with:
+          path: ${{ runner.temp }}/artifacts
+          pattern: qwen-fp16-full-*
+          github-token: ${{ github.token }}
+      - name: Download and verify pinned DiT source
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${HF_TOKEN:-}" || { echo "::error::HF_TOKEN missing"; exit 1; }
+          source="$RUNNER_TEMP/dit-source.safetensors"
+          curl --fail --location --retry 3 --retry-all-errors --progress-bar \
+            -H "Authorization: Bearer $HF_TOKEN" -o "$source" \
+            "https://huggingface.co/$SOURCE_REPO/resolve/$SOURCE_REVISION/$SOURCE_FILE?download=true"
+          echo "$SOURCE_SHA256  $source" | sha256sum --check
+          echo "SOURCE=$source" >> "$GITHUB_ENV"
+      - name: Run source trajectory parity + end-to-end oracle
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/oracle-evidence"
+          for dir in "$RUNNER_TEMP"/artifacts/qwen-fp16-full-*; do
+            name=$(basename "$dir" | sed 's/qwen-fp16-full-//')
+            [ -f "$dir/step00_x_in.f32" ] || { echo "skip $name: no trajectory capture"; continue; }
+            out="$RUNNER_TEMP/oracle-evidence/$name"
+            mkdir -p "$out"
+            echo "=== trajectory parity (bf16): $name ==="
+            python3 scripts/dit_source_oracle.py --source "$RUNNER_TEMP/dit-source.safetensors" \
+              --mode trajectory --capture "$dir" --out "$out" --dtype bf16
+            echo "=== trajectory parity (fp32): $name ==="
+            python3 scripts/dit_source_oracle.py --source "$RUNNER_TEMP/dit-source.safetensors" \
+              --mode trajectory --capture "$dir" --out "$out" --dtype fp32
+          done
+          echo "=== end-to-end source run (bf16) vs golden ==="
+          python3 scripts/dit_source_oracle.py --source "$RUNNER_TEMP/dit-source.safetensors" \
+            --mode endtoend --fixtures AnimaXSTests/Fixtures/Case1Binary \
+            --out "$RUNNER_TEMP/oracle-evidence" --dtype bf16
+          echo "=== end-to-end source run (fp32) vs golden ==="
+          python3 scripts/dit_source_oracle.py --source "$RUNNER_TEMP/dit-source.safetensors" \
+            --mode endtoend --fixtures AnimaXSTests/Fixtures/Case1Binary \
+            --out "$RUNNER_TEMP/oracle-evidence" --dtype fp32
+      - name: Upload oracle evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-oracle-evidence-${{ github.sha }}
+          retention-days: 14
+          if-no-files-found: error
+          path: ${{ runner.temp }}/oracle-evidence
 
   focused-metal:
     runs-on: macos-15
