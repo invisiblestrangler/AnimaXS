@@ -112,6 +112,9 @@ def main():
     print("== A: upstream ComfyUI bf16 ==")
     model_up, _ = up.load_upstream(args.comfy, args.source, dtype=torch.bfloat16, device=device)
     vel_a, caps_a = up.capture_forward(model_up, x_in, sigma, context, device=device)
+    # align upstream hook names with oracle capture names
+    caps_a["post_final_projection_patched"] = caps_a["final_layer_out"]
+    caps_a["post_unpatchify_velocity"] = vel_a
     save_captures(args.out, "A_upstream_bf16", caps_a)
 
     # ---- A2 / B: source-oracle transcription ----
