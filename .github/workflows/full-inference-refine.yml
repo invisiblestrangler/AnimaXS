@@ -194,6 +194,7 @@ jobs:
         timeout-minutes: 90
 
       - name: Export generated/reference/comparison/metrics attachments
+        if: always()
         run: |
           set -euo pipefail
           exported="$RUNNER_TEMP/${{ matrix.variant }}-exported"
@@ -212,6 +213,7 @@ jobs:
           cat "$artifacts/pack-metadata.json"
 
       - name: Upload full inference evidence
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: anima-xs-refine-${{ matrix.variant }}-images
