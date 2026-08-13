@@ -87,7 +87,8 @@ def main():
     ap.add_argument("--fp16-pack", required=True)
     ap.add_argument("--w8-pack", required=True)
     ap.add_argument("--w4-pack", required=True)
-    ap.add_argument("--comfy", required=True, help="pinned comfy checkout for variant A")
+    ap.add_argument("--comfy", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "comfy_stub"),
+                    help="comfy stub package root (contains REAL pinned predict2.py)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()

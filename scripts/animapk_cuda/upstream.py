@@ -18,8 +18,13 @@ from safetensors import safe_open
 
 
 def load_upstream(comfy_dir: str, source: str, dtype=torch.bfloat16, device="cuda"):
+    # comfy_dir is the stub package root (comfy/ package inside it).  The stub
+    # contains the REAL pinned predict2.py + position_embedding.py verbatim,
+    # with minimal plumbing stubs (patcher no-op, SDPA attention, plain
+    # rms_rope fallback, manual_cast ops).
     sys.path.insert(0, comfy_dir)
     from comfy.ldm.cosmos.predict2 import MiniTrainDIT  # noqa: E402
+    from comfy import ops as _ops  # noqa: F401  (manual_cast classes)
 
     model = MiniTrainDIT(
         max_img_h=64,
@@ -46,11 +51,13 @@ def load_upstream(comfy_dir: str, source: str, dtype=torch.bfloat16, device="cud
         rope_w_extrapolation_ratio=4.0,
         rope_t_extrapolation_ratio=1.0,
         extra_per_block_abs_pos_emb=False,
+        operations=_ops,
     )
     state = {}
     with safe_open(source, framework="pt", device="cpu") as f:
         for k in f.keys():
-            state[k] = f.get_tensor(k)
+            key = k.replace("model.diffusion_model.", "", 1) if k.startswith("model.diffusion_model.") else k
+            state[key] = f.get_tensor(k)
     missing, unexpected = model.load_state_dict(state, strict=False)
     if unexpected:
         # x_embedder etc. all map; anything unexpected is a real mismatch
