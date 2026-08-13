@@ -374,7 +374,9 @@ class DitModel:
         emb_tok = emb_tok.reshape(1, 1, 32, 32, DIM)
         # source does NOT promote bf16 residual to fp32 (predict2.py:918)
         t_emb_raw = self.t_steps(torch.tensor([sigma]), dt)
-        emb, adaln = self.t_emb(t_emb_raw)                # [1,1,D], [1,1,6144]
+        emb, adaln = self.t_emb(t_emb_raw)                # [1,D], [1,6144]
+        emb = emb.unsqueeze(1)                            # -> [1,1,D] (B,T,D)
+        adaln = adaln.unsqueeze(1)                        # -> [1,1,6144]
         emb = rms_norm(emb, self.t_norm)
         context = context.to(dt)
         for blk in self.blocks:
