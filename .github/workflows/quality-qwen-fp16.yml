@@ -3,14 +3,36 @@ name: Quality Qwen FP16 matrices
 on:
   workflow_call:
     inputs:
+      variant_matrix:
+        description: >-
+          JSON array of variants, each {name, activation_numerics,
+          golden_qwen_context}. When empty, a single variant is built from
+          activation_numerics + golden_qwen_context.
+        required: false
+        type: string
+        default: ""
       activation_numerics:
+        description: "Single-variant DiT activation policy (used when variant_matrix is empty)"
         required: false
         type: string
         default: "legacy"
       golden_qwen_context:
+        description: "Single-variant golden Qwen context flag (used when variant_matrix is empty)"
         required: false
         type: string
         default: "0"
+      pack_artifact_run_id:
+        description: >-
+          Reuse the packed candidates uploaded by this prior run ID and skip
+          repacking. Must be paired with pack_artifact_sha.
+        required: false
+        type: string
+        default: ""
+      pack_artifact_sha:
+        description: "Commit SHA the reused pack artifact was uploaded under"
+        required: false
+        type: string
+        default: ""
     secrets:
       HF_TOKEN:
         required: true
@@ -31,9 +53,70 @@ env:
   W8_REVISION: 589d028122f872e66ee20cdd12cb55eb3b816add
   W8_FILE: anima-turbo-v1.0-xsmax-w8-v2.animapk
   W8_SHA256: 8b63c7fd9b5872805e5a2ba799ab6d79989c54a6a89a4f34edf022c59c9ed130
+  VAE_FILE: qwen-image-vae-xsmax-fp16.animapk
+  VAE_RELEASE: model-assets-v1
+  VAE_SHA256: 10171af0b826927b75fecf4482aaa0e268254874e694a0788ebdd8c4254fc447
+  # Canonical prompt + case for the full-image regression (D073/D074).
+  CANONICAL_PROMPT: "masterpiece, best quality, score_7, safe, 1girl, long brown hair, blue eyes, school uniform, cherry blossom, outdoors, looking at viewer, smile, depth of field, highres, absurdres"
+  CANONICAL_CASE: case1_danbooru_seed1337
 
 jobs:
+  prepare-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.emit.outputs.matrix }}
+    steps:
+      - name: Emit and validate variant matrix
+        id: emit
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import json, os, sys
+
+          raw = os.environ.get("VARIANT_MATRIX", "").strip()
+          if raw:
+              variants = json.loads(raw)
+              if not isinstance(variants, list) or not variants:
+                  sys.exit("variant_matrix must be a non-empty JSON array")
+          else:
+              activation = os.environ.get("ACTIVATION", "legacy")
+              golden = os.environ.get("GOLDEN", "0")
+              name = f"{activation}-{'golden' if golden == '1' else 'production'}"
+              variants = [{
+                  "name": name,
+                  "activation_numerics": activation,
+                  "golden_qwen_context": golden,
+              }]
+
+          allowed_activation = {"legacy", "bf16_compute", "bf16_boundaries"}
+          allowed_golden = {"0", "1"}
+          seen = set()
+          for v in variants:
+              if not isinstance(v, dict) or not v.get("name"):
+                  sys.exit("each variant needs a name")
+              if v["name"] in seen:
+                  sys.exit(f"duplicate variant name: {v['name']}")
+              seen.add(v["name"])
+              if v.get("activation_numerics") not in allowed_activation:
+                  sys.exit(f"bad activation_numerics in {v['name']}")
+              if v.get("golden_qwen_context") not in allowed_golden:
+                  sys.exit(f"bad golden_qwen_context in {v['name']}")
+              if not set(v).issubset(
+                  {"name", "activation_numerics", "golden_qwen_context"}):
+                  sys.exit(f"unknown key in {v['name']}")
+              print(f"variant: {v['name']} activation={v['activation_numerics']} "
+                    f"golden={v['golden_qwen_context']}", file=sys.stderr)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"matrix={json.dumps(variants)}\n")
+          EOF
+        env:
+          VARIANT_MATRIX: ${{ inputs.variant_matrix }}
+          ACTIVATION: ${{ inputs.activation_numerics }}
+          GOLDEN: ${{ inputs.golden_qwen_context }}
+
   pack-candidates:
+    if: inputs.pack_artifact_run_id == ''
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
@@ -112,9 +195,14 @@ jobs:
             ${{ runner.temp }}/dit-pack.sha256
 
   full-image:
-    needs: pack-candidates
+    needs: [prepare-matrix, pack-candidates]
+    if: always() && (needs.pack-candidates.result == 'success' || inputs.pack_artifact_run_id != '')
     runs-on: macos-15
     timeout-minutes: 110
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare-matrix.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v7
       - name: Select Xcode and ensure Metal toolchain
@@ -136,8 +224,10 @@ jobs:
       - name: Download packed candidates
         uses: actions/download-artifact@v5
         with:
-          name: qwen-fp16-pack-${{ github.sha }}
+          name: qwen-fp16-pack-${{ inputs.pack_artifact_sha || github.sha }}
           path: ${{ runner.temp }}/candidates
+          run-id: ${{ inputs.pack_artifact_run_id || github.run_id }}
+          github-token: ${{ github.token }}
       - name: Prepare highest-fidelity fixtures
         run: |
           set -euo pipefail
@@ -154,12 +244,90 @@ jobs:
             exit 1
           }
           cp "$RUNNER_TEMP/$DIT_FILE" "$fixture/anima-turbo-refine.animapk"
-          curl --fail --location --retry 3 --retry-all-errors -o "$fixture/qwen-image-vae-xsmax-fp16.animapk" \
-            https://github.com/invisiblestrangler/AnimaXS/releases/download/model-assets-v1/qwen-image-vae-xsmax-fp16.animapk
-          echo "10171af0b826927b75fecf4482aaa0e268254874e694a0788ebdd8c4254fc447  $fixture/qwen-image-vae-xsmax-fp16.animapk" | shasum -a 256 --check
-          printf '%s\n' '{"attention_numerics":"legacy","activation_numerics":"${{ inputs.activation_numerics }}","golden_qwen_context":"${{ inputs.golden_qwen_context }}"}' \
+          curl --fail --location --retry 3 --retry-all-errors -o "$fixture/$VAE_FILE" \
+            https://github.com/invisiblestrangler/AnimaXS/releases/download/$VAE_RELEASE/$VAE_FILE
+          echo "$VAE_SHA256  $fixture/$VAE_FILE" | shasum -a 256 --check
+          printf '%s\n' "{\"attention_numerics\":\"legacy\",\"activation_numerics\":\"${{ matrix.activation_numerics }}\",\"golden_qwen_context\":\"${{ matrix.golden_qwen_context }}\"}" \
             > "$fixture/quality-diagnostic.json"
-          "$RUNNER_TEMP/xcodegen/bin/xcodegen" generate
+          # ---- exact self-describing provenance (handoff section 7) ----
+          qwen_sha=$(awk '{print $1}' "$RUNNER_TEMP/candidates/qwen-pack.sha256")
+          qwen_bytes=$(python3 -c 'import os,sys; print(os.path.getsize(sys.argv[1]))' "$RUNNER_TEMP/candidates/$QWEN_FILE")
+          dit_sha=$(awk '{print $1}' "$RUNNER_TEMP/candidates/dit-pack.sha256")
+          dit_bytes=$(python3 -c 'import os,sys; print(os.path.getsize(sys.argv[1]))' "$RUNNER_TEMP/$DIT_FILE")
+          vae_bytes=$(python3 -c 'import os,sys; print(os.path.getsize(sys.argv[1]))' "$fixture/$VAE_FILE")
+          python3 - "$qwen_sha" "$qwen_bytes" "$dit_sha" "$dit_bytes" "$vae_bytes" <<'EOF'
+          import json, os, sys
+          qwen_sha, qwen_bytes, dit_sha, dit_bytes, vae_bytes = sys.argv[1:]
+          prov = {
+              "commit": os.environ["GITHUB_SHA"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "workflow": os.environ["GITHUB_WORKFLOW"],
+              "ref": os.environ["GITHUB_REF_NAME"],
+              "variant": os.environ["VARIANT"],
+              "prompt": os.environ["CANONICAL_PROMPT"],
+              "case": os.environ["CANONICAL_CASE"],
+              "attention_numerics": "legacy",
+              "activation_numerics": os.environ["ACTIVATION"],
+              "golden_qwen_context": os.environ["GOLDEN"],
+              # flat DiT pack keys consumed by the Swift test for the
+              # pack-metadata.json attachment (keeps the artifact schema).
+              "dit_variant": os.environ["DIT_FILE"],
+              "dit_hf_repo": os.environ["SOURCE_REPO"],
+              "dit_hf_revision": os.environ["SOURCE_REVISION"],
+              "dit_sha256": dit_sha,
+              "dit_bytes": dit_bytes,
+              "dit_storage": "candidate-workflow-artifact",
+              "dit_group": "64",
+              "packs": {
+                  "qwen": {
+                      "filename": os.environ["QWEN_FILE"],
+                      "storage": "hf",
+                      "source_repo": os.environ["SOURCE_REPO"],
+                      "source_revision": os.environ["SOURCE_REVISION"],
+                      "source_sha256": os.environ["SOURCE_SHA256"],
+                      "packed_sha256": qwen_sha,
+                      "packed_bytes": int(qwen_bytes),
+                  },
+                  "dit": {
+                      "filename": os.environ["DIT_FILE"],
+                      "storage": "candidate-workflow-artifact",
+                      "source_repo": os.environ["SOURCE_REPO"],
+                      "source_revision": os.environ["SOURCE_REVISION"],
+                      "source_sha256": "c0b905034510750a505d21aa96c81718f4ffcc500777318421f58a88636e2174",
+                      "packed_sha256": dit_sha,
+                      "packed_bytes": int(dit_bytes),
+                  },
+                  "vae": {
+                      "filename": os.environ["VAE_FILE"],
+                      "storage": f"github-release:{os.environ['VAE_RELEASE']}",
+                      "sha256": os.environ["VAE_SHA256"],
+                      "packed_bytes": int(vae_bytes),
+                  },
+              },
+          }
+          with open(os.path.join(os.environ["FIXTURE_DIR"], "provenance.json"), "w") as fh:
+              json.dump(prov, fh, indent=2, sort_keys=True)
+          print(f"provenance.json: commit={prov['commit']} run={prov['run_id']} "
+                f"variant={prov['variant']} dit_sha={dit_sha}")
+          EOF
+        env:
+          FIXTURE_DIR: ${{ github.workspace }}/AnimaXSTests/Fixtures/Case1Binary
+          VARIANT: ${{ matrix.name }}
+          ACTIVATION: ${{ matrix.activation_numerics }}
+          GOLDEN: ${{ matrix.golden_qwen_context }}
+          QWEN_FILE: ${{ env.QWEN_FILE }}
+          DIT_FILE: ${{ env.DIT_FILE }}
+          VAE_FILE: ${{ env.VAE_FILE }}
+          VAE_RELEASE: ${{ env.VAE_RELEASE }}
+          VAE_SHA256: ${{ env.VAE_SHA256 }}
+          SOURCE_REPO: ${{ env.SOURCE_REPO }}
+          SOURCE_REVISION: ${{ env.SOURCE_REVISION }}
+          SOURCE_SHA256: ${{ env.SOURCE_SHA256 }}
+          W8_REVISION: ${{ env.W8_REVISION }}
+          CANONICAL_PROMPT: ${{ env.CANONICAL_PROMPT }}
+          CANONICAL_CASE: ${{ env.CANONICAL_CASE }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
       - name: Select simulator
         id: sim
         run: |
@@ -177,7 +345,11 @@ jobs:
             -resultBundlePath "$RUNNER_TEMP/qwen-fp16-full.xcresult" \
             -only-testing:AnimaXSTests/FullInferenceTests/testCanonicalProductionInference \
             test 2>&1 | tee "$RUNNER_TEMP/qwen-fp16-full.log"
-          grep -q 'FULL_QWEN_CONTEXT=production' "$RUNNER_TEMP/qwen-fp16-full.log"
+          if [ "${{ matrix.golden_qwen_context }}" = "1" ]; then
+            grep -q 'FULL_QWEN_CONTEXT=golden' "$RUNNER_TEMP/qwen-fp16-full.log"
+          else
+            grep -q 'FULL_QWEN_CONTEXT=production' "$RUNNER_TEMP/qwen-fp16-full.log"
+          fi
           grep -q 'FULL_INFERENCE=PASS' "$RUNNER_TEMP/qwen-fp16-full.log"
         timeout-minutes: 90
       - name: Export full-image evidence
@@ -190,11 +362,13 @@ jobs:
           python3 scripts/export_full_inference_attachments.py \
             "$RUNNER_TEMP/exported" "$RUNNER_TEMP/full-image"
           cp "$RUNNER_TEMP/qwen-fp16-full.log" "$RUNNER_TEMP/full-image/"
+          cp "AnimaXSTests/Fixtures/Case1Binary/quality-diagnostic.json" "$RUNNER_TEMP/full-image/"
+          cp "AnimaXSTests/Fixtures/Case1Binary/provenance.json" "$RUNNER_TEMP/full-image/"
       - name: Upload full-image evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: qwen-fp16-full-${{ github.sha }}
+          name: qwen-fp16-full-${{ matrix.name }}-${{ github.sha }}
           retention-days: 14
           if-no-files-found: error
           path: ${{ runner.temp }}/full-image

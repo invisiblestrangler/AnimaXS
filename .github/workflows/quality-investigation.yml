@@ -3,8 +3,16 @@ name: Quality investigation
 on:
   workflow_dispatch:
     inputs:
+      variant_matrix:
+        description: >-
+          JSON array of variants, each {name, activation_numerics,
+          golden_qwen_context}. Leave empty to run a single variant from the
+          two inputs below. Default matrix (empty): bf16 production + golden.
+        required: false
+        default: ""
+        type: string
       activation_numerics:
-        description: "DiT activation policy for the full FP16 candidate"
+        description: "Single-variant DiT activation policy (used when variant_matrix is empty)"
         required: false
         default: "legacy"
         type: choice
@@ -13,23 +21,41 @@ on:
           - bf16_compute
           - bf16_boundaries
       golden_qwen_context:
-        description: "Use the canonical pre-adapter Qwen fixture"
+        description: "Single-variant golden Qwen context flag (used when variant_matrix is empty)"
         required: false
         default: "0"
         type: choice
         options:
           - "0"
           - "1"
-  push:
-    branches:
-      - "investigate/dit-quality-*"
+      pack_artifact_run_id:
+        description: >-
+          Reuse the packed candidates from this prior run ID (skips the
+          multi-GB repack; macOS matrix consumes the existing artifact).
+        required: false
+        default: ""
+        type: string
+      pack_artifact_sha:
+        description: "Commit SHA the reused pack artifact was uploaded under"
+        required: false
+        default: ""
+        type: string
+  # NOTE: the push trigger was intentionally removed during the quality
+  # investigation so a source/workflow commit does not automatically launch
+  # another expensive pack + full-image run (handoff section 6.1). The
+  # multi-GB pack and full inference run only on manual dispatch. Restore a
+  # guarded push trigger during final cleanup if desired.
 
 permissions:
   contents: read
   actions: read
 
 concurrency:
-  group: quality-${{ github.ref }}-${{ github.sha }}
+  group: >-
+    quality-${{ github.ref }}-${{ github.sha }}-
+    ${{ inputs.variant_matrix ||
+        format('[{0}-golden{1}]', inputs.activation_numerics || 'legacy', inputs.golden_qwen_context || '0') }}-
+    ${{ inputs.pack_artifact_run_id || 'repack' }}
   cancel-in-progress: false
 
 env:
@@ -39,8 +65,11 @@ jobs:
   qwen-fp16-candidate:
     uses: ./.github/workflows/quality-qwen-fp16.yml
     with:
+      variant_matrix: ${{ inputs.variant_matrix || '' }}
       activation_numerics: ${{ inputs.activation_numerics || 'legacy' }}
       golden_qwen_context: ${{ inputs.golden_qwen_context || '0' }}
+      pack_artifact_run_id: ${{ inputs.pack_artifact_run_id || '' }}
+      pack_artifact_sha: ${{ inputs.pack_artifact_sha || '' }}
     secrets: inherit
 
   focused-metal:

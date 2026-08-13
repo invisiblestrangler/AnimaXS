@@ -9,7 +9,8 @@ reference from W4 and/or W8 using the updated iPhone XS Max pipeline. The old
 
 ## Current phase
 
-Phase 4/6 — upstream conditioning isolation after runtime/weight ceilings.
+Phase 4/6 — BF16 compute-mode matrix running (true `bf16_compute` was the
+missing highest-priority experiment; run #29 was a legacy control).
 
 ## Phase 1 — reset and baseline
 
@@ -42,8 +43,14 @@ Phase 4/6 — upstream conditioning isolation after runtime/weight ceilings.
 
 - [x] Produce same-W8 step-0 branch-delta evidence and machine-readable CSV.
 - [x] Reject selective late-branch FP16, all-block FP16, and all-DiT FP16 ceilings.
-- [x] Reject BF16 residual-boundary emulation.
-- [ ] Inject canonical pre-adapter Qwen context and measure end-to-end amplification.
+- [x] Reject BF16 residual-boundary emulation (`31690018615`).
+- [x] Confirm run #29 (`31701142683`) was legacy/production, not BF16.
+- [x] Fix workflow efficiency (manual-only dispatch, pack once + macOS matrix,
+      pack reuse) and artifact provenance (provenance.json, real commit/run_id).
+- [x] Add `scripts/measure_grid_carrier.py` and record the defective baseline.
+- [ ] Run the true `bf16_compute` full-image matrix (production + golden Qwen)
+      with a legacy-golden control (pack reuse from run #29).
+- [ ] Apply the BF16/golden decision tree (handoff §9).
 
 ## Phase 5 — promote winners
 
@@ -52,6 +59,8 @@ Phase 4/6 — upstream conditioning isolation after runtime/weight ceilings.
 - [ ] Run full canonical RGB inference only for strong latent candidates.
 - [ ] Inspect images for grid/etched/checker artifacts and natural detail.
 - [ ] Once shared runtime improves, compare corrected W4 and W8.
+- [ ] If BF16 is insufficient: per-step trajectory exports + source scheduler
+      oracle + sampler/preconditioning audit (handoff §11–§16).
 
 ## Phase 6 — production and acceptance
 
@@ -61,9 +70,3 @@ Phase 4/6 — upstream conditioning isolation after runtime/weight ceilings.
 - [ ] Pass generic iPhone build, simulator tests, and canonical inference.
 - [ ] Clean diagnostics, update manifest/docs/decisions, integrate latest main.
 - [ ] Open the final PR and complete the requirement-by-requirement audit.
-
-## Operational visibility
-
-- [ ] Send Telegram progress/final reports when `tg_send` becomes available.
-  Current environment exposes neither the command nor a Telegram connector;
-  persistent state and repository tracking are being updated instead.

@@ -337,11 +337,18 @@ final class FullInferenceTests: XCTestCase {
         // it only reads the already-decoded `image` and the already-loaded
         // `case1_decoded_rgb8.bin` reference.
         captureArtifacts(image: image, referenceRGB: referenceRGB, metrics: [
-            "commit": "<injected-by-workflow>",
-            "run_id": "<injected-by-workflow>",
+            "commit": provenanceValue("commit") ?? "<injected-by-workflow>",
+            "run_id": provenanceValue("run_id") ?? "<injected-by-workflow>",
+            "run_attempt": provenanceValue("run_attempt") ?? "<injected-by-workflow>",
+            "workflow": provenanceValue("workflow") ?? "<injected-by-workflow>",
+            "ref": provenanceValue("ref") ?? "<injected-by-workflow>",
+            "variant": provenanceValue("variant") ?? "unknown",
             "prompt": prompt,
             "case": "case1_danbooru_seed1337",
-            "packs": "qwen3-0.6b-xsmax-w8 / \(packMetadataValue(envKey: "ANIMAXS_DIT_VARIANT", jsonKey: "variant")) / qwen-image-vae-xsmax-fp16",
+            "packs": "qwen3-0.6b-xsmax-fp16-matrices.animapk / \(packMetadataValue(envKey: "ANIMAXS_DIT_VARIANT", jsonKey: "variant")) / qwen-image-vae-xsmax-fp16.animapk",
+            "attention_numerics": attentionNumerics.rawValue,
+            "activation_numerics": activationNumerics.rawValue,
+            "golden_qwen_context": diagnosticConfig("golden_qwen_context") ?? "0",
             "latent_cosine": latentCosineText,
             "latent_rmse": latentRMSText,
             "latent_maxabs": latentMaxAbsText,
@@ -520,7 +527,9 @@ final class FullInferenceTests: XCTestCase {
         // metrics.txt (key: value, ordered, human-readable).
         var lines: [String] = []
         for key in [
-            "commit", "run_id", "prompt", "case", "packs",
+            "commit", "run_id", "run_attempt", "workflow", "ref", "variant",
+            "prompt", "case", "packs",
+            "attention_numerics", "activation_numerics", "golden_qwen_context",
             "latent_cosine", "latent_rmse", "latent_maxabs",
             "rgb_cosine", "rgb_rmse", "rgb_mae", "rgb_maxabs",
             "qwen_seconds", "adapter_seconds", "diffusion_seconds",
@@ -534,12 +543,18 @@ final class FullInferenceTests: XCTestCase {
         add(textAttachment)
 
         let metadata: [String: String] = [
-            "variant": packMetadataValue(envKey: "ANIMAXS_DIT_VARIANT", jsonKey: "variant"),
-            "hf_repo": packMetadataValue(envKey: "ANIMAXS_DIT_HF_REPO", jsonKey: "hf_repo"),
-            "hf_revision": packMetadataValue(envKey: "ANIMAXS_DIT_HF_REVISION", jsonKey: "hf_revision"),
-            "sha256": packMetadataValue(envKey: "ANIMAXS_DIT_SHA256", jsonKey: "sha256"),
-            "bytes": packMetadataValue(envKey: "ANIMAXS_DIT_BYTES", jsonKey: "bytes"),
-            "storage": packMetadataValue(envKey: "ANIMAXS_DIT_STORAGE", jsonKey: "storage"),
+            "variant": provenanceValue("variant")
+                ?? packMetadataValue(envKey: "ANIMAXS_DIT_VARIANT", jsonKey: "variant"),
+            "hf_repo": provenanceValue("dit_hf_repo")
+                ?? packMetadataValue(envKey: "ANIMAXS_DIT_HF_REPO", jsonKey: "hf_repo"),
+            "hf_revision": provenanceValue("dit_hf_revision")
+                ?? packMetadataValue(envKey: "ANIMAXS_DIT_HF_REVISION", jsonKey: "hf_revision"),
+            "sha256": provenanceValue("dit_sha256")
+                ?? packMetadataValue(envKey: "ANIMAXS_DIT_SHA256", jsonKey: "sha256"),
+            "bytes": provenanceValue("dit_bytes")
+                ?? packMetadataValue(envKey: "ANIMAXS_DIT_BYTES", jsonKey: "bytes"),
+            "storage": provenanceValue("dit_storage")
+                ?? packMetadataValue(envKey: "ANIMAXS_DIT_STORAGE", jsonKey: "storage"),
             "group": "64",
         ]
         if let data = try? JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys]),
@@ -564,6 +579,22 @@ final class FullInferenceTests: XCTestCase {
               let value = dictionary[jsonKey] as? String,
               !value.isEmpty else {
             return "unknown"
+        }
+        return value
+    }
+
+    /// Reads a top-level key from the workflow-injected bundled
+    /// `provenance.json` (commit/run_id/run_attempt/workflow/ref/variant and
+    /// the flat `dit_*` pack fields). Returns nil when absent so callers can
+    /// fall back to the older env/bundled pack-metadata.json path.
+    private func provenanceValue(_ key: String) -> String? {
+        guard let url = bundledFixture(named: "provenance.json"),
+              let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dictionary = object as? [String: Any],
+              let value = dictionary[key] as? String,
+              !value.isEmpty else {
+            return nil
         }
         return value
     }
