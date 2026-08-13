@@ -1,11 +1,6 @@
 {
   "default": "w8",
   "overrides": [
-    {"match": "model.diffusion_model.blocks.7.self_attn.*_proj.weight", "storage": "fp16"},
-    {"match": "model.diffusion_model.blocks.7.adaln_modulation_self_attn.*.weight", "storage": "fp16"},
-    {"match": "model.diffusion_model.blocks.14.cross_attn.*_proj.weight", "storage": "fp16"},
-    {"match": "model.diffusion_model.blocks.14.adaln_modulation_cross_attn.*.weight", "storage": "fp16"},
-    {"match": "model.diffusion_model.blocks.27.cross_attn.*_proj.weight", "storage": "fp16"},
-    {"match": "model.diffusion_model.blocks.27.adaln_modulation_cross_attn.*.weight", "storage": "fp16"}
+    {"match": "model.diffusion_model.*", "storage": "fp16"}
   ]
 }
