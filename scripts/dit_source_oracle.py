@@ -523,22 +523,36 @@ def load_f32(path, count=None):
     return torch.from_numpy(a.copy())
 
 
+def capture_file(capture, base):
+    """Locate a captured tensor by its canonical name; tolerate the
+    XCTest-mangled no-extension form (step00_x_in vs step00_x_in.f32)."""
+    cand = os.path.join(capture, base)
+    if os.path.isfile(cand):
+        return cand
+    for f in os.listdir(capture):
+        if f == base or f.startswith(base.split(".")[0] + "."):
+            return os.path.join(capture, f)
+        if f.startswith(base.split(".")[0]) and not f.endswith((".png", ".txt", ".json", ".log")):
+            return os.path.join(capture, f)
+    return cand
+
+
 # ---------------------------------------------------------------------------
 # Modes
 # ---------------------------------------------------------------------------
 def mode_trajectory(model, w, capture, out_dir, dtype):
     os.makedirs(out_dir, exist_ok=True)
-    sigmas = [float(x) for x in
-              open(os.path.join(capture, "sigmas.txt")).read().split(",")]
+    sigmas_path = capture_file(capture, "sigmas.txt")
+    sigmas = [float(x) for x in open(sigmas_path).read().split(",")]
     assert len(sigmas) == 9, f"expected 9 sigmas, got {len(sigmas)}"
-    context = load_f32(os.path.join(capture, "cross-context.f32"),
+    context = load_f32(capture_file(capture, "cross-context.f32"),
                        CTX_TOKENS * CTX_DIM).view(1, CTX_TOKENS, CTX_DIM)
 
     rows = []
     for step in range(8):
-        x_in = load_f32(os.path.join(capture, f"step{step:02d}_x_in.f32"),
+        x_in = load_f32(capture_file(capture, f"step{step:02d}_x_in.f32"),
                         LATENT_EL).view(1, 16, 1, 64, 64)
-        denoised = load_f32(os.path.join(capture, f"step{step:02d}_denoised.f32"),
+        denoised = load_f32(capture_file(capture, f"step{step:02d}_denoised.f32"),
                             LATENT_EL).view(1, 16, 1, 64, 64)
         sigma = sigmas[step]
         swift_v = ((x_in - denoised) / sigma).float()

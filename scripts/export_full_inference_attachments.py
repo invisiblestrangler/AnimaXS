@@ -94,7 +94,7 @@ def main() -> int:
             if os.path.isfile(src):
                 shutil.copyfile(src, dst)
                 print(f"mapped {fname} -> {sname}")
-            canonical = sname.split("_0_")[0]
+            canonical = sname.split("_0_")[0] + os.path.splitext(sname)[1]
             if canonical != sname:
                 cdst = os.path.join(artifacts_dir, canonical)
                 if not os.path.isfile(cdst):
