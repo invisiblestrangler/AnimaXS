@@ -5,16 +5,16 @@ import shutil
 import sys
 from pathlib import Path
 
+BLOCKS = (0, 7, 14, 21, 27)
 TARGETS = (
-    "w8-step0-block0-input.f32",
     "w8-step0-embedding.f32",
     "w8-step0-adaln.f32",
     "w8-cross-context.f16",
     "w8-rope.f32",
-    "w8-step0-block0-after-self.f32",
-    "w8-step0-block0-after-cross.f32",
-    "w8-step0-block0-after-mlp.f32",
-    "w8-step0-block0-output.f32",
+) + tuple(
+    f"w8-step0-block{block}-{stage}.f32"
+    for block in BLOCKS
+    for stage in ("input", "after-self", "after-cross", "after-mlp", "output")
 )
 
 

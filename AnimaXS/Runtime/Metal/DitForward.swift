@@ -24,15 +24,23 @@ final class DitForward {
         crossContext: MTLBuffer,
         rope: MTLBuffer,
         blockCompleted: ((Int, MTLBuffer) throws -> Void)? = nil,
+        diagnosticBranchFilter: ((Int) -> Bool)? = nil,
         diagnosticBranchCompleted: ((Int, String, MTLBuffer) throws -> Void)? = nil
     ) async throws {
         for logicalIndex in 0..<DiTBlockLocator.blockCount {
+            let branchCallback: DiTBlockExecutor.DiagnosticBranchCompleted?
+            if diagnosticBranchFilter?(logicalIndex) ?? true,
+               let diagnosticBranchCompleted {
+                branchCallback = { branch, current in
+                    try diagnosticBranchCompleted(logicalIndex, branch, current)
+                }
+            } else {
+                branchCallback = nil
+            }
             try await block.execute(
                 blockIndex: logicalIndex, residual: residual, emb: emb,
                 adalnLora: adalnLora, crossContext: crossContext, rope: rope,
-                diagnosticBranchCompleted: diagnosticBranchCompleted.map { callback in
-                    { branch, current in try callback(logicalIndex, branch, current) }
-                })
+                diagnosticBranchCompleted: branchCallback)
             try blockCompleted?(logicalIndex, residual)
         }
     }

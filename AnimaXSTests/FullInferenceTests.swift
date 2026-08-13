@@ -119,9 +119,10 @@ final class FullInferenceTests: XCTestCase {
         var completedSteps = 0
         var blockCallbacks = 0
         var stepLatents: [[Float]] = []
-        let captureBlock0 = diagnosticConfig("capture_block0") == "1"
+        let captureBlocks = Set((diagnosticConfig("capture_blocks") ??
+            (diagnosticConfig("capture_block0") == "1" ? "0" : ""))
+            .split(separator: ",").compactMap { Int($0) })
         var capturedStep0 = false
-        var capturedBlock0 = false
         var capturedBranches: Set<String> = []
         try await sampler.executeDiagnostic(
             initialLatent: initial, crossContext: cross, outputLatent: finalLatent,
@@ -135,7 +136,7 @@ final class FullInferenceTests: XCTestCase {
                 print("FULL_DIFFUSION_STEP_\(step)_SECONDS=\(String(format: "%.2f", stepSeconds[step]))")
             },
             diagnosticStepPrepared: { step, residual, embedding, adaln, crossHalf, rope in
-                guard captureBlock0, step == 0, !capturedStep0 else { return }
+                guard !captureBlocks.isEmpty, step == 0, !capturedStep0 else { return }
                 capturedStep0 = true
                 self.attachBuffer(residual, bytes: 1_024 * 2_048 * 4,
                                   name: "w8-step0-block0-input.f32")
@@ -149,16 +150,24 @@ final class FullInferenceTests: XCTestCase {
                                   name: "w8-rope.f32")
             },
             diagnosticBlockCompleted: { step, block, residual in
-                guard captureBlock0, step == 0, block == 0, !capturedBlock0 else { return }
-                capturedBlock0 = true
-                self.attachBuffer(residual, bytes: 1_024 * 2_048 * 4,
-                                  name: "w8-step0-block0-output.f32")
+                guard !captureBlocks.isEmpty, step == 0 else { return }
+                if captureBlocks.contains(block) {
+                    self.attachBuffer(residual, bytes: 1_024 * 2_048 * 4,
+                                      name: "w8-step0-block\(block)-output.f32")
+                }
+                if captureBlocks.contains(block + 1) {
+                    self.attachBuffer(residual, bytes: 1_024 * 2_048 * 4,
+                                      name: "w8-step0-block\(block + 1)-input.f32")
+                }
+            },
+            diagnosticBranchFilter: { step, block in
+                step == 0 && captureBlocks.contains(block)
             },
             diagnosticBranchCompleted: { step, block, branch, residual in
-                guard captureBlock0, step == 0, block == 0,
-                      capturedBranches.insert(branch).inserted else { return }
+                guard step == 0, captureBlocks.contains(block),
+                      capturedBranches.insert("\(block)-\(branch)").inserted else { return }
                 self.attachBuffer(residual, bytes: 1_024 * 2_048 * 4,
-                                  name: "w8-step0-block0-after-\(branch).f32")
+                                  name: "w8-step0-block\(block)-after-\(branch).f32")
             })
         let diffusionSeconds = Date().timeIntervalSince(diffusionStart)
         XCTAssertEqual(completedSteps, 8, "exactly 8 Euler steps completed")

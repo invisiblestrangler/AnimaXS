@@ -15,7 +15,6 @@ from pathlib import Path
 
 import numpy as np
 
-PREFIX = "model.diffusion_model.blocks.0."
 MAPPING = {
     "adaln_modulation_self_attn.1.weight": "mod_self_w1",
     "adaln_modulation_self_attn.2.weight": "mod_self_w2",
@@ -48,17 +47,19 @@ def write(array: np.ndarray, name: str, output: Path) -> None:
     value.tofile(output / f"block0_{MAPPING[name]}.f32")
 
 
-def extract_source(path: str, output: Path) -> None:
+def extract_source(path: str, output: Path, block: int) -> None:
+    prefix = f"model.diffusion_model.blocks.{block}."
     from safetensors import safe_open
     with safe_open(path, framework="pt", device="cpu") as source:
         for suffix in MAPPING:
-            full = PREFIX + suffix
+            full = prefix + suffix
             if full not in source.keys():
                 raise KeyError(full)
             write(source.get_tensor(full).float().numpy(), suffix, output)
 
 
-def extract_pack(path: str, output: Path) -> None:
+def extract_pack(path: str, output: Path, block: int) -> None:
+    prefix = f"model.diffusion_model.blocks.{block}."
     with open(path, "rb") as handle:
         blob = mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ)
         try:
@@ -72,7 +73,7 @@ def extract_pack(path: str, output: Path) -> None:
             if group != 64:
                 raise ValueError(f"unexpected group {group}")
             for suffix in MAPPING:
-                full = PREFIX + suffix
+                full = prefix + suffix
                 item = items[full]
                 base = int(item["blob_offset"])
                 shape = tuple(int(x) for x in item["shape"])
@@ -110,6 +111,7 @@ def main() -> None:
     parser.add_argument("--pack")
     parser.add_argument("--source")
     parser.add_argument("--out", required=True)
+    parser.add_argument("--block", type=int, default=0)
     parser.add_argument("--swift-projection-rounding", action="store_true")
     args = parser.parse_args()
     if bool(args.pack) == bool(args.source):
@@ -117,9 +119,9 @@ def main() -> None:
     output = Path(args.out)
     output.mkdir(parents=True, exist_ok=True)
     if args.pack:
-        extract_pack(args.pack, output)
+        extract_pack(args.pack, output, args.block)
     else:
-        extract_source(args.source, output)
+        extract_source(args.source, output, args.block)
     if args.swift_projection_rounding:
         for suffix, short in MAPPING.items():
             if suffix.startswith("adaln_modulation_") or suffix.endswith("_norm.weight"):
@@ -127,7 +129,7 @@ def main() -> None:
             target = output / f"block0_{short}.f32"
             values = np.fromfile(target, dtype=np.float32)
             values.astype(np.float16).astype(np.float32).tofile(target)
-    print(json.dumps({"output": str(output), "tensors": len(MAPPING),
+    print(json.dumps({"output": str(output), "block": args.block, "tensors": len(MAPPING),
                       "swift_projection_rounding": args.swift_projection_rounding}, sort_keys=True))
 
 

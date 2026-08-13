@@ -87,6 +87,7 @@ final class DiffusionSampler {
         stepCompleted: StepCompleted? = nil,
         diagnosticStepPrepared: DiagnosticStepPrepared? = nil,
         diagnosticBlockCompleted: DiagnosticBlockCompleted? = nil,
+        diagnosticBranchFilter: ((_ step: Int, _ block: Int) -> Bool)? = nil,
         diagnosticBranchCompleted: DiagnosticBranchCompleted? = nil
     ) async throws {
         try beginRun()
@@ -136,6 +137,8 @@ final class DiffusionSampler {
                 blockCompleted: { block, _ in
                 try blockProgress?(step, block)
                 try diagnosticBlockCompleted?(step, block, residual)
+            }, diagnosticBranchFilter: { block in
+                diagnosticBranchFilter?(step, block) ?? true
             }, diagnosticBranchCompleted: { block, branch, current in
                 try diagnosticBranchCompleted?(step, block, branch, current)
             })

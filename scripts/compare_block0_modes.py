@@ -39,13 +39,15 @@ def main():
     parser.add_argument("--quant", required=True)
     parser.add_argument("--emulation", required=True)
     parser.add_argument("--out", required=True)
+    parser.add_argument("--block", type=int, default=0)
     args = parser.parse_args()
     capture = Path(args.capture)
-    x0 = load(capture / "w8-step0-block0-input.f32")
+    prefix = f"w8-step0-block{args.block}"
+    x0 = load(capture / f"{prefix}-input.f32")
     metal = {
-        "self": load(capture / "w8-step0-block0-after-self.f32"),
-        "cross": load(capture / "w8-step0-block0-after-cross.f32"),
-        "mlp": load(capture / "w8-step0-block0-after-mlp.f32"),
+        "self": load(capture / f"{prefix}-after-self.f32"),
+        "cross": load(capture / f"{prefix}-after-cross.f32"),
+        "mlp": load(capture / f"{prefix}-after-mlp.f32"),
     }
     modes = {}
     for label, root in (("S", args.source), ("Q", args.quant), ("E", args.emulation)):
@@ -81,7 +83,7 @@ def main():
         else:
             classification = "inconclusive"
         values["classification"] = classification
-        print(f"BLOCK0_BRANCH={branch} CLASSIFICATION={classification} "
+        print(f"BLOCK={args.block} BRANCH={branch} CLASSIFICATION={classification} "
               f"RUNTIME_GAP={runtime_gap:.9g} QUANT_GAP={quant_gap:.9g} BACKEND_GAP={backend_gap:.9g}")
     output = Path(args.out); output.mkdir(parents=True, exist_ok=True)
     with open(output / "w8_block0_branch_metrics.csv", "w", newline="") as handle:

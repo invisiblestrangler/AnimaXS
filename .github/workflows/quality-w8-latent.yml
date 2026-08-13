@@ -72,7 +72,7 @@ jobs:
           echo "ba59e4d1797de5f6512aeafcecf3f38e1f62a47313a2a400b949c9018d84ceab  $qwen" | shasum -a 256 --check
           cp "$qwen" "$fixture/qwen3-0.6b-xsmax-w8.animapk"
           cp "$model_dir/$W8_FILE" "$fixture/anima-turbo-refine.animapk"
-          printf '%s\n' '{"attention_numerics":"legacy","latent_only":"1","capture_block0":"1"}' \
+          printf '%s\n' '{"attention_numerics":"legacy","latent_only":"1","capture_blocks":"0,7,14,21,27"}' \
             > "$fixture/quality-diagnostic.json"
           "$RUNNER_TEMP/xcodegen/bin/xcodegen" generate
       - name: Select simulator
@@ -167,23 +167,21 @@ jobs:
           import numpy as np
           root = sys.argv[1]
           expected = {
-            "w8-step0-block0-input.f32": 1024*2048*4,
             "w8-step0-embedding.f32": 2048*4,
             "w8-step0-adaln.f32": 6144*4,
             "w8-cross-context.f16": 512*1024*2,
             "w8-rope.f32": 1024*64*4*4,
-            "w8-step0-block0-after-self.f32": 1024*2048*4,
-            "w8-step0-block0-after-cross.f32": 1024*2048*4,
-            "w8-step0-block0-after-mlp.f32": 1024*2048*4,
           }
+          for block in (0, 7, 14, 21, 27):
+            for stage in ("input", "after-self", "after-cross", "after-mlp", "output"):
+              expected[f"w8-step0-block{block}-{stage}.f32"] = 1024*2048*4
           for name, size in expected.items():
             actual = os.path.getsize(os.path.join(root, name))
             if actual != size: raise SystemExit(f"{name}: {actual} != {size}")
           np.fromfile(os.path.join(root, "w8-cross-context.f16"), dtype="<f2").astype("<f4").tofile(os.path.join(root, "block0_cross_ctx.f32"))
-          copies = {"w8-step0-block0-input.f32":"block0_input_x.f32",
-                    "w8-step0-embedding.f32":"block0_emb.f32",
-                    "w8-step0-adaln.f32":"block0_adaln_lora.f32",
-                    "w8-rope.f32":"block0_rope.f32"}
+          copies = {"w8-step0-embedding.f32":"shared_emb.f32",
+                    "w8-step0-adaln.f32":"shared_adaln_lora.f32",
+                    "w8-rope.f32":"shared_rope.f32"}
           for source, target in copies.items():
             with open(os.path.join(root, source), "rb") as src, open(os.path.join(root, target), "wb") as dst: dst.write(src.read())
           PY
@@ -207,33 +205,42 @@ jobs:
       - name: Extract block-0 source, W8, and emulation weights
         run: |
           set -euo pipefail
-          python scripts/extract_block0_weights.py --source "$SOURCE" --out "$RUNNER_TEMP/source"
-          python scripts/extract_block0_weights.py --pack "$PACK" --out "$RUNNER_TEMP/quant"
-          python scripts/extract_block0_weights.py --pack "$PACK" --out "$RUNNER_TEMP/emulation" --swift-projection-rounding
-          for root in source quant emulation; do
-            cp "$RUNNER_TEMP/capture"/block0_*.f32 "$RUNNER_TEMP/$root/"
+          for block in 0 7 14 21 27; do
+            for mode in source quant emulation; do mkdir -p "$RUNNER_TEMP/$mode/$block"; done
+            python scripts/extract_block0_weights.py --source "$SOURCE" --block "$block" --out "$RUNNER_TEMP/source/$block"
+            python scripts/extract_block0_weights.py --pack "$PACK" --block "$block" --out "$RUNNER_TEMP/quant/$block"
+            python scripts/extract_block0_weights.py --pack "$PACK" --block "$block" --out "$RUNNER_TEMP/emulation/$block" --swift-projection-rounding
+            for mode in source quant emulation; do
+              root="$RUNNER_TEMP/$mode/$block"
+              cp "$RUNNER_TEMP/capture/shared_emb.f32" "$root/block0_emb.f32"
+              cp "$RUNNER_TEMP/capture/shared_adaln_lora.f32" "$root/block0_adaln_lora.f32"
+              cp "$RUNNER_TEMP/capture/shared_rope.f32" "$root/block0_rope.f32"
+              cp "$RUNNER_TEMP/capture/block0_cross_ctx.f32" "$root/"
+              cp "$RUNNER_TEMP/capture/w8-step0-block$block-input.f32" "$root/block0_input_x.f32"
+            done
           done
       - name: Execute source/W8/emulation block equations
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/results/source" "$RUNNER_TEMP/results/quant" "$RUNNER_TEMP/results/emulation"
-          python scripts/dit_block0_oracle.py --in "$RUNNER_TEMP/source" --out "$RUNNER_TEMP/results/source" \
-            --golden "$RUNNER_TEMP/no-golden" --skip-swift --checkpoints --weight-domain source-BF16
-          python scripts/dit_block0_oracle.py --in "$RUNNER_TEMP/quant" --out "$RUNNER_TEMP/results/quant" \
-            --golden "$RUNNER_TEMP/no-golden" --skip-swift --checkpoints --weight-domain exact-W8
-          python scripts/dit_block0_oracle.py --in "$RUNNER_TEMP/emulation" --out "$RUNNER_TEMP/results/emulation" \
-            --golden "$RUNNER_TEMP/no-golden" --skip-swift --checkpoints --weight-domain Swift-emulation \
-            --boundary-dtype fp16 --legacy-attention
+          for block in 0 7 14 21 27; do
+            for mode in source quant emulation; do mkdir -p "$RUNNER_TEMP/results/$mode/$block"; done
+            python scripts/dit_block0_oracle.py --in "$RUNNER_TEMP/source/$block" --out "$RUNNER_TEMP/results/source/$block" --golden "$RUNNER_TEMP/no-golden" --skip-swift --checkpoints --weight-domain source-BF16
+            python scripts/dit_block0_oracle.py --in "$RUNNER_TEMP/quant/$block" --out "$RUNNER_TEMP/results/quant/$block" --golden "$RUNNER_TEMP/no-golden" --skip-swift --checkpoints --weight-domain exact-W8
+            python scripts/dit_block0_oracle.py --in "$RUNNER_TEMP/emulation/$block" --out "$RUNNER_TEMP/results/emulation/$block" --golden "$RUNNER_TEMP/no-golden" --skip-swift --checkpoints --weight-domain Swift-emulation --boundary-dtype fp16 --legacy-attention
+          done
       - name: Compare branch update deltas
         run: |
           set -euo pipefail
           evidence="$RUNNER_TEMP/w8-block0-reference"
-          python scripts/compare_block0_modes.py \
-            --capture "$RUNNER_TEMP/capture" \
-            --source "$RUNNER_TEMP/results/source" \
-            --quant "$RUNNER_TEMP/results/quant" \
-            --emulation "$RUNNER_TEMP/results/emulation" \
-            --out "$evidence" | tee "$evidence.log"
+          mkdir -p "$evidence"
+          for block in 0 7 14 21 27; do
+            python scripts/compare_block0_modes.py --block "$block" \
+              --capture "$RUNNER_TEMP/capture" \
+              --source "$RUNNER_TEMP/results/source/$block" \
+              --quant "$RUNNER_TEMP/results/quant/$block" \
+              --emulation "$RUNNER_TEMP/results/emulation/$block" \
+              --out "$evidence/block$block" | tee -a "$evidence.log"
+          done
           cp "$evidence.log" "$evidence/"
           cp "$RUNNER_TEMP/capture/provenance.json" "$evidence/capture-provenance.json"
       - name: Upload same-W8 reference evidence
