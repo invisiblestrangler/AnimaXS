@@ -19,9 +19,6 @@ env:
 jobs:
   w8-sensitive-candidate:
     uses: ./.github/workflows/quality-w8-sensitive.yml
-    with:
-      pack_run_id: "31683466398"
-      pack_sha: "d75fcf545cd863a28bdf57cbd297b2a82d709aee"
     secrets: inherit
 
   focused-metal:
