@@ -136,6 +136,11 @@ jobs:
               python3 scripts/dit_source_oracle.py --source "$RUNNER_TEMP/dit-source.safetensors" \
                 --mode trajectory --capture "$dir" --out "$out" --dtype $dt || { echo "FAILED trajectory $name $dt"; failures=$((failures+1)); }
             done
+            if [ -f "$dir/w8-step0-block0-input.f32" ]; then
+              echo "=== blocks parity (fp32): $name ==="
+              python3 scripts/dit_source_oracle.py --source "$RUNNER_TEMP/dit-source.safetensors" \
+                --mode blocks --capture "$dir" --out "$out" --dtype fp32 || { echo "FAILED blocks $name"; failures=$((failures+1)); }
+            fi
           done
           for dt in bf16 fp32; do
             echo "=== end-to-end source run ($dt) vs golden ==="

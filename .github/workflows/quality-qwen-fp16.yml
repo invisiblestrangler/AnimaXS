@@ -254,8 +254,13 @@ jobs:
           curl --fail --location --retry 3 --retry-all-errors -o "$fixture/$VAE_FILE" \
             https://github.com/invisiblestrangler/AnimaXS/releases/download/$VAE_RELEASE/$VAE_FILE
           echo "$VAE_SHA256  $fixture/$VAE_FILE" | shasum -a 256 --check
-          printf '%s\n' "{\"attention_numerics\":\"legacy\",\"activation_numerics\":\"${{ matrix.activation_numerics }}\",\"golden_qwen_context\":\"${{ matrix.golden_qwen_context }}\",\"capture_trajectory\":\"${{ inputs.capture_trajectory }}\"}" \
-            > "$fixture/quality-diagnostic.json"
+          if [ "${{ inputs.capture_trajectory }}" = "1" ]; then
+            printf '%s\n' "{\"attention_numerics\":\"legacy\",\"activation_numerics\":\"${{ matrix.activation_numerics }}\",\"golden_qwen_context\":\"${{ matrix.golden_qwen_context }}\",\"capture_trajectory\":\"1\",\"capture_blocks\":\"0,7,14,21,27\"}" \
+              > "$fixture/quality-diagnostic.json"
+          else
+            printf '%s\n' "{\"attention_numerics\":\"legacy\",\"activation_numerics\":\"${{ matrix.activation_numerics }}\",\"golden_qwen_context\":\"${{ matrix.golden_qwen_context }}\"}" \
+              > "$fixture/quality-diagnostic.json"
+          fi
           # ---- exact self-describing provenance (handoff section 7) ----
           qwen_sha=$(awk '{print $1}' "$RUNNER_TEMP/candidates/qwen-pack.sha256")
           qwen_bytes=$(python3 -c 'import os,sys; print(os.path.getsize(sys.argv[1]))' "$RUNNER_TEMP/candidates/$QWEN_FILE")

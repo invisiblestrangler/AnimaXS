@@ -92,7 +92,7 @@ def layer_norm_mean_center(x, eps=EPS):
 
 def linear(x, w, b=None):
     """Matmul with fp32 accumulation, output rounded to x dtype (CUDA bf16)."""
-    out = F.linear(x.float(), w.float(), b)
+    out = F.linear(x.float(), w.float(), b.float() if b is not None else None)
     return out.to(x.dtype)
 
 
@@ -635,7 +635,7 @@ def mode_blocks(model, w, capture, out_dir, dtype):
         # prep comparisons
         for sname, scount, cname in [
                 ("embedding", DIM, "w8-step0-embedding.f32"),
-                ("adaln", 6 * DIM, "w8-step0-adaln.f32"),
+                ("adaln", 3 * DIM, "w8-step0-adaln.f32"),
                 ("block0_input", TOKENS * DIM, "w8-step0-block0-input.f32")]:
             swift = capt(cname, scount)
             if swift is None:

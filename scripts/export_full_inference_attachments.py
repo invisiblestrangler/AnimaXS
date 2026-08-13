@@ -81,14 +81,16 @@ def main() -> int:
             print(f"WARNING: exported file missing: {src}")
 
     # Trajectory/source-oracle captures (per-step x_in/denoised, fp32
-    # cross-context, sigma list) are exported under their own names so the
-    # Linux source oracle can consume them without renaming. XCTest mangles
-    # suggested names with a "_0_<UUID>" suffix; strip it back to the
-    # canonical name (e.g. step07_x_in_0_UUID.f32 -> step07_x_in.f32).
+    # cross-context, sigma list, step-0 block captures) are exported under
+    # their own names so the Linux source oracle can consume them without
+    # renaming. XCTest mangles suggested names with a "_0_<UUID>" suffix;
+    # strip it back to the canonical name (step07_x_in_0_UUID.f32 ->
+    # step07_x_in.f32).
     for sname, fname in exported_by_suggested.items():
         lname = sname.lower()
         if (sname.startswith("step") and sname.endswith(".f32")) \
-                or lname.startswith("cross-context") or lname.startswith("sigmas"):
+                or lname.startswith("cross-context") or lname.startswith("sigmas") \
+                or lname.startswith("w8-step0-"):
             src = os.path.join(exported_dir, fname)
             dst = os.path.join(artifacts_dir, sname)
             if os.path.isfile(src):
