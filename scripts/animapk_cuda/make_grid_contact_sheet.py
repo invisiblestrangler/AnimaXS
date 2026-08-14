@@ -82,8 +82,8 @@ def main() -> int:
         sdraw.text((c * w + 8, r * h + 8), name, fill=(255, 255, 0))
     sheet.save(os.path.join(args.out, "contact_sheet.png"))
 
-    # differences vs reference
-    diff = np.abs(ref_f.astype(np.float64) - images["G1_bf16"].astype(np.float64))
+    # differences vs reference (max over channels)
+    diff = np.abs(ref_f.astype(np.float64) - images["G1_bf16"].astype(np.float64)).max(axis=2)
     diff_img = (diff / diff.max() * 255).astype(np.uint8)
     Image.fromarray(np.repeat(diff_img[:, :, None], 3, axis=2), mode="RGB").save(
         os.path.join(args.out, "difference.png"))
