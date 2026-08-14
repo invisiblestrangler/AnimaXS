@@ -9,12 +9,21 @@ Lanes (one identical Python/CUDA VAE decode path for every latent):
   G4  Metal 8-step final latent (step07_denoised)       -> VAE -> PNG
 
 The VAE decode is a torch/CUDA port of the validated scripts/vae_decoder_oracle.py
-semantics (D060/D061): latent fed UNCHANGED (no mean/std transform), conv2 ->
+semantics (D060/D061): the VAE receives its canonical VAE-space latent UNCHANGED
+(no mean/std transform inside the decoder), conv2 ->
 decoder.conv1 -> middle (residual/attention/residual) -> 15 upsample modules ->
 head -> RGB, final-slice folds (rank-5 -> w[:, :, -1]), channel RMS norm
 (F.normalize over C x sqrt(C) x gamma), single-head spatial attention,
 nearest-exact 2x resample. The port is validated against the NumPy oracle on the
 golden latent before any DiT lane is decoded (--validate-vae).
+
+COORDINATE-SPACE CONTRACT (root-cause fix, 2026-08-14): the DiT/Euler output is
+SAMPLER-space; ComfyUI applies Wan21.process_out (samplers.py inner_sample)
+before the workflow/VAE receives the latent. Lanes therefore convert
+sampler_latent -> vae_latent with anima_sampler_to_vae() EXACTLY ONCE before
+decode. G0 uses the golden final latent, which is already VAE-space (it is the
+post-process_out ComfyUI output). Decoding raw sampler latents directly was the
+8px grid root cause (proven in wan21_boundary_proof.py).
 
 PNG conversion is the canonical production transform (extract_golden_fixtures.py
 to_display_uint8 == AnimaKernels.metal vae_position_to_rgba8):
@@ -38,6 +47,7 @@ sys.path.insert(0, REPO)
 sys.path.insert(0, os.path.join(REPO, "scripts"))
 
 from animapk_cuda import ladder_real  # noqa: E402  (build_real / euler / decode_pack)
+from animapk_cuda.wan21_latent_format import anima_sampler_to_vae  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -284,9 +294,15 @@ def main() -> int:
     print("loading VAE pack tensors...")
     vae_t = load_decoder_tensors_torch(args.vae_pack)
 
-    def decode_save(name: str, latent: np.ndarray) -> np.ndarray:
-        """Decode latent [16,64,64] -> RGB [3,512,512], save PNG + .f32, return rgb."""
-        rgb = decode_latent_torch(latent, vae_t)
+    def decode_save(name: str, vae_latent: np.ndarray) -> np.ndarray:
+        """Decode VAE-space latent [16,64,64] -> RGB [3,512,512], save PNG/.f32.
+
+        Coordinate-space contract (root-cause fix 2026-08-14): vae_latent MUST
+        already be VAE decode space — i.e. passed through anima_sampler_to_vae
+        (Wan21.process_out) exactly once. Raw sampler-space latents must NEVER
+        reach this function (that omission was the 8px grid root cause).
+        """
+        rgb = decode_latent_torch(vae_latent, vae_t)
         rgb.tofile(os.path.join(args.out, f"{name}_rgb.f32"))
         png = os.path.join(args.out, f"{name}.png")
         rgb_f32_to_png(rgb, png)
@@ -303,8 +319,10 @@ def main() -> int:
         with open(os.path.join(args.out, "manifest.json"), "w") as fh:
             json.dump(manifest, fh, indent=2)
 
-    # ---- G0: golden latent -> VAE (clean decoder control) ----
-    print("== G0: golden latent -> VAE ==")
+    # ---- G0: golden VAE-space latent -> VAE (clean decoder control) ----
+    # golden final_latent is ComfyUI's POST-process_out output (samplers.py
+    # CFGGuider.inner_sample applies Wan21.process_out) — already VAE-space.
+    print("== G0: golden latent (VAE-space) -> VAE ==")
     g0_rgb = decode_save("G0_golden", golden_latent)
     lane_record("G0_golden", golden_latent, g0_rgb)
     print("   G0 rgb vs ref cosine",
@@ -397,51 +415,58 @@ def main() -> int:
         print("== G1: official BF16 source ==")
         w = ladder_real.load_src_weights(args.source)
         model = ladder_real.build_real(w, torch.bfloat16, device)
-        lat = euler(model, torch.bfloat16)
+        sampler_latent = euler(model, torch.bfloat16)  # raw DiT/Euler output
         del model
-        lat.tofile(os.path.join(args.out, "G1_bf16_final_latent.f32"))
-        rgb = decode_save("G1_bf16", lat)
-        lane_record("G1_bf16", lat, rgb)
-        print("   G1 latent cos vs golden", round(manifest["lanes"]["G1_bf16"]["cosine"], 6))
+        vae_latent = anima_sampler_to_vae(sampler_latent)  # Wan21.process_out
+        sampler_latent.tofile(os.path.join(args.out, "G1_bf16_sampler_latent.f32"))
+        vae_latent.tofile(os.path.join(args.out, "G1_bf16_vae_latent.f32"))
+        rgb = decode_save("G1_bf16", vae_latent)
+        lane_record("G1_bf16", vae_latent, rgb)
+        print("   G1 vae-latent cos vs golden", round(manifest["lanes"]["G1_bf16"]["cosine"], 6))
 
         # G2: FP16-all pack
         print("== G2: FP16-all pack ==")
         wdec, prov = ladder_real.decode_pack(args.fp16_pack)
         manifest["packs"]["fp16"]["packer"] = prov.get("packer")
         model = ladder_real.build_real(wdec, torch.float16, device)
-        lat = euler(model, torch.float16)
+        sampler_latent = euler(model, torch.float16)
         del model
-        lat.tofile(os.path.join(args.out, "G2_fp16all_final_latent.f32"))
-        rgb = decode_save("G2_fp16all", lat)
-        lane_record("G2_fp16all", lat, rgb)
-        print("   G2 latent cos vs golden", round(manifest["lanes"]["G2_fp16all"]["cosine"], 6))
+        vae_latent = anima_sampler_to_vae(sampler_latent)
+        sampler_latent.tofile(os.path.join(args.out, "G2_fp16all_sampler_latent.f32"))
+        vae_latent.tofile(os.path.join(args.out, "G2_fp16all_vae_latent.f32"))
+        rgb = decode_save("G2_fp16all", vae_latent)
+        lane_record("G2_fp16all", vae_latent, rgb)
+        print("   G2 vae-latent cos vs golden", round(manifest["lanes"]["G2_fp16all"]["cosine"], 6))
 
         # G3: W8 pack
         print("== G3: W8 pack ==")
         wdec, prov = ladder_real.decode_pack(args.w8_pack)
         manifest["packs"]["w8"]["packer"] = prov.get("packer")
         model = ladder_real.build_real(wdec, torch.float16, device)
-        lat = euler(model, torch.float16)
+        sampler_latent = euler(model, torch.float16)
         del model
-        lat.tofile(os.path.join(args.out, "G3_w8_final_latent.f32"))
-        rgb = decode_save("G3_w8", lat)
-        lane_record("G3_w8", lat, rgb)
-        print("   G3 latent cos vs golden", round(manifest["lanes"]["G3_w8"]["cosine"], 6))
+        vae_latent = anima_sampler_to_vae(sampler_latent)
+        sampler_latent.tofile(os.path.join(args.out, "G3_w8_sampler_latent.f32"))
+        vae_latent.tofile(os.path.join(args.out, "G3_w8_vae_latent.f32"))
+        rgb = decode_save("G3_w8", vae_latent)
+        lane_record("G3_w8", vae_latent, rgb)
+        print("   G3 vae-latent cos vs golden", round(manifest["lanes"]["G3_w8"]["cosine"], 6))
     else:
         print("--skip-dit: skipping G1-G3 DiT runs")
 
-    # ---- G4: Metal final latents through the same VAE ----
+    # ---- G4: Metal final latents (sampler-space) through the same VAE ----
     if args.metal_dir:
         for pack in ("fp16-all", "w8", "w4"):
             p = os.path.join(args.metal_dir, pack, "step07_denoised.f32")
             if not os.path.isfile(p):
                 print(f"G4: {p} missing, skip")
                 continue
-            lat = np.fromfile(p, dtype=np.float32).reshape(16, 64, 64)
+            sampler_latent = np.fromfile(p, dtype=np.float32).reshape(16, 64, 64)
+            vae_latent = anima_sampler_to_vae(sampler_latent)  # Wan21.process_out
             name = f"G4_metal_{pack}"
-            rgb = decode_save(name, lat)
-            lane_record(name, lat, rgb)
-            print(f"   {name} latent cos vs golden",
+            rgb = decode_save(name, vae_latent)
+            lane_record(name, vae_latent, rgb)
+            print(f"   {name} vae-latent cos vs golden",
                   round(manifest["lanes"][name]["cosine"], 6))
 
     with open(os.path.join(args.out, "manifest.json"), "w") as fh:
