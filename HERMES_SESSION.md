@@ -66,3 +66,15 @@ HF: ScalingBiz/AnimaXS-investigation-artifacts — upload
   D097: step_latents[7] raw vs final_latent differed only by Wan21.process_out.
 - D060's "latent fed unchanged" is true INSIDE the VAE only; sampler output
   must be converted to VAE-space before decode.
+
+## Update 2026-08-14 (afternoon): closure status
+- PR #7 CI ALL GREEN: project-consistency PASS, iphone-build PASS,
+  simulator-tests PASS (7m6s, includes all 5 Wan21LatentFormatTests passing).
+- Full-inference macOS E2E dispatched: run 31804551959 (W4 pack, REQUIRED
+  mode) — validates the fixed Metal pipeline end-to-end.
+- HF evidence uploaded + verified: experiments/2026-08-14_wan21-process-out-fix
+  (27 files, SHA256SUMS, hash MATCH 27/27) — token at /root/HUGGINGFACE_TOKEN.
+- Final report: GRID_ROOT_CAUSE_FINAL_REPORT.md (repo root).
+- Branch HEAD: 9eea6c0 (all pushed).
+- Remaining: full-inference run result; then terminate Clore per K's new
+  instructions (supersedes the older "keep Clore alive" note).
