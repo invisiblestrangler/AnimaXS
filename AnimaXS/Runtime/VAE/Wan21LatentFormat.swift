@@ -82,7 +82,8 @@ enum Wan21LatentFormat {
         let count = buffer.length / MemoryLayout<Float>.stride
         precondition(count == channelCount * elementsPerChannel,
                      "latent buffer has \(count) floats, expected \(channelCount * elementsPerChannel)")
-        guard let p = buffer.contents().assumingMemoryBound(to: Float.self) else { return }
+        guard let raw = buffer.contents() else { return }
+        let p = raw.assumingMemoryBound(to: Float.self)
         for c in 0..<channelCount {
             let std = latentsStd[c] / scaleFactor
             let base = c * elementsPerChannel
