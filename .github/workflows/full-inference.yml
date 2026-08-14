@@ -156,7 +156,9 @@ jobs:
           # `bundledFixture(named:)`. The packs are *.animapk (gitignored) so they
           # are never committed; the regeneration is ephemeral on the runner.
           cp "$ANIMAXS_QWEN_PACK"    AnimaXSTests/Fixtures/Case1Binary/
-          cp "$ANIMAXS_DIFFUSION_PACK" AnimaXSTests/Fixtures/Case1Binary/
+          # FullInferenceTests expects the DiT pack bundled as
+          # anima-turbo-refine.animapk (same convention as full-inference-refine.yml).
+          cp "$ANIMAXS_DIFFUSION_PACK" AnimaXSTests/Fixtures/Case1Binary/anima-turbo-refine.animapk
           cp "$ANIMAXS_VAE_PACK"     AnimaXSTests/Fixtures/Case1Binary/
           xcodegen generate
           xcodebuild \
