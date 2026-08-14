@@ -1,72 +1,35 @@
-# AnimaXS Final Quality TODO
+# AnimaXS 8px Grid — Root-Cause Closure TODO
 
-Reset on 2026-08-13 at base `45c28f4` for the final image-quality investigation.
-Historical work remains in git history and `DECISIONS.md`.
+Reset 2026-08-14 per K's instructions (Hermes_AnimaXS_Test_Grid_Hypothesis_Instructions.md).
+Historical items live in git history + DECISIONS.md. This list is ONLY this run's closure plan.
 
-Completion criterion: a canonical generated image genuinely comparable to the
-reference from W4 and/or W8 using the updated iPhone XS Max pipeline. The old
-0.65 regression floors and inference completion are not quality acceptance.
+## Wan21 boundary proof (Phase A) — DONE
+- [x] Pin exact comfy-ref Wan21 semantics (constants, call site samplers.py:1238, Anima registration)
+- [x] Zero-inference proof: process_out(step_latents[7]) == final_latent BIT-EXACT (cos 1.0, rmse 0.0)
+- [x] Decode raw/converted/golden through CUDA VAE; carrier 254.4x -> 1.0x
+- [x] Saved G1/G2/G3/G4 latents: carrier ~245x -> 1.3x all lanes (W4 493x -> 1.8x)
+- [x] Vision review: grid gone in all fixed lanes
 
-## Current phase
+## CUDA fix + rerun (Phases B/C) — DONE
+- [x] wan21_latent_format.py (pinned constants, process_in/out) + unit tests (18.1-18.3) PASS
+- [x] grid_repro.py boundary: sampler_latent -> vae_latent exactly once; explicit naming
+- [x] Fixed-pipeline rerun: G1 0.811->0.971, carrier 246.7x->1.3x; G2/G3 same; W4 1.8x
+- [x] Comfy-ref file SHAs + provenance JSON recorded
 
-Phase 4/6 — BF16 compute-mode matrix running (true `bf16_compute` was the
-missing highest-priority experiment; run #29 was a legacy control).
+## Metal/iOS port (Phase D) — IN PROGRESS
+- [x] Wan21LatentFormat.swift (pinned constants, processOut/processIn, in-place buffer op)
+- [x] GenerationEngine applies process_out exactly once before VAEDecoder.decode
+- [x] FullInferenceTests converts before latent regression + decode
+- [x] Wan21LatentFormatTests (known-vector golden crop, zero==mean, channel mapping, inverse, buffer parity)
+- [ ] xcodeproj regenerated via bootstrap-project workflow (bot commit) — dispatched 31802354612
+- [ ] PR -> CI green (project consistency + iPhone build + simulator tests incl. new tests)
+- [ ] macOS full-inference validation (FP16-all/W8) via pack-backed workflow if practical
 
-## Phase 1 — reset and baseline
-
-- [x] Refresh `origin/main` and record base `45c28f4`.
-- [x] Preserve the live primary checkout and create `investigate/dit-quality-runtime`.
-- [x] Read historical decisions and verify latest W4/W8 metrics/provenance.
-- [x] Reset `TODO.md`, `STATUS.md`, and `TEST_MATRIX.md`.
-- [x] Audit attention, DiT, oracle, and full-inference implementations.
-- [x] Create and launch branch-only diagnostics.
-
-## Phase 2 — same-W8 reference
-
-- [x] Generate exact-dequantized-W8 source evidence on Linux Actions.
-- [x] Compare high-precision and Swift-like mixed precision at block 0.
-- [x] Record cosine, RMSE, maxAbs, norms, and exact provenance (run
-  `31678571617`). Metal-vs-exact-W8 relative L2 is `0.00019` self,
-  `0.00088` cross, and `0.00023` MLP; block 0 runtime is healthy.
-
-## Phase 3 — attention investigation
-
-- [x] Add minimal legacy and FP32-score/softmax diagnostic modes.
-- [x] Add an independent deterministic attention precision comparison.
-- [x] Run focused macOS attention precision tests.
-- [x] Reject FP32 attention as the primary fix — local RMSE improved ~5x,
-  but final W8 latent cosine improved only `+0.00047` in run `31676322657`.
-- [x] Run same-W8 block-0 parity.
-- [x] Run sparse first-divergence localization across blocks 0/7/14/21/27.
-
-## Phase 4 — localize divergence
-
-- [x] Produce same-W8 step-0 branch-delta evidence and machine-readable CSV.
-- [x] Reject selective late-branch FP16, all-block FP16, and all-DiT FP16 ceilings.
-- [x] Reject BF16 residual-boundary emulation (`31690018615`).
-- [x] Confirm run #29 (`31701142683`) was legacy/production, not BF16.
-- [x] Fix workflow efficiency (manual-only dispatch, pack once + macOS matrix,
-      pack reuse) and artifact provenance (provenance.json, real commit/run_id).
-- [x] Add `scripts/measure_grid_carrier.py` and record the defective baseline.
-- [ ] Run the true `bf16_compute` full-image matrix (production + golden Qwen)
-      with a legacy-golden control (pack reuse from run #29).
-- [ ] Apply the BF16/golden decision tree (handoff §9).
-
-## Phase 5 — promote winners
-
-- [x] Run eight-step W8 FP32-attention latent-only inference; insufficient.
-- [x] Run full-image source-FP16 weight ceilings; visible grid persists.
-- [ ] Run full canonical RGB inference only for strong latent candidates.
-- [ ] Inspect images for grid/etched/checker artifacts and natural detail.
-- [ ] Once shared runtime improves, compare corrected W4 and W8.
-- [ ] If BF16 is insufficient: per-step trajectory exports + source scheduler
-      oracle + sampler/preconditioning audit (handoff §11–§16).
-
-## Phase 6 — production and acceptance
-
-- [ ] Select and simplify the production implementation/model format.
-- [ ] Preserve streaming, tiled attention, and bounded iPhone scratch memory.
-- [ ] Record before/after latent and RGB metrics plus image artifacts.
-- [ ] Pass generic iPhone build, simulator tests, and canonical inference.
-- [ ] Clean diagnostics, update manifest/docs/decisions, integrate latest main.
-- [ ] Open the final PR and complete the requirement-by-requirement audit.
+## Evidence + docs + shutdown (Phase E)
+- [ ] DECISIONS.md D097 appended (DONE)
+- [ ] HERMES_SESSION.md updated
+- [ ] This TODO updated
+- [ ] Final summary report (section 20 format)
+- [ ] HF upload experiments/2026-08-14_wan21-process-out-fix/ + SHA256SUMS + hash verify
+- [ ] Commit + push docs
+- [ ] Terminate Clore instance (all CUDA work durable)
