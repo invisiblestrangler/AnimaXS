@@ -17,6 +17,16 @@
 | Conditioning isolation | Canonical Qwen context + W8 adapter/DiT | macOS | expensive latent | Pending |
 | Full image | Canonical generated/reference/comparison PNG | macOS | full image | Pending; must be visibly reference-comparable |
 | Production regression | Generic iPhone build + simulator tests | macOS | normal CI | Historical main green; rerun required for final candidate |
+| No-network cold launch (empty/partial/complete) | `ModelStoreTests` — downloader `XCTFail`s on any call | simulator | unit | Added 2026-08-15; must PASS |
+| Verification receipts | `ModelStoreTests` — relaunch no re-hash; invalidation on rewrite/size/manifest-SHA change; missing receipt → one verify | simulator | unit | Added 2026-08-15; must PASS |
+| Import replaces corrupt destination | `ModelStoreTests` — `replaceItemAt` path, staging cleaned, source preserved | simulator | unit | Added 2026-08-15; must PASS |
+| Production downloader | `ModelStoreTests` — 2xx/non-2xx/transport, staging ownership, disk-capacity error | simulator | unit (URLProtocol) | Added 2026-08-15; must PASS |
+| Localized errors | `ModelStoreTests` — `AnimapkError.localizedDescription` contains real reason | simulator | unit | Added 2026-08-15; must PASS |
+| Generate eligibility | `GenerationEligibilityTests` — every blocked condition yields a visible reason; ready path | simulator | unit | Added 2026-08-15; must PASS |
+| Diagnostics once-only | `DiagnosticsTests` — fullRun each test once; JSON export zero tests; snapshot zero hashing; deep SHA opt-in (3 packs → 3 hashes) | simulator | unit | Added 2026-08-15; must PASS |
+| Crash marker | `DiagnosticsRunMarkerTests` — attribute crash to current test; clean session no false marker | simulator | unit | Added 2026-08-15; must PASS |
+| MPS precision (corrected rowBytes) | `DiagnosticsTests.testHardwareTestsExecuteRealMPSOnMetal` — real command buffer on simulator | simulator | unit | Added 2026-08-15; PASS on sim ≠ A12 proof |
+| Physical A12 retest | DEVICE_TESTS.md checklist Phases 1–5 (import, Generate, Diagnostics, Download) | iPhone XS Max | device | PENDING — required before claiming device fixes |
 
 Metrics from different SHAs, packs, source revisions, or numerical modes must
 not be compared without recording those differences. Artifacts must upload even
