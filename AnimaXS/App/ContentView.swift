@@ -294,11 +294,18 @@ struct ContentView: View {
     private func logGenerationAttempt(resume: Bool) {
         let thermal = ProcessInfo.processInfo.thermalState
         let availableMemory = availableProcessMemory().map { "\($0)" } ?? "n/a"
+        // Break the values out of the interpolation so the compiler does not
+        // have to type-check a long chain of nested conversions.
+        let promptValid = !prompt.trimmingCharacters(in: .whitespaces).isEmpty
+        let seedParses = UInt64(seedText.trimmingCharacters(in: .whitespaces)) != nil
+        let modelsResolved = catalog.resolved != nil
+        let thermalDescription = String(describing: thermal)
+        let stateDescription = String(describing: coordinator.state)
         Self.generationLog.info(
-            "Generate tapped: resume=\(resume) promptValid=\(!prompt.trimmingCharacters(in: .whitespaces).isEmpty) "
-                + "seedParses=\(UInt64(seedText.trimmingCharacters(in: .whitespaces)) != nil) "
-                + "modelsResolved=\(catalog.resolved != nil) thermal=\(String(describing: thermal)) "
-                + "availableMemoryBytes=\(availableMemory) coordinatorState=\(String(describing: coordinator.state))")
+            "Generate tapped: resume=\(resume) promptValid=\(promptValid) "
+                + "seedParses=\(seedParses) modelsResolved=\(modelsResolved) "
+                + "thermal=\(thermalDescription) availableMemoryBytes=\(availableMemory) "
+                + "coordinatorState=\(stateDescription)")
     }
 
     private func availableProcessMemory() -> UInt64? {

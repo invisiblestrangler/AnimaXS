@@ -280,7 +280,8 @@ final class ModelStoreTests: XCTestCase {
         try Data("abc".utf8).write(to: modelsDir.appendingPathComponent(entry.filename))
         let verified = try await store.verifyExisting(entry)
         XCTAssertEqual(try Data(contentsOf: verified), Data("abc".utf8))
-        XCTAssertEqual(await store.state(for: entry.component), .ready(verified))
+        let verifiedState = await store.state(for: entry.component)
+        XCTAssertEqual(verifiedState, .ready(verified))
     }
 
     // MARK: - Local discovery: no network, no re-hash (real-device fixes A/B)
@@ -422,13 +423,16 @@ final class ModelStoreTests: XCTestCase {
         let store = try makeStore(root: root, downloader: { _ in fatalError() },
                                   verifier: countingVerifier(counter))
         let state = await store.discover(entry)
-        XCTAssertEqual(state, .ready(await store.localURL(for: entry)))
+        let expectedURL = await store.localURL(for: entry)
+        XCTAssertEqual(state, .ready(expectedURL))
         XCTAssertEqual(counter.count, 1, "migration: one full verification, then receipt")
 
         let counterB = VerifierCounter()
         let storeB = try makeStore(root: root, downloader: { _ in fatalError() },
                                    verifier: countingVerifier(counterB))
-        XCTAssertEqual(await storeB.discover(entry), .ready(await storeB.localURL(for: entry)))
+        let stateB = await storeB.discover(entry)
+        let expectedURLB = await storeB.localURL(for: entry)
+        XCTAssertEqual(stateB, .ready(expectedURLB))
         XCTAssertEqual(counterB.count, 0, "receipt written by first discovery avoids re-hash")
     }
 
@@ -444,7 +448,8 @@ final class ModelStoreTests: XCTestCase {
 
         // Establish a trusted receipt.
         let storeA = try makeStore(root: root, downloader: { _ in fatalError() })
-        XCTAssertEqual(await storeA.discover(entry), .ready(fileURL))
+        let discoverA = await storeA.discover(entry)
+        XCTAssertEqual(discoverA, .ready(fileURL))
 
         // Rewrite with different content of the SAME size, and bump the
         // modification date explicitly (APFS mtime is nanosecond-accurate, but
@@ -474,7 +479,8 @@ final class ModelStoreTests: XCTestCase {
         let fileURL = modelsDir.appendingPathComponent(entry.filename)
         try Data("abc".utf8).write(to: fileURL)
         let storeA = try makeStore(root: root, downloader: { _ in fatalError() })
-        XCTAssertEqual(await storeA.discover(entry), .ready(fileURL))
+        let discoverA = await storeA.discover(entry)
+        XCTAssertEqual(discoverA, .ready(fileURL))
 
         // Extend the file: size no longer matches the manifest.
         try Data("abcXX".utf8).write(to: fileURL)
@@ -499,7 +505,8 @@ final class ModelStoreTests: XCTestCase {
         let fileURL = modelsDir.appendingPathComponent(original.filename)
         try Data("abc".utf8).write(to: fileURL)
         let storeA = try makeStore(root: root, downloader: { _ in fatalError() })
-        XCTAssertEqual(await storeA.discover(original), .ready(fileURL))
+        let discoverA = await storeA.discover(original)
+        XCTAssertEqual(discoverA, .ready(fileURL))
 
         // The manifest now expects different content (same size, new SHA).
         let changed = makeEntry(content: Data("abd".utf8))
@@ -594,7 +601,8 @@ final class ModelStoreTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: installed), good,
                        "corrupt destination replaced by valid import")
         XCTAssertEqual(try Data(contentsOf: modelsDir.appendingPathComponent(entry.filename)), good)
-        XCTAssertEqual(await store.state(for: entry.component), .ready(installed))
+        let importState = await store.state(for: entry.component)
+        XCTAssertEqual(importState, .ready(installed))
         XCTAssertTrue(stagingFiles(in: modelsDir).isEmpty, "staging cleaned after replace")
         // The user's external source must not be deleted.
         XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))

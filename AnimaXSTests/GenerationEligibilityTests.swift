@@ -35,8 +35,9 @@ final class GenerationEligibilityTests: XCTestCase {
 
     func testBlockedWhenAlreadyGenerating() {
         // Generation in flight takes precedence over everything else.
-        let result = evaluate(isGenerating: true, prompt: "", seedText: "not-a-seed",
-                              thermalState: .critical, modelsResolved: false)
+        let result = evaluate(
+            modelsResolved: false, isGenerating: true, prompt: "",
+            seedText: "not-a-seed", thermalState: .critical)
         guard case .blocked(let reason) = result else {
             return XCTFail("expected blocked, got \(result)")
         }
