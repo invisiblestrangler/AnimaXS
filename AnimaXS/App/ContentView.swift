@@ -301,11 +301,10 @@ struct ContentView: View {
         let modelsResolved = catalog.resolved != nil
         let thermalDescription = String(describing: thermal)
         let stateDescription = String(describing: coordinator.state)
+        // Logger's OSLogMessage overload requires a single interpolation
+        // literal — runtime String concatenation does not compile.
         Self.generationLog.info(
-            "Generate tapped: resume=\(resume) promptValid=\(promptValid) "
-                + "seedParses=\(seedParses) modelsResolved=\(modelsResolved) "
-                + "thermal=\(thermalDescription) availableMemoryBytes=\(availableMemory) "
-                + "coordinatorState=\(stateDescription)")
+            "Generate tapped: resume=\(resume) promptValid=\(promptValid) seedParses=\(seedParses) modelsResolved=\(modelsResolved) thermal=\(thermalDescription) availableMemoryBytes=\(availableMemory) coordinatorState=\(stateDescription)")
     }
 
     private func availableProcessMemory() -> UInt64? {
