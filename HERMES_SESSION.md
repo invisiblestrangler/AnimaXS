@@ -78,3 +78,14 @@ HF: ScalingBiz/AnimaXS-investigation-artifacts — upload
 - Branch HEAD: 9eea6c0 (all pushed).
 - Remaining: full-inference run result; then terminate Clore per K's new
   instructions (supersedes the older "keep Clore alive" note).
+
+## Update 2026-08-14 (late): COMPLETE
+- Full-inference macOS E2E PASS (run 31805850085, 13m53s): W4 pack,
+  latent_cosine 0.8660 (was 0.6946 pre-fix), rgb_cosine 0.8198 (was 0.7035),
+  full_inference: PASS, FULL_INFERENCE=PASS marker. Vision: no grid, clean.
+  (Fixed workflow fixture-name bug: DiT pack bundled as anima-turbo-refine.animapk.)
+- comfy-ref pinned snapshot (4 files) uploaded to HF + SHA verified (SHAs match
+  recorded provenance exactly).
+- Clore termination: pending (cancel_order 2024354) — all evidence durable:
+  HF experiments/2026-08-14_wan21-process-out-fix (27 files + comfy-ref-pinned,
+  hash-verified), repo pushed (branch investigate/animapk-cuda-parity, PR #7).
