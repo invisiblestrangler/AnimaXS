@@ -138,6 +138,8 @@ def main():
                           "final_rmse": float((lat - golden).pow(2).mean().sqrt()),
                           "final_rel_l2": float((lat - golden).norm() / golden.norm())}
         print(f"   final vs golden cos {results[label]['final_cosine_vs_golden']:.6f}")
+        with open(os.path.join(args.out, "ladder_real_checkpoint.json"), "w") as fh:
+            json.dump(results, fh, indent=1)
         del model
 
     packs = {
@@ -156,6 +158,8 @@ def main():
                           "final_rmse": float((lat - golden).pow(2).mean().sqrt()),
                           "final_rel_l2": float((lat - golden).norm() / golden.norm())}
         print(f"   final vs golden cos {results[label]['final_cosine_vs_golden']:.6f}")
+        with open(os.path.join(args.out, "ladder_real_checkpoint.json"), "w") as fh:
+            json.dump(results, fh, indent=1)
         del model
 
     # decoded vs streaming equivalence through the real graph (step-0 only, fast)
@@ -170,6 +174,8 @@ def main():
             v = cmp.metrics(c_dr["post_unpatchify_velocity"], c_sm["post_unpatchify_velocity"])
             results[label + "_decoded_vs_streaming"] = v
             print(f"   {label} decoded vs streaming velocity cos {v['cosine']:.6f} maxAbs {v['max_abs']:.3e}")
+            with open(os.path.join(args.out, "ladder_real_checkpoint.json"), "w") as fh:
+                json.dump(results, fh, indent=1)
 
     cmp.write_json(os.path.join(args.out, "ladder_real_final.json"), {
         "golden_norm": float(golden.norm()),
