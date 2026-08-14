@@ -33,13 +33,12 @@ def main() -> int:
     }
     import glob
     g0lat = None
-    # golden latent == case1 final latent, reconstruct from manifest sha
-    # simpler: the G0 lane latent is the golden; we re-derive from reference:
-    # golden_latent is 16x64x64 f32 == case1_final_latent.f32 (verified cc56061d)
-    for cand in ("/workspace/fixtures/case1_final_latent.f32",
-                 "/root/AnimaXS/AnimaXSTests/Fixtures/Case1Binary/case1_final_latent.f32"):
+    # golden latent == case1 final latent (npz final_latent, sha cc56061d...)
+    for cand in ("/workspace/fixtures/case1_danbooru_seed1337.npz",
+                 "/workspace/fixtures/case1_danbooru_seed1337.npz"):
         if os.path.isfile(cand):
-            g0lat = np.fromfile(cand, dtype=np.float32).reshape(16, 64, 64)
+            zz = np.load(cand, allow_pickle=True)
+            g0lat = zz["final_latent"].astype(np.float32).reshape(16, 64, 64)
             break
     if g0lat is None:
         raise SystemExit("golden latent not found")
