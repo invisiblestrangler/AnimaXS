@@ -31,3 +31,13 @@ W8 is nearly free (0.809 vs 0.813). W4 is the quality cliff (0.660).
 The .animapk container and streaming runtime are bit-faithful (max_abs 0.0).
 The residual 0.81 ceiling is a genuine numeric-accumulation/quantization effect
 reproduced on BOTH backends — NOT a Metal-specific bug.
+
+## CUDA real-graph vs Metal simulator — per-block step-0 cosine (direct f32 compare)
+| pack | block 0 | block 1 | block 13 | block 27 |
+|------|---------|---------|----------|----------|
+| fp16-all | 1.000000 (relL2 0.0009) | 1.000000 | 0.999996 (0.0028) | 0.999999 (0.0012) |
+| w8      | 1.000000 (0.0010)      | 1.000000 | 0.999981 (0.0062) | 0.999999 (0.0017) |
+| w4      | 1.000000 (0.0009)      | 1.000000 | 0.999998 (0.0018) | 1.000000 (0.0008) |
+
+**Metal and real-upstream CUDA agree to 0.99998-1.00000 cosine per block on every pack.
+The Metal backend is NOT the source of the quality gap.**
