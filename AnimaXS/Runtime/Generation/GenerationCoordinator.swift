@@ -122,6 +122,11 @@ final class GenerationCoordinator: ObservableObject {
         }
     }
 
+    /// Whether Metal is available for generation (recoverable, not a crash).
+    var isMetalAvailable: Bool {
+        context != nil
+    }
+
     var canResume: Bool {
         guard let checkpoint = latestCheckpoint else { return false }
         switch state {

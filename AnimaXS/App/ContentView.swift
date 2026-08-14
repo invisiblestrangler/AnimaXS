@@ -1,9 +1,22 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import os
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// K001 — minimal useful app. Model section (3 packs: download/import/repair),
 /// prompt, seed + Randomize, Generate, Cancel, progress (stage/step/block +
 /// elapsed), Resume, image, Share, Diagnostics, and user-recoverable errors.
+///
+/// Real-device stabilization changes:
+/// - model discovery is local-only and side-effect free (no auto-download);
+/// - launch avoids full SHA-256 re-hashing via verification receipts;
+/// - Files imports hold security-scoped access for the whole async operation;
+/// - Generate can never silently no-op: eligibility is computed once and
+///   drives the button, the visible explanation, and the start guard;
+/// - the prompt/number keyboards have an explicit dismissal path;
+/// - Generate taps log thermal/memory/state facts for the next device run.
 struct ContentView: View {
     @StateObject private var coordinator = GenerationCoordinator()
     @StateObject private var catalog = ModelCatalog()
@@ -16,6 +29,15 @@ struct ContentView: View {
     @State private var showDiagnostics = false
     @State private var showingImporter = false
     @State private var importComponent: ModelComponent?
+    @FocusState private var focusedField: FocusField?
+
+    private enum FocusField: Hashable {
+        case prompt
+        case seed
+    }
+
+    private static let generationLog = Logger(
+        subsystem: "com.invisiblestrangler.AnimaXS", category: "Generation")
 
     var body: some View {
         NavigationStack {
@@ -31,9 +53,14 @@ struct ContentView: View {
             .navigationDestination(isPresented: $showDiagnostics) {
                 DiagnosticsView()
             }
+            .scrollDismissesKeyboard(.interactively)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Diagnostics") { showDiagnostics = true }
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") { focusedField = nil }
                 }
             }
             .task { await catalog.refresh() }
@@ -62,7 +89,19 @@ struct ContentView: View {
             ) { result in
                 guard let component = importComponent,
                       let url = try? result.get().first else { return }
-                Task { await catalog.importPack(component, from: url) }
+                // Files-provided URLs are security-scoped: access must be held
+                // for the ENTIRE async import (size check + SHA-256 + copy),
+                // not just for obtaining the URL. Stopping access immediately
+                // after creating the Task would break the read.
+                let didStart = url.startAccessingSecurityScopedResource()
+                Task {
+                    defer {
+                        if didStart {
+                            url.stopAccessingSecurityScopedResource()
+                        }
+                    }
+                    await catalog.importPack(component, from: url)
+                }
             }
         }
     }
@@ -93,7 +132,7 @@ struct ContentView: View {
                 Button("Repair") { Task { await catalog.repair(component) } }
                     .font(.caption)
             } else if case .failed = state {
-                Button("Retry") { Task { await catalog.download(component) } }
+                Button("Retry") { Task { await catalog.retry(component) } }
                     .font(.caption)
                 Button("Import") { importComponent = component; showingImporter = true }
                     .font(.caption)
@@ -112,6 +151,7 @@ struct ContentView: View {
         Section("Prompt") {
             TextEditor(text: $prompt)
                 .frame(minHeight: 100)
+                .focused($focusedField, equals: .prompt)
         }
     }
 
@@ -122,6 +162,7 @@ struct ContentView: View {
             HStack {
                 TextField("Seed", text: $seedText)
                     .keyboardType(.numberPad)
+                    .focused($focusedField, equals: .seed)
                 Button("Randomize") {
                     seedText = String(UInt64.random(in: 0..<UInt64.max))
                 }
@@ -134,13 +175,17 @@ struct ContentView: View {
 
     private var generationSection: some View {
         Section {
-            if canGenerate {
+            if coordinator.canResume {
+                Button("Resume") {
+                    startGeneration(resume: true)
+                }
+            } else {
                 Button("Generate") {
                     startGeneration(resume: false)
                 }
-            } else if coordinator.canResume {
-                Button("Resume") {
-                    startGeneration(resume: true)
+                .disabled(!eligibility.isReady)
+                if let reason = eligibility.blockedReason {
+                    Text(reason).font(.caption).foregroundStyle(.orange)
                 }
             }
             if isGenerating {
@@ -197,21 +242,38 @@ struct ContentView: View {
 
     // MARK: - Helpers
 
+    /// Single eligibility source for the Generate button, the visible blocked
+    /// reason, and the start guard — a tapped Generate can never silently
+    /// return while the UI claims it is enabled.
+    private var eligibility: GenerationEligibility {
+        GenerationEligibility.evaluate(
+            modelsResolved: catalog.resolved != nil,
+            isGenerating: isGenerating,
+            canResume: coordinator.canResume,
+            prompt: prompt,
+            seedText: seedText,
+            thermalState: ProcessInfo.processInfo.thermalState,
+            metalAvailable: coordinator.isMetalAvailable)
+    }
+
     private func startGeneration(resume: Bool) {
-        guard let models = catalog.resolved, !prompt.trimmingCharacters(in: .whitespaces).isEmpty else {
+        logGenerationAttempt(resume: resume)
+        guard case .ready = eligibility else {
+            Self.generationLog.warning(
+                "generation blocked: \(eligibility.blockedReason ?? "unknown", privacy: .public)")
             return
         }
         guard let seed = UInt64(seedText) else {
+            Self.generationLog.error("generation guard: seed did not parse despite eligibility")
             return
         }
-        // K004 thermal policy: do not begin a generation while the device is
-        // already in a serious/critical thermal state (same policy the running
-        // handler applies). Otherwise a fresh generation would ignore an
-        // already-serious condition.
-        let thermal = ProcessInfo.processInfo.thermalState
-        if thermal == .serious || thermal == .critical {
+        // Re-read the resolved set rather than force-unwrapping: the catalog
+        // can change between eligibility evaluation and this guard.
+        guard let models = catalog.resolved else {
+            Self.generationLog.error("generation guard: models disappeared after eligibility")
             return
         }
+        Self.generationLog.info("generation accepted (resume=\(resume))")
         generationStart = Date()
         elapsedText = ""
         elapsedTimer?.invalidate()
@@ -223,13 +285,31 @@ struct ContentView: View {
         } else {
             coordinator.generate(prompt: prompt, seed: seed, models: models)
         }
+        Self.generationLog.info(
+            "generation state after start: \(String(describing: coordinator.state), privacy: .public)")
+    }
+
+    /// Physical-device instrumentation: records the facts needed to tell a
+    /// UI-guard rejection from an inference crash on the next device run.
+    private func logGenerationAttempt(resume: Bool) {
+        let thermal = ProcessInfo.processInfo.thermalState
+        let availableMemory = availableProcessMemory().map { "\($0)" } ?? "n/a"
+        Self.generationLog.info(
+            "Generate tapped: resume=\(resume) promptValid=\(!prompt.trimmingCharacters(in: .whitespaces).isEmpty) "
+                + "seedParses=\(UInt64(seedText.trimmingCharacters(in: .whitespaces)) != nil) "
+                + "modelsResolved=\(catalog.resolved != nil) thermal=\(String(describing: thermal)) "
+                + "availableMemoryBytes=\(availableMemory) coordinatorState=\(String(describing: coordinator.state))")
+    }
+
+    private func availableProcessMemory() -> UInt64? {
+        #if canImport(Darwin)
+        return UInt64(os_proc_available_memory())
+        #else
+        return nil
+        #endif
     }
 
     private var isGenerating: Bool { coordinator.isGenerating }
-
-    private var canGenerate: Bool {
-        catalog.resolved != nil && !isGenerating && !coordinator.canResume
-    }
 
     @ViewBuilder
     private var progressView: some View {
@@ -284,6 +364,11 @@ struct ContentView: View {
 /// Observable model-state catalog bound to `ModelStore`. Exposes the three
 /// production packs' states, download/import/repair actions, and the resolved
 /// three-URL set once all are ready.
+///
+/// Discovery is local-only: `refresh()` never downloads and never hashes on
+/// the main actor. Any full verification (only when a verification receipt is
+/// absent/stale) runs on the `ModelStore` actor, off the UI thread; the UI
+/// sees per-row `verifying…` states while that happens.
 @MainActor
 final class ModelCatalog: ObservableObject {
     @Published private var states: [ModelComponent: ModelStore.State] = [:]
@@ -303,30 +388,37 @@ final class ModelCatalog: ObservableObject {
     func refresh() async {
         guard let store else {
             states = ModelComponent.allCases.reduce(into: [:]) { $0[$1] = .failed("ModelStore unavailable") }
+            resolved = nil
             return
         }
-        // Discover already-installed valid packs (cold-launch ready).
+        // Local-only discovery: a valid verification receipt makes each row a
+        // stat check; a missing/stale receipt triggers one full verification on
+        // the store actor (off the main actor). Never downloads.
         for entry in ModelManifest.entries {
-            let url = await store.localURL(for: entry)
-            if FileManager.default.fileExists(atPath: url.path) {
-                do {
-                    try ModelManifest.verify(url, against: entry)
-                    states[entry.component] = .ready(url)
-                } catch {
-                    states[entry.component] = .failed(error.localizedDescription)
-                }
-            } else {
-                states[entry.component] = .missing
-            }
+            states[entry.component] = await store.discover(entry)
         }
-        try? await updateResolved()
+        resolved = (try? await store.resolveInstalledModels())
     }
 
     func download(_ component: ModelComponent) async {
         guard let store, let entry = ModelManifest.entries.first(where: { $0.component == component }) else { return }
         do {
             states[component] = .downloading
-            let url = try await store.prepare(entry)
+            let url = try await store.download(entry)
+            states[component] = .ready(url)
+        } catch {
+            states[component] = .failed(error.localizedDescription)
+        }
+        try? await updateResolved()
+    }
+
+    /// Explicit re-verification of an existing local file (full size + SHA),
+    /// used by "Retry" on a failed row. Never downloads.
+    func retry(_ component: ModelComponent) async {
+        guard let store, let entry = ModelManifest.entries.first(where: { $0.component == component }) else { return }
+        do {
+            states[component] = .verifying
+            let url = try await store.verifyExisting(entry)
             states[component] = .ready(url)
         } catch {
             states[component] = .failed(error.localizedDescription)
@@ -360,7 +452,7 @@ final class ModelCatalog: ObservableObject {
 
     private func updateResolved() async throws {
         guard let store else { resolved = nil; return }
-        resolved = try await store.resolvedModels()
+        resolved = try await store.resolveInstalledModels()
     }
 }
 
