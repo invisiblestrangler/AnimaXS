@@ -17,8 +17,11 @@ final class DiTFinalLayerExecutor {
     private let streamer: WeightStreamer
     private let buffers: BufferPool
     private let linear: LinearExecutor
+    private let activationNumerics: ActivationNumerics
+    private var emulatesBF16: Bool { activationNumerics == .bf16Compute }
 
-    init(context: MetalContext, file: AnimapkFile) throws {
+    init(context: MetalContext, file: AnimapkFile,
+         activationNumerics: ActivationNumerics = .legacy) throws {
         let range = try DiTFinalLayerLocator(file: file).range
         guard range.length <= UInt64(Int.max) else {
             throw AnimapkError.validation("DiT final layer range is too large")
@@ -29,6 +32,7 @@ final class DiTFinalLayerExecutor {
         self.streamer = try WeightStreamer(device: context.device, capacity: Int(range.length))
         self.buffers = BufferPool(device: context.device)
         self.linear = LinearExecutor(context: context)
+        self.activationNumerics = activationNumerics
     }
 
     /// `residual`, `emb`, and `adalnLora` are fp32. `velocity` is fp32
@@ -48,9 +52,13 @@ final class DiTFinalLayerExecutor {
         let modulationHidden = buffer("final.modHidden.f32", Self.modulationHidden, Float.self)
         let modulation = buffer("final.modulation.f32", Self.modulationSize, Float.self)
         try encodeUnary(command, "silu", emb, siluEmb, Self.dim)
+        try encodeComputeBoundary(command, siluEmb, count: Self.dim)
         try encodeMatvec(command, siluEmb, weights.modulation1, modulationHidden)
+        try encodeComputeBoundary(command, modulationHidden, count: Self.modulationHidden)
         try encodeMatvec(command, modulationHidden, weights.modulation2, modulation)
+        try encodeComputeBoundary(command, modulation, count: Self.modulationSize)
         try encodeAdd(command, destination: modulation, source: adalnLora, count: Self.modulationSize)
+        try encodeComputeBoundary(command, modulation, count: Self.modulationSize)
 
         // predict2.py:930 casts the large fp32 residual to cross-attention dtype
         // before FinalLayer. Make that fp16 boundary explicit before fp32-stat LayerNorm.
@@ -68,10 +76,12 @@ final class DiTFinalLayerExecutor {
         // torch.layer_norm preserves its fp16 input dtype. AdaLN then promotes the
         // rounded norm output when adding the fp32 shift/scale tensors.
         try encodeUnary(command, "float_to_half", normalized, normalizedHalf, Self.tokens * Self.dim)
+        try encodeHalfComputeBoundary(command, normalizedHalf, count: Self.tokens * Self.dim)
         try encodeUnary(command, "half_to_float", normalizedHalf, normalizedBoundary,
                         Self.tokens * Self.dim)
         try encodeModulate(command, normalized: normalizedBoundary,
                            modulation: modulation, output: modulated)
+        try encodeComputeBoundary(command, modulated, count: Self.tokens * Self.dim)
         try encodeUnary(command, "float_to_half", modulated, projectionInput, Self.tokens * Self.dim)
 
         let projectedHalf = buffer("final.projected.f16", Self.tokens * Self.projected, Float16.self)
@@ -79,6 +89,7 @@ final class DiTFinalLayerExecutor {
         try linear.encode(commandBuffer: command, input: projectionInput,
                           weight: weights.projection, output: projectedHalf,
                           inputRows: Self.tokens)
+        try encodeHalfComputeBoundary(command, projectedHalf, count: Self.tokens * Self.projected)
         try encodeUnary(command, "half_to_float", projectedHalf, projectedFloat,
                         Self.tokens * Self.projected)
         try encodeUnpatchify(command, input: projectedFloat, output: velocity)
@@ -189,6 +200,32 @@ final class DiTFinalLayerExecutor {
         encoder.setBuffer(output, offset: 0, index: 1)
         encoder.setBytes(&elements, length: 4, index: 2)
         dispatch(encoder, pipeline, count)
+        encoder.endEncoding()
+    }
+
+    private func encodeComputeBoundary(
+        _ command: MTLCommandBuffer, _ value: MTLBuffer, count: Int
+    ) throws {
+        guard emulatesBF16 else { return }
+        try encodeUnary(command, "round_f32_to_bf16", value, value, count)
+    }
+
+    private func encodeHalfComputeBoundary(
+        _ command: MTLCommandBuffer, _ value: MTLBuffer, count: Int
+    ) throws {
+        guard emulatesBF16 else { return }
+        let pipeline = try context.pipeline(named: "round_half_to_bf16")
+        guard let encoder = command.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create final BF16 boundary encoder")
+        }
+        var count = UInt32(count)
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(value, offset: 0, index: 0)
+        encoder.setBuffer(value, offset: 0, index: 1)
+        encoder.setBytes(&count, length: 4, index: 2)
+        let width = min(pipeline.threadExecutionWidth, pipeline.maxTotalThreadsPerThreadgroup)
+        encoder.dispatchThreads(MTLSize(width: Int(count), height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
         encoder.endEncoding()
     }
 

@@ -1,0 +1,9 @@
+{
+  "default": "w8",
+  "overrides": [
+    {
+      "match": "model.layers.*",
+      "storage": "fp16"
+    }
+  ]
+}

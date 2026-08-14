@@ -13,6 +13,16 @@ final class DiffusionSampler {
         _ step: Int, _ sigma: Float, _ nextSigma: Float,
         _ denoised: MTLBuffer, _ latent: MTLBuffer
     ) throws -> Void
+    typealias DiagnosticStepPrepared = (
+        _ step: Int, _ residual: MTLBuffer, _ embedding: MTLBuffer,
+        _ adalnLora: MTLBuffer, _ crossContextHalf: MTLBuffer, _ rope: MTLBuffer
+    ) throws -> Void
+    typealias DiagnosticBlockCompleted = (
+        _ step: Int, _ block: Int, _ residual: MTLBuffer
+    ) throws -> Void
+    typealias DiagnosticBranchCompleted = (
+        _ step: Int, _ block: Int, _ branch: String, _ residual: MTLBuffer
+    ) throws -> Void
 
     private let context: MetalContext
     private let preparation: DiTPreparationExecutor
@@ -23,10 +33,15 @@ final class DiffusionSampler {
     private let stateLock = NSLock()
     private var running = false
 
-    init(context: MetalContext, file: AnimapkFile) throws {
+    init(context: MetalContext, file: AnimapkFile,
+         attentionNumerics: AttentionNumerics = .legacy,
+         activationNumerics: ActivationNumerics = .legacy) throws {
         self.context = context
-        preparation = try DiTPreparationExecutor(context: context, file: file)
-        forward = try DitForward(context: context, file: file)
+        preparation = try DiTPreparationExecutor(
+            context: context, file: file, activationNumerics: activationNumerics)
+        forward = try DitForward(
+            context: context, file: file, attentionNumerics: attentionNumerics,
+            activationNumerics: activationNumerics)
         euler = EulerSampler(context: context)
         buffers = BufferPool(device: context.device)
 
@@ -59,6 +74,24 @@ final class DiffusionSampler {
         startStep: Int = 0,
         blockProgress: BlockProgress? = nil,
         stepCompleted: StepCompleted? = nil
+    ) async throws {
+        try await executeDiagnostic(
+            initialLatent: initialLatent, crossContext: crossContext,
+            outputLatent: outputLatent, startStep: startStep,
+            blockProgress: blockProgress, stepCompleted: stepCompleted)
+    }
+
+    func executeDiagnostic(
+        initialLatent: MTLBuffer,
+        crossContext: MTLBuffer,
+        outputLatent: MTLBuffer,
+        startStep: Int = 0,
+        blockProgress: BlockProgress? = nil,
+        stepCompleted: StepCompleted? = nil,
+        diagnosticStepPrepared: DiagnosticStepPrepared? = nil,
+        diagnosticBlockCompleted: DiagnosticBlockCompleted? = nil,
+        diagnosticBranchFilter: ((_ step: Int, _ block: Int) -> Bool)? = nil,
+        diagnosticBranchCompleted: DiagnosticBranchCompleted? = nil
     ) async throws {
         try beginRun()
         defer { endRun() }
@@ -99,12 +132,19 @@ final class DiffusionSampler {
             try await preparation.execute(
                 latent: latent, sigma: sigma, residual: residual,
                 embedding: embedding, adalnLora: adaln)
+            try diagnosticStepPrepared?(
+                step, residual, embedding, adaln, crossHalf, rope)
             try await forward.execute(
                 residual: residual, emb: embedding, adalnLora: adaln,
-                crossContext: crossHalf, rope: rope
-            ) { block, _ in
+                crossContext: crossHalf, rope: rope,
+                blockCompleted: { block, _ in
                 try blockProgress?(step, block)
-            }
+                try diagnosticBlockCompleted?(step, block, residual)
+            }, diagnosticBranchFilter: { block in
+                diagnosticBranchFilter?(step, block) ?? true
+            }, diagnosticBranchCompleted: { block, branch, current in
+                try diagnosticBranchCompleted?(step, block, branch, current)
+            })
             try await forward.executeVelocityFinalLayer(
                 residual: residual, emb: embedding, adalnLora: adaln,
                 velocity: velocity)

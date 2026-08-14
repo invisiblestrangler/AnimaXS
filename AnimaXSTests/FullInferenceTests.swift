@@ -52,8 +52,6 @@ final class FullInferenceTests: XCTestCase {
             envKey: "ANIMAXS_QWEN_PACK", name: "qwen3-0.6b-xsmax-w8.animapk")
         let ditURL = try requiredFixture(
             envKey: "ANIMAXS_DIFFUSION_PACK", name: "anima-turbo-refine.animapk")
-        let vaeURL = try requiredFixture(
-            envKey: "ANIMAXS_VAE_PACK", name: "qwen-image-vae-xsmax-fp16.animapk")
         let noiseURL = try requiredFixture(
             envKey: "ANIMAXS_NOISE_FILE", name: "case1_noise.f32")
 
@@ -87,20 +85,53 @@ final class FullInferenceTests: XCTestCase {
         let qwenOutput = try XCTUnwrap(context.device.makeBuffer(
             length: qwenTokenIDs.count * QwenEncoderMetal.hidden * 4, options: .storageModeShared))
         let qwenStart = Date()
-        try await qwen.execute(tokenIDs: qwenTokenIDs, output: qwenOutput, layerCompleted: nil)
+        if diagnosticConfig("golden_qwen_context") == "1" {
+            let goldenURL = try requiredFixture(
+                envKey: "ANIMAXS_QWEN_CONTEXT_FILE", name: "case1_cond_context.f32")
+            let golden = try floats(from: goldenURL)
+            XCTAssertEqual(golden.count, qwenTokenIDs.count * QwenEncoderMetal.hidden)
+            golden.withUnsafeBytes { bytes in
+                if let base = bytes.baseAddress {
+                    memcpy(qwenOutput.contents(), base, bytes.count)
+                }
+            }
+            print("FULL_QWEN_CONTEXT=golden")
+        } else {
+            try await qwen.execute(
+                tokenIDs: qwenTokenIDs, output: qwenOutput, layerCompleted: nil)
+            print("FULL_QWEN_CONTEXT=production")
+        }
         let qwenSeconds = Date().timeIntervalSince(qwenStart)
         XCTAssertTrue(isFinite(qwenOutput), "Qwen output must be finite")
 
         // ---- 3. Adapter → crossContext [512, 1024] fp32 (DiT pack) ----
-        let adapter = try LLMAdapterMetal(context: context, file: AnimapkFile(url: ditURL))
+        // golden_dit_context=1: load the canonical source-adapter context
+        // (case1_dit_context.f32, identical bytes to the CUDA ladder fixture
+        // context512.f32) so backend parity isolates the DiT forward only.
         let cross = try XCTUnwrap(context.device.makeBuffer(
             length: LLMAdapterMetal.maximumTokens * LLMAdapterMetal.hidden * 4,
             options: .storageModeShared))
-        let adapterStart = Date()
-        try await adapter.execute(
-            qwenContext: qwenOutput, contextTokens: qwenTokenIDs.count,
-            t5IDs: t5IDs, t5Weights: t5Weights, output: cross, layerCompleted: nil)
-        let adapterSeconds = Date().timeIntervalSince(adapterStart)
+        var adapterSeconds = 0.0
+        if diagnosticConfig("golden_dit_context") == "1" {
+            let ditContextURL = try requiredFixture(
+                envKey: "ANIMAXS_DIT_CONTEXT_FILE", name: "case1_dit_context.f32")
+            let golden = try floats(from: ditContextURL)
+            XCTAssertEqual(golden.count, LLMAdapterMetal.maximumTokens * LLMAdapterMetal.hidden)
+            golden.withUnsafeBytes { bytes in
+                if let base = bytes.baseAddress {
+                    memcpy(cross.contents(), base, bytes.count)
+                }
+            }
+            print("FULL_DIT_CONTEXT=golden")
+        } else {
+            let adapter = try LLMAdapterMetal(context: context, file: AnimapkFile(url: ditURL))
+            let adapterStart = Date()
+            try await adapter.execute(
+                qwenContext: qwenOutput, contextTokens: qwenTokenIDs.count,
+                t5IDs: t5IDs, t5Weights: t5Weights, output: cross, layerCompleted: nil)
+            adapterSeconds = Date().timeIntervalSince(adapterStart)
+            print("FULL_DIT_CONTEXT=production (\\(adapterSeconds)s)")
+        }
         XCTAssertTrue(isFinite(cross), "cross-context must be finite")
 
         // ---- 4. Diffusion: canonical golden noise → final latent ----
@@ -109,22 +140,97 @@ final class FullInferenceTests: XCTestCase {
         let initial = makeBuffer(noiseValues, on: context.device)
         let finalLatent = try XCTUnwrap(context.device.makeBuffer(
             length: DiffusionSampler.latentElements * 4, options: .storageModeShared))
-        let sampler = try DiffusionSampler(context: context, file: AnimapkFile(url: ditURL))
+        let attentionNumerics = AttentionNumerics(
+            rawValue: diagnosticConfig("attention_numerics") ?? "legacy")
+            ?? .legacy
+        print("FULL_ATTENTION_NUMERICS=\(attentionNumerics.rawValue)")
+        let activationNumerics = ActivationNumerics(
+            rawValue: diagnosticConfig("activation_numerics") ?? "legacy")
+            ?? .legacy
+        print("FULL_ACTIVATION_NUMERICS=\(activationNumerics.rawValue)")
+        let sampler = try DiffusionSampler(
+            context: context, file: AnimapkFile(url: ditURL),
+            attentionNumerics: attentionNumerics,
+            activationNumerics: activationNumerics)
         let diffusionStart = Date()
         var stepSeconds: [Double] = []
         var completedSteps = 0
         var blockCallbacks = 0
         var stepLatents: [[Float]] = []
-        try await sampler.execute(
+        let captureTrajectory = diagnosticConfig("capture_trajectory") == "1"
+        var trajectoryXIn: [Float]? = captureTrajectory ? read(initial) : nil
+        let captureBlocks = Set((diagnosticConfig("capture_blocks") ??
+            (diagnosticConfig("capture_block0") == "1" ? "0" : ""))
+            .split(separator: ",").compactMap { Int($0) })
+        var capturedStep0 = false
+        var capturedBranches: Set<String> = []
+        try await sampler.executeDiagnostic(
             initialLatent: initial, crossContext: cross, outputLatent: finalLatent,
             blockProgress: { _, _ in
                 blockCallbacks += 1
             },
-            stepCompleted: { step, _, _, _, latent in
+            stepCompleted: { step, _, _, denoised, latent in
                 stepSeconds.append(Date().timeIntervalSince(diffusionStart))
                 completedSteps += 1
                 stepLatents.append(self.read(latent))
+                if captureTrajectory {
+                    // Per-step source-oracle capture (handoff section 11/13):
+                    // x_i entering the step and the fp32 denoised output, from
+                    // which the oracle reconstructs Swift's velocity
+                    // v_i = (x_i - denoised_i) / sigma_i.
+                    if let xIn = trajectoryXIn {
+                        self.attachBuffer(from: xIn,
+                                          name: String(format: "step%02d_x_in.f32", step))
+                    }
+                    self.attachBuffer(denoised, bytes: DiffusionSampler.latentElements * 4,
+                                      name: String(format: "step%02d_denoised.f32", step))
+                    trajectoryXIn = self.read(latent)
+                    if step == 0 {
+                        self.attachBuffer(cross, bytes: 512 * 1_024 * 4,
+                                          name: "cross-context.f32")
+                        let sigmas = EulerSampler.sigmas.map { String(format: "%.8f", $0) }
+                            .joined(separator: ",")
+                        let sigmasAttachment = XCTAttachment(string: sigmas + "\n")
+                        sigmasAttachment.name = "sigmas.txt"
+                        sigmasAttachment.lifetime = .keepAlways
+                        self.add(sigmasAttachment)
+                    }
+                }
                 print("FULL_DIFFUSION_STEP_\(step)_SECONDS=\(String(format: "%.2f", stepSeconds[step]))")
+            },
+            diagnosticStepPrepared: { step, residual, embedding, adaln, crossHalf, rope in
+                guard !captureBlocks.isEmpty, step == 0, !capturedStep0 else { return }
+                capturedStep0 = true
+                self.attachBuffer(residual, bytes: 1_024 * 2_048 * 4,
+                                  name: "w8-step0-block0-input.f32")
+                self.attachBuffer(embedding, bytes: 2_048 * 4,
+                                  name: "w8-step0-embedding.f32")
+                self.attachBuffer(adaln, bytes: 6_144 * 4,
+                                  name: "w8-step0-adaln.f32")
+                self.attachBuffer(crossHalf, bytes: 512 * 1_024 * 2,
+                                  name: "w8-cross-context.f16")
+                self.attachBuffer(rope, bytes: 1_024 * 64 * 4 * 4,
+                                  name: "w8-rope.f32")
+            },
+            diagnosticBlockCompleted: { step, block, residual in
+                guard !captureBlocks.isEmpty, step == 0 else { return }
+                if captureBlocks.contains(block) {
+                    self.attachBuffer(residual, bytes: 1_024 * 2_048 * 4,
+                                      name: "w8-step0-block\(block)-output.f32")
+                }
+                if captureBlocks.contains(block + 1) {
+                    self.attachBuffer(residual, bytes: 1_024 * 2_048 * 4,
+                                      name: "w8-step0-block\(block + 1)-input.f32")
+                }
+            },
+            diagnosticBranchFilter: { step, block in
+                step == 0 && captureBlocks.contains(block)
+            },
+            diagnosticBranchCompleted: { step, block, branch, residual in
+                guard step == 0, captureBlocks.contains(block),
+                      capturedBranches.insert("\(block)-\(branch)").inserted else { return }
+                self.attachBuffer(residual, bytes: 1_024 * 2_048 * 4,
+                                  name: "w8-step0-block\(block)-after-\(branch).f32")
             })
         let diffusionSeconds = Date().timeIntervalSince(diffusionStart)
         XCTAssertEqual(completedSteps, 8, "exactly 8 Euler steps completed")
@@ -138,16 +244,22 @@ final class FullInferenceTests: XCTestCase {
 
         // ---- Final latent regression (D057/D059 floor: cosine ≥ 0.65 vs
         // source-BF16 canonical final latent). The canonical reference is the
-        // committed case1_final_latent.f32 (== golden NPZ final_latent). ----
+        // committed case1_final_latent.f32 (== golden NPZ final_latent), which
+        // is ComfyUI's POST-process_out VAE-space latent. The sampler output is
+        // sampler-space, so it must pass through Wan21.process_out before the
+        // comparison (root-cause fix, 2026-08-14; Wan21LatentFormat.swift). ----
         let finalValues = read(finalLatent)
+        // Convert a COPY for the regression; the buffer itself is converted
+        // once, in place, immediately before the VAE decode below.
+        let vaeFinalValues = Wan21LatentFormat.processOut(finalValues)
         var latentCosineText = "n/a", latentRMSText = "n/a", latentMaxAbsText = "n/a"
         var inferencePassed = true
         if let reference = bundledFixture(named: "case1_final_latent.f32") {
             let refValues = try floats(from: reference)
-            if refValues.count == finalValues.count {
-                let cosine = cosineSimilarity(finalValues, refValues)
-                let rmse = rmse(finalValues, refValues)
-                let maxAbs = maxAbsolute(finalValues, refValues)
+            if refValues.count == vaeFinalValues.count {
+                let cosine = cosineSimilarity(vaeFinalValues, refValues)
+                let rmse = rmse(vaeFinalValues, refValues)
+                let maxAbs = maxAbsolute(vaeFinalValues, refValues)
                 latentCosineText = String(format: "%.4f", cosine)
                 latentRMSText = String(format: "%.4f", rmse)
                 latentMaxAbsText = String(format: "%.4f", maxAbs)
@@ -168,7 +280,18 @@ final class FullInferenceTests: XCTestCase {
             XCTFail("final latent reference fixture is missing")
         }
 
+        if diagnosticConfig("latent_only") == "1" {
+            print("FULL_LATENT_ONLY=PASS")
+            print("FULL_INFERENCE=PASS")
+            return
+        }
+
         // ---- 5. VAE decode → DecodedRGBA8 ----
+        // Wan21 boundary: the sampler output is sampler-space; convert it to
+        // VAE decode space exactly once before the decoder (8px grid fix).
+        Wan21LatentFormat.applyProcessOutInPlace(finalLatent)
+        let vaeURL = try requiredFixture(
+            envKey: "ANIMAXS_VAE_PACK", name: "qwen-image-vae-xsmax-fp16.animapk")
         let vae = try VAEDecoder(context: context, file: AnimapkFile(url: vaeURL))
         let vaeStart = Date()
         let image = try await vae.decode(latent: finalLatent)
@@ -266,11 +389,18 @@ final class FullInferenceTests: XCTestCase {
         // it only reads the already-decoded `image` and the already-loaded
         // `case1_decoded_rgb8.bin` reference.
         captureArtifacts(image: image, referenceRGB: referenceRGB, metrics: [
-            "commit": "<injected-by-workflow>",
-            "run_id": "<injected-by-workflow>",
+            "commit": provenanceValue("commit") ?? "<injected-by-workflow>",
+            "run_id": provenanceValue("run_id") ?? "<injected-by-workflow>",
+            "run_attempt": provenanceValue("run_attempt") ?? "<injected-by-workflow>",
+            "workflow": provenanceValue("workflow") ?? "<injected-by-workflow>",
+            "ref": provenanceValue("ref") ?? "<injected-by-workflow>",
+            "variant": provenanceValue("variant") ?? "unknown",
             "prompt": prompt,
             "case": "case1_danbooru_seed1337",
-            "packs": "qwen3-0.6b-xsmax-w8 / \(packMetadataValue(envKey: "ANIMAXS_DIT_VARIANT", jsonKey: "variant")) / qwen-image-vae-xsmax-fp16",
+            "packs": "qwen3-0.6b-xsmax-fp16-matrices.animapk / \(packMetadataValue(envKey: "ANIMAXS_DIT_VARIANT", jsonKey: "variant")) / qwen-image-vae-xsmax-fp16.animapk",
+            "attention_numerics": attentionNumerics.rawValue,
+            "activation_numerics": activationNumerics.rawValue,
+            "golden_qwen_context": diagnosticConfig("golden_qwen_context") ?? "0",
             "latent_cosine": latentCosineText,
             "latent_rmse": latentRMSText,
             "latent_maxabs": latentMaxAbsText,
@@ -322,6 +452,35 @@ final class FullInferenceTests: XCTestCase {
                 at: root, includingPropertiesForKeys: nil) else { return nil }
         for case let url as URL in enumerator where url.lastPathComponent == name { return url }
         return nil
+    }
+
+    private func diagnosticConfig(_ key: String) -> String? {
+        if let environment = ProcessInfo.processInfo.environment[
+            "ANIMAXS_" + key.uppercased()] { return environment }
+        guard let url = bundledFixture(named: "quality-diagnostic.json"),
+              let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: String]
+        else { return nil }
+        return object[key]
+    }
+
+    private func attachBuffer(_ buffer: MTLBuffer, bytes: Int, name: String) {
+        precondition(buffer.length >= bytes)
+        let attachment = XCTAttachment(
+            data: Data(bytes: buffer.contents(), count: bytes),
+            uniformTypeIdentifier: UTType.data.identifier)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func attachBuffer(from values: [Float], name: String) {
+        let attachment = XCTAttachment(
+            data: values.withUnsafeBytes { Data($0) },
+            uniformTypeIdentifier: UTType.data.identifier)
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     private func floats(from url: URL) throws -> [Float] {
@@ -429,7 +588,9 @@ final class FullInferenceTests: XCTestCase {
         // metrics.txt (key: value, ordered, human-readable).
         var lines: [String] = []
         for key in [
-            "commit", "run_id", "prompt", "case", "packs",
+            "commit", "run_id", "run_attempt", "workflow", "ref", "variant",
+            "prompt", "case", "packs",
+            "attention_numerics", "activation_numerics", "golden_qwen_context",
             "latent_cosine", "latent_rmse", "latent_maxabs",
             "rgb_cosine", "rgb_rmse", "rgb_mae", "rgb_maxabs",
             "qwen_seconds", "adapter_seconds", "diffusion_seconds",
@@ -443,12 +604,18 @@ final class FullInferenceTests: XCTestCase {
         add(textAttachment)
 
         let metadata: [String: String] = [
-            "variant": packMetadataValue(envKey: "ANIMAXS_DIT_VARIANT", jsonKey: "variant"),
-            "hf_repo": packMetadataValue(envKey: "ANIMAXS_DIT_HF_REPO", jsonKey: "hf_repo"),
-            "hf_revision": packMetadataValue(envKey: "ANIMAXS_DIT_HF_REVISION", jsonKey: "hf_revision"),
-            "sha256": packMetadataValue(envKey: "ANIMAXS_DIT_SHA256", jsonKey: "sha256"),
-            "bytes": packMetadataValue(envKey: "ANIMAXS_DIT_BYTES", jsonKey: "bytes"),
-            "storage": packMetadataValue(envKey: "ANIMAXS_DIT_STORAGE", jsonKey: "storage"),
+            "variant": provenanceValue("variant")
+                ?? packMetadataValue(envKey: "ANIMAXS_DIT_VARIANT", jsonKey: "variant"),
+            "hf_repo": provenanceValue("dit_hf_repo")
+                ?? packMetadataValue(envKey: "ANIMAXS_DIT_HF_REPO", jsonKey: "hf_repo"),
+            "hf_revision": provenanceValue("dit_hf_revision")
+                ?? packMetadataValue(envKey: "ANIMAXS_DIT_HF_REVISION", jsonKey: "hf_revision"),
+            "sha256": provenanceValue("dit_sha256")
+                ?? packMetadataValue(envKey: "ANIMAXS_DIT_SHA256", jsonKey: "sha256"),
+            "bytes": provenanceValue("dit_bytes")
+                ?? packMetadataValue(envKey: "ANIMAXS_DIT_BYTES", jsonKey: "bytes"),
+            "storage": provenanceValue("dit_storage")
+                ?? packMetadataValue(envKey: "ANIMAXS_DIT_STORAGE", jsonKey: "storage"),
             "group": "64",
         ]
         if let data = try? JSONSerialization.data(withJSONObject: metadata, options: [.prettyPrinted, .sortedKeys]),
@@ -473,6 +640,22 @@ final class FullInferenceTests: XCTestCase {
               let value = dictionary[jsonKey] as? String,
               !value.isEmpty else {
             return "unknown"
+        }
+        return value
+    }
+
+    /// Reads a top-level key from the workflow-injected bundled
+    /// `provenance.json` (commit/run_id/run_attempt/workflow/ref/variant and
+    /// the flat `dit_*` pack fields). Returns nil when absent so callers can
+    /// fall back to the older env/bundled pack-metadata.json path.
+    private func provenanceValue(_ key: String) -> String? {
+        guard let url = bundledFixture(named: "provenance.json"),
+              let data = try? Data(contentsOf: url),
+              let object = try? JSONSerialization.jsonObject(with: data),
+              let dictionary = object as? [String: Any],
+              let value = dictionary[key] as? String,
+              !value.isEmpty else {
+            return nil
         }
         return value
     }

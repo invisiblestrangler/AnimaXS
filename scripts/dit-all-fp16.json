@@ -1,0 +1,9 @@
+{
+  "default": "w8",
+  "overrides": [
+    {
+      "match": "model.diffusion_model.*",
+      "storage": "fp16"
+    }
+  ]
+}

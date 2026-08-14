@@ -1,0 +1,23 @@
+{
+  "case" : "case1_danbooru_seed1337",
+  "context_shape" : [
+    512,
+    1024
+  ],
+  "golden_capture" : "last_model_invocation (sampler step 7)",
+  "golden_tensor" : "block_00_out",
+  "input_shape" : [
+    1024,
+    2048
+  ],
+  "latent_file" : "\/root\/anima-harness\/block0_latent_step7.f32",
+  "output_file" : "block0_swift_output.f32",
+  "rope_shape" : [
+    1024,
+    64,
+    2,
+    2
+  ],
+  "schema" : 1,
+  "sigma" : 0.3050089478492737
+}

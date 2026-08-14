@@ -16,8 +16,10 @@ final class DiTPreparationExecutor {
     private let streamer: WeightStreamer
     private let linear: LinearExecutor
     private let buffers: BufferPool
+    private let activationNumerics: ActivationNumerics
 
-    init(context: MetalContext, file: AnimapkFile) throws {
+    init(context: MetalContext, file: AnimapkFile,
+         activationNumerics: ActivationNumerics = .legacy) throws {
         let locator = try DiTPreparationLocator(file: file)
         guard file.quantGroup == 64 else {
             throw AnimapkError.validation("DiT preparation requires quant group 64")
@@ -28,6 +30,7 @@ final class DiTPreparationExecutor {
         self.streamer = try WeightStreamer(device: context.device, capacity: Int(locator.range.length))
         self.linear = LinearExecutor(context: context)
         self.buffers = BufferPool(device: context.device)
+        self.activationNumerics = activationNumerics
     }
 
     /// Outputs fp32 residual `[1024,2048]`, timestep embedding `[2048]`, and
@@ -61,6 +64,12 @@ final class DiTPreparationExecutor {
                   range: (Self.latentElements * 4)..<(17 * 64 * 64 * 4), value: 0)
         blit.endEncoding()
 
+        // Comfy's BF16 model receives a BF16 latent before PatchEmbed. Keep
+        // the scratch buffer fp32 for the existing kernel ABI, but apply the
+        // same round-to-nearest-even boundary before patchification.
+        try encodeComputeBoundary(command, modelInput,
+                                  count: 17 * 64 * 64)
+
         let patches = buffers.buffer(
             key: "dit.prepare.patches.f32", bytes: Self.tokens * 68 * 4)
         try encodePatchify(command, modelInput, patches)
@@ -68,20 +77,36 @@ final class DiTPreparationExecutor {
             key: "dit.prepare.patches.f16", bytes: Self.tokens * 68 * 2)
         let residualHalf = buffers.buffer(
             key: "dit.prepare.residual.f16", bytes: Self.tokens * Self.hidden * 2)
+        try encodeComputeBoundary(command, patches, count: Self.tokens * 68)
         try encodeUnary(command, "float_to_half", patches, patchesHalf, Self.tokens * 68)
         try linear.encode(commandBuffer: command, input: patchesHalf,
                           weight: weights.xEmbed, output: residualHalf,
                           inputRows: Self.tokens)
+        try encodeHalfComputeBoundary(command, residualHalf,
+                                      count: Self.tokens * Self.hidden)
         try encodeUnary(command, "half_to_float", residualHalf, residual,
                         Self.tokens * Self.hidden)
+        try encodeComputeBoundary(command, residual,
+                                  count: Self.tokens * Self.hidden)
 
+        try encodeComputeBoundary(command, raw, count: Self.hidden)
         try encodeRMSNorm(command, raw, embedding, weights.timestepNorm)
+        try encodeComputeBoundary(command, embedding, count: Self.hidden)
         let hidden = buffers.buffer(key: "dit.prepare.timestep.hidden.f32", bytes: Self.hidden * 4)
         let activated = buffers.buffer(
             key: "dit.prepare.timestep.silu.f32", bytes: Self.hidden * 4)
         try encodeMatvec(command, weights.timestep1, raw, hidden)
+        try encodeComputeBoundary(command, hidden, count: Self.hidden)
         try encodeUnary(command, "silu", hidden, activated, Self.hidden)
+        try encodeComputeBoundary(command, activated, count: Self.hidden)
         try encodeMatvec(command, weights.timestep2, activated, adalnLora)
+        try encodeComputeBoundary(command, adalnLora, count: Self.adaln)
+        if activationNumerics == .bf16Boundaries {
+            try encodeUnary(command, "round_f32_to_bf16", residual, residual,
+                            Self.tokens * Self.hidden)
+            try encodeUnary(command, "round_f32_to_bf16", embedding, embedding, Self.hidden)
+            try encodeUnary(command, "round_f32_to_bf16", adalnLora, adalnLora, Self.adaln)
+        }
         try await commit(command)
     }
 
@@ -95,6 +120,32 @@ final class DiTPreparationExecutor {
             pointer[index + 1_024] = sinf(angle)
         }
         return raw
+    }
+
+    private func encodeComputeBoundary(
+        _ command: MTLCommandBuffer, _ value: MTLBuffer, count: Int
+    ) throws {
+        guard activationNumerics == .bf16Compute else { return }
+        try encodeUnary(command, "round_f32_to_bf16", value, value, count)
+    }
+
+    private func encodeHalfComputeBoundary(
+        _ command: MTLCommandBuffer, _ value: MTLBuffer, count: Int
+    ) throws {
+        guard activationNumerics == .bf16Compute else { return }
+        let pipeline = try context.pipeline(named: "round_half_to_bf16")
+        guard let encoder = command.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create preparation BF16 boundary encoder")
+        }
+        var count = UInt32(count)
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(value, offset: 0, index: 0)
+        encoder.setBuffer(value, offset: 0, index: 1)
+        encoder.setBytes(&count, length: 4, index: 2)
+        let width = min(pipeline.threadExecutionWidth, pipeline.maxTotalThreadsPerThreadgroup)
+        encoder.dispatchThreads(MTLSize(width: Int(count), height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+        encoder.endEncoding()
     }
 
     private func encodePatchify(

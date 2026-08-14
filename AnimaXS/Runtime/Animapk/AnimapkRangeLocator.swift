@@ -286,6 +286,7 @@ struct QwenLayerLocator {
                 length: parameterBytesPerRow)
         )
     }
+
 }
 
 /// Prevalidated execution ranges for the six lllite adapter blocks plus its
@@ -362,5 +363,27 @@ struct LLMAdapterLocator {
             zero: AnimapkRelativeSpan(
                 offset: zero.offset + UInt64(row) * parameterBytesPerRow,
                 length: parameterBytesPerRow))
+    }
+
+    /// Returns one source-FP16 embedding row. FP16 rows have no scale/zero
+    /// spans, so they are exposed separately from the quantized-row API.
+    func embeddingDataRow(_ row: Int) throws -> AnimapkRelativeSpan {
+        let tensor = embedding.tensor
+        guard tensor.shape.count == 2, tensor.storage == .fp16 else {
+            throw AnimapkError.validation("adapter embedding is not FP16")
+        }
+        let rows = tensor.shape[0], columns = tensor.shape[1]
+        guard rows > 0, row >= 0, row < rows, columns == 1_024 else {
+            throw AnimapkError.validation("adapter FP16 embedding row \(row) is out of range")
+        }
+        let bytesPerRow = UInt64(columns * MemoryLayout<Float16>.stride)
+        guard embedding.data.length == UInt64(rows) * bytesPerRow,
+              (embedding.scale?.length ?? 0) == 0,
+              (embedding.zero?.length ?? 0) == 0 else {
+            throw AnimapkError.validation("adapter FP16 embedding row layout does not match metadata")
+        }
+        return AnimapkRelativeSpan(
+            offset: embedding.data.offset + UInt64(row) * bytesPerRow,
+            length: bytesPerRow)
     }
 }

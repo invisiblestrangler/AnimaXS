@@ -59,6 +59,7 @@ final class LinearExecutor {
         switch weight.storage {
         case .w4: kernelName = "dequant_w4_to_half"
         case .w8: kernelName = "dequant_w8_to_half"
+        case .fp16: kernelName = "copy_half_rows"
         default:
             throw AnimapkError.validation("LinearExecutor requires W4 or W8 weights")
         }
@@ -71,14 +72,23 @@ final class LinearExecutor {
         var rows = UInt32(n)
         var outputStride = UInt32(rightRowBytes / MemoryLayout<Float16>.stride)
         encoder.setComputePipelineState(pipeline)
-        encoder.setBuffer(weight.packed, offset: weight.packedOffset, index: 0)
-        encoder.setBuffer(weight.scale, offset: weight.scaleOffset, index: 1)
-        encoder.setBuffer(weight.zero, offset: weight.zeroOffset, index: 2)
-        encoder.setBuffer(scratch, offset: 0, index: 3)
-        encoder.setBytes(&columns, length: 4, index: 4)
-        encoder.setBytes(&rowStride, length: 4, index: 5)
-        encoder.setBytes(&rows, length: 4, index: 6)
-        encoder.setBytes(&outputStride, length: 4, index: 7)
+        if weight.storage == .fp16 {
+            encoder.setBuffer(weight.packed, offset: weight.packedOffset, index: 0)
+            encoder.setBuffer(scratch, offset: 0, index: 1)
+            encoder.setBytes(&columns, length: 4, index: 2)
+            encoder.setBytes(&rows, length: 4, index: 3)
+            encoder.setBytes(&rowStride, length: 4, index: 4)
+            encoder.setBytes(&outputStride, length: 4, index: 5)
+        } else {
+            encoder.setBuffer(weight.packed, offset: weight.packedOffset, index: 0)
+            encoder.setBuffer(weight.scale, offset: weight.scaleOffset, index: 1)
+            encoder.setBuffer(weight.zero, offset: weight.zeroOffset, index: 2)
+            encoder.setBuffer(scratch, offset: 0, index: 3)
+            encoder.setBytes(&columns, length: 4, index: 4)
+            encoder.setBytes(&rowStride, length: 4, index: 5)
+            encoder.setBytes(&rows, length: 4, index: 6)
+            encoder.setBytes(&outputStride, length: 4, index: 7)
+        }
         let width = min(16, pipeline.threadExecutionWidth)
         let height = max(1, min(16, pipeline.maxTotalThreadsPerThreadgroup / width))
         encoder.dispatchThreads(
@@ -250,11 +260,22 @@ enum DiTQuantizedWeightFactory {
         label: String
     ) throws -> QuantizedLinearWeightBuffers {
         let storage = item.tensor.storage
-        guard storage == .w4 || storage == .w8 else {
-            throw AnimapkError.validation("\(label) must be W4 or W8")
+        guard storage == .w4 || storage == .w8 || storage == .fp16 else {
+            throw AnimapkError.validation("\(label) must be W4, W8, or FP16")
         }
         guard item.tensor.shape == [rows, columns] else {
             throw AnimapkError.validation("\(label) shape mismatch")
+        }
+        if storage == .fp16 {
+            guard item.data.length == UInt64(rows * columns * 2),
+                  item.data.offset <= UInt64(Int.max) else {
+                throw AnimapkError.validation("\(label) FP16 layout mismatch")
+            }
+            return QuantizedLinearWeightBuffers(
+                storage: storage, packed: ring, packedOffset: Int(item.data.offset),
+                scale: ring, scaleOffset: Int(item.data.offset),
+                zero: ring, zeroOffset: Int(item.data.offset), rows: rows,
+                columns: columns, packedRowStride: columns)
         }
         guard let scale = item.scale, let zero = item.zero else {
             throw AnimapkError.validation("\(label) missing scale/zero")
@@ -288,6 +309,7 @@ enum DiTQuantizedWeightFactory {
         switch storage {
         case .w4: return "w4_matvec_f32"
         case .w8: return "w8_matvec_f32"
+        case .fp16: return "fp16_matvec_f32"
         default:
             throw AnimapkError.validation("DiT direct matvec requires W4 or W8")
         }

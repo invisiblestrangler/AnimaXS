@@ -2,7 +2,8 @@ import Foundation
 import Metal
 
 /// Streamed production Qwen3-0.6B encoder. The residual remains fp32 while
-/// norms, W8 MPS projections, attention, and SwiGLU use explicit fp16 boundaries.
+/// norms, streamed W8/FP16 projections, attention, and SwiGLU use explicit
+/// fp16 boundaries.
 final class QwenEncoderMetal {
     static let maximumTokens = 512
     static let hidden = 1_024
@@ -465,18 +466,12 @@ private struct QwenLayerWeights {
         func matrix(
             _ name: String, _ rows: Int, _ columns: Int
         ) throws -> QuantizedLinearWeightBuffers {
-            guard let item = spans[name], item.tensor.shape == [rows, columns],
-                  item.tensor.storage == .w8, let scale = item.scale, let zero = item.zero,
-                  item.data.length % UInt64(rows) == 0,
-                  item.data.offset <= UInt64(Int.max), scale.offset <= UInt64(Int.max),
-                  zero.offset <= UInt64(Int.max) else {
+            guard let item = spans[name] else {
                 throw AnimapkError.validation("invalid Qwen matrix \(prefix)\(name)")
             }
-            return QuantizedLinearWeightBuffers(
-                storage: .w8, packed: ring, packedOffset: Int(item.data.offset),
-                scale: ring, scaleOffset: Int(scale.offset),
-                zero: ring, zeroOffset: Int(zero.offset), rows: rows, columns: columns,
-                packedRowStride: Int(item.data.length / UInt64(rows)))
+            return try DiTQuantizedWeightFactory.makeMatrix(
+                item, ring: ring, rows: rows, columns: columns,
+                label: "Qwen matrix \(prefix)\(name)")
         }
         func norm(_ name: String, _ count: Int) throws -> Int {
             guard let item = spans[name], item.tensor.shape == [count],
