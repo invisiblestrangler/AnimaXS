@@ -165,13 +165,22 @@ struct GenerationEngine {
             models: models, qwenContext: qwenOutput,
             contextTokens: qwenTokenIDs.count, t5IDs: t5IDs, t5Weights: t5Weights)
 
-        // ---- 4. Diffusion: seeded noise → final latent ----
+        // ---- 4. Diffusion: seeded noise → final latent (sampler-space) ----
         let totalSteps = ModelConstants.samplerSteps
         let initialLatent = try makeInitialLatent(seed: seed, noise: noise)
         let finalLatent = try await diffuse(
             models: models, initialLatent: initialLatent, cross: cross,
             startStep: startStep, totalSteps: totalSteps,
             progress: progress, checkpoint: checkpoint)
+
+        // ---- 4b. Wan21 latent-format boundary (sampler-space → VAE-space) ----
+        // Root-cause fix (2026-08-14): ComfyUI applies latent_format.process_out
+        // to the sampler return before the workflow's VAE decode
+        // (samplers.py CFGGuider.inner_sample). The custom runtime omitted it,
+        // decoding raw sampler latents as VAE latents — the 8px grid. Apply
+        // EXACTLY ONCE here; VAEDecoder still consumes its canonical latent
+        // unchanged (D060). Checkpoints remain sampler-space (diffusion math).
+        Wan21LatentFormat.applyProcessOutInPlace(finalLatent)
 
         // ---- 5. VAE decode (VAE + its mmap cannot escape this helper) ----
         progress?(.decoding)

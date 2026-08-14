@@ -244,16 +244,22 @@ final class FullInferenceTests: XCTestCase {
 
         // ---- Final latent regression (D057/D059 floor: cosine ≥ 0.65 vs
         // source-BF16 canonical final latent). The canonical reference is the
-        // committed case1_final_latent.f32 (== golden NPZ final_latent). ----
+        // committed case1_final_latent.f32 (== golden NPZ final_latent), which
+        // is ComfyUI's POST-process_out VAE-space latent. The sampler output is
+        // sampler-space, so it must pass through Wan21.process_out before the
+        // comparison (root-cause fix, 2026-08-14; Wan21LatentFormat.swift). ----
         let finalValues = read(finalLatent)
+        // Convert a COPY for the regression; the buffer itself is converted
+        // once, in place, immediately before the VAE decode below.
+        let vaeFinalValues = Wan21LatentFormat.processOut(finalValues)
         var latentCosineText = "n/a", latentRMSText = "n/a", latentMaxAbsText = "n/a"
         var inferencePassed = true
         if let reference = bundledFixture(named: "case1_final_latent.f32") {
             let refValues = try floats(from: reference)
-            if refValues.count == finalValues.count {
-                let cosine = cosineSimilarity(finalValues, refValues)
-                let rmse = rmse(finalValues, refValues)
-                let maxAbs = maxAbsolute(finalValues, refValues)
+            if refValues.count == vaeFinalValues.count {
+                let cosine = cosineSimilarity(vaeFinalValues, refValues)
+                let rmse = rmse(vaeFinalValues, refValues)
+                let maxAbs = maxAbsolute(vaeFinalValues, refValues)
                 latentCosineText = String(format: "%.4f", cosine)
                 latentRMSText = String(format: "%.4f", rmse)
                 latentMaxAbsText = String(format: "%.4f", maxAbs)
@@ -281,6 +287,9 @@ final class FullInferenceTests: XCTestCase {
         }
 
         // ---- 5. VAE decode → DecodedRGBA8 ----
+        // Wan21 boundary: the sampler output is sampler-space; convert it to
+        // VAE decode space exactly once before the decoder (8px grid fix).
+        Wan21LatentFormat.applyProcessOutInPlace(finalLatent)
         let vaeURL = try requiredFixture(
             envKey: "ANIMAXS_VAE_PACK", name: "qwen-image-vae-xsmax-fp16.animapk")
         let vae = try VAEDecoder(context: context, file: AnimapkFile(url: vaeURL))
