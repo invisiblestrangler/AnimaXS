@@ -59,7 +59,7 @@ final class DiagnosticsTests: XCTestCase {
         XCTAssertFalse(report.thermalState.isEmpty)
         XCTAssertEqual(report.modelPacks.count, 3)
         XCTAssertEqual(report.modelPacks.map(\.component),
-                       [ModelComponent.textEncoder, .dit, .vae].map(\.rawValue),
+                       [ModelComponent.dit, .textEncoder, .vae].map(\.rawValue),
                        "packs in manifest order")
         XCTAssertTrue(report.selfTests.isEmpty,
                       "opening diagnostics must not run any heavy test")
@@ -82,9 +82,10 @@ final class DiagnosticsTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let counter = VerifierCounter()
         let store = try makeCountingStore(root: root, counter: counter)
-        // Establish a trusted receipt via a normal import.
+        // Establish a trusted receipt via a normal import using a PRODUCTION
+        // filename (the snapshot only reports production manifest entries).
         let content = Data("imported pack".utf8)
-        let entry = makeEntry(content: content)
+        let entry = makeEntry(filename: "qwen3-0.6b-xsmax-w8.animapk", content: content)
         let source = root.appendingPathComponent("source.animapk")
         try content.write(to: source)
         _ = try await store.importPack(entry, from: source)
@@ -93,9 +94,12 @@ final class DiagnosticsTests: XCTestCase {
         let engine = makeNoMetalEngine(storeProvider: { store })
         let report = await engine.snapshot()
         let pack = try XCTUnwrap(report.modelPacks.first { $0.filename == entry.filename })
-        XCTAssertTrue(pack.installed)
+        XCTAssertTrue(pack.installed, "imported file is present")
         XCTAssertEqual(pack.sizeBytes, UInt64(content.count))
-        XCTAssertTrue(pack.verified, "receipt-valid file reports verified")
+        // The receipt cannot match the production manifest (synthetic size/sha),
+        // so the cheap flag must NOT claim verified — and the snapshot must not
+        // hash the file to discover that.
+        XCTAssertFalse(pack.verified, "receipt vs production manifest mismatch is reported truthfully")
         XCTAssertFalse(pack.sha256Verified, "snapshot never claims deep SHA verification")
         XCTAssertEqual(counter.count, 1, "snapshot adds no hashing on top of import")
     }

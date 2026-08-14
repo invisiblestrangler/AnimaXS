@@ -334,8 +334,14 @@ actor ModelStore {
             try secure(staging)
         }
         if FileManager.default.fileExists(atPath: destination.path) {
-            return try FileManager.default.replaceItemAt(destination, withItemAt: staging)
-                ?? destination
+            // Replace (not move): moveItem cannot overwrite an existing file,
+            // which would block every repair/import over a corrupt destination.
+            guard let replaced = try FileManager.default.replaceItemAt(
+                destination, withItemAt: staging) else {
+                throw AnimapkError.validation(
+                    "failed to replace existing model file at \(destination.path)")
+            }
+            return replaced
         }
         try FileManager.default.moveItem(at: staging, to: destination)
         return destination
