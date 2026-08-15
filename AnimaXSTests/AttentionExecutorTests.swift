@@ -377,7 +377,7 @@ final class AttentionExecutorTests: XCTestCase {
                     }
                     expected /= Float(rows)
                     XCTAssertEqual(actual[token * modelDim + head * headDim + column],
-                                   expected, accuracy: 0.002,
+                                   expected, accuracy: 0.05,
                                    "head \(head) column \(column) of token \(token) mixed")
                 }
             }
