@@ -68,6 +68,14 @@ struct GenerationMetrics: Equatable {
     /// reports which imported variant ran even though it is not a config
     /// choice.
     var ditPackFilename: String?
+    /// Variant id of the DiT pack ("w4" or "w8-v2"), so telemetry visibly
+    /// reports which variant ran even though the app-owned local file is
+    /// always named after the W4 slot.
+    var ditPackVariantID: String?
+    /// SHA-256 of the DiT pack actually used by this run.
+    var ditPackSHA256: String?
+    /// Size in bytes of the DiT pack actually used by this run.
+    var ditPackBytes: UInt64 = 0
 
     // Cheap executor counters (simple integer increments; no GPU readbacks).
     var linearGEMMTiles: Int = 0
@@ -134,7 +142,10 @@ struct GenerationMetrics: Equatable {
         }
         lines.append("")
         lines.append("Inference configuration")
-        lines.append("DiT pack: \(ditPackFilename ?? "unknown")")
+        lines.append("DiT pack: \(ditPackFilename ?? "unknown")"
+            + (ditPackVariantID.map { " (\($0))" } ?? "")
+            + (ditPackSHA256.map { " \($0.prefix(12))…" } ?? "")
+            + (ditPackBytes > 0 ? " \(ditPackBytes) bytes" : ""))
         if let config = optimizationConfig {
             lines.append("Linear tile rows: \(config.linearTileRows)")
             lines.append("Attention tile rows: \(config.attentionTileRows)")
@@ -261,9 +272,15 @@ final class MetricsCollector {
         metrics.numericalMonitoringDisabled = !config.numericalMonitoring
     }
 
-    /// Records which DiT pack file (W4 or W8-v2) this run actually used.
-    func recordDiTPackFilename(_ filename: String) {
+    /// Records which DiT pack variant this run actually used, including the
+    /// variant id ("w4" or "w8-v2"), display filename, SHA-256, and byte size.
+    /// This visibly reports W8-v2 when W8 is installed even though the
+    /// app-owned local file is named like the W4 slot.
+    func recordDiTPackIdentity(id: String, filename: String, sha256: String, bytes: UInt64) {
         metrics.ditPackFilename = filename
+        metrics.ditPackVariantID = id
+        metrics.ditPackSHA256 = sha256
+        metrics.ditPackBytes = bytes
     }
 
     func recordEnvironmentStart(_ snapshot: EnvironmentSnapshot) {

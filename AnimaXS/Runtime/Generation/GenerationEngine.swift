@@ -1,21 +1,52 @@
 import Foundation
 import Metal
 
+/// One resolved model pack: its URL, component, and the variant descriptor
+/// identifying which accepted variant (W4 or W8-v2 for DiT) was actually
+/// installed and verified.
+struct ResolvedModelPack: Equatable {
+    let url: URL
+    let component: ModelComponent
+    let variant: ModelVariantDescriptor
+}
+
 /// Production model resolution: exactly three packs (K002 §5.1).
 ///
 /// The DiT pack serves both the LLM adapter and the diffusion sampler —
 /// there is deliberately no fourth "adapter" pack in production app state.
 /// Isolated adapter tests may construct `LLMAdapterMetal` directly with a
 /// dedicated fixture; that fixture architecture never leaks into here.
+///
+/// Each pack carries its resolved variant descriptor so consumers can report
+/// which variant (W4 or W8-v2) actually ran, and checkpoint identity can use
+/// the actual resolved hashes instead of a hardcoded W4 baseline.
 struct ResolvedModels: Equatable {
-    let textEncoder: URL
-    let dit: URL
-    let vae: URL
+    let textEncoder: ResolvedModelPack
+    let dit: ResolvedModelPack
+    let vae: ResolvedModelPack
 
-    init(textEncoder: URL, dit: URL, vae: URL) {
+    /// The actual resolved model hashes for checkpoint identity (not the
+    /// hardcoded W4 production baseline).
+    var hashes: ModelHashes {
+        ModelHashes(
+            dit: dit.variant.sha256,
+            textEncoder: textEncoder.variant.sha256,
+            vae: vae.variant.sha256)
+    }
+
+    init(textEncoder: ResolvedModelPack, dit: ResolvedModelPack, vae: ResolvedModelPack) {
         self.textEncoder = textEncoder
         self.dit = dit
         self.vae = vae
+    }
+
+    /// Convenience init from raw URLs and variant descriptors.
+    init(textEncoderURL: URL, textEncoderVariant: ModelVariantDescriptor,
+         ditURL: URL, ditVariant: ModelVariantDescriptor,
+         vaeURL: URL, vaeVariant: ModelVariantDescriptor) {
+        self.textEncoder = ResolvedModelPack(url: textEncoderURL, component: .textEncoder, variant: textEncoderVariant)
+        self.dit = ResolvedModelPack(url: ditURL, component: .dit, variant: ditVariant)
+        self.vae = ResolvedModelPack(url: vaeURL, component: .vae, variant: vaeVariant)
     }
 }
 
@@ -240,7 +271,7 @@ struct GenerationEngine {
     private func encodePrompt(
         models: ResolvedModels, tokenIDs: [Int]
     ) async throws -> MTLBuffer {
-        let encoder = try factory.makePromptEncoder(context: context, fileURL: models.textEncoder)
+        let encoder = try factory.makePromptEncoder(context: context, fileURL: models.textEncoder.url)
         // Structural lifetime boundary: `encoder` (and its AnimapkFile mmap) is
         // strongly held by this defer until the helper returns, then released.
         defer { withExtendedLifetime(encoder) {} }
@@ -256,7 +287,7 @@ struct GenerationEngine {
         t5IDs: [Int], t5Weights: [Float]
     ) async throws -> MTLBuffer {
         // Production topology: adapter reads the DiT pack (same URL as sampler).
-        let adapter = try factory.makeContextAdapter(context: context, fileURL: models.dit)
+        let adapter = try factory.makeContextAdapter(context: context, fileURL: models.dit.url)
         defer { withExtendedLifetime(adapter) {} }
         let output = try makeBuffer(
             length: LLMAdapterMetal.maximumTokens * LLMAdapterMetal.hidden * 4,
@@ -278,7 +309,7 @@ struct GenerationEngine {
                 "startStep \(startStep) out of range 0...\(ModelConstants.samplerSteps)")
         }
         let sampler = try factory.makeDiffusion(
-            context: context, fileURL: models.dit, optimization: optimization)
+            context: context, fileURL: models.dit.url, optimization: optimization)
         // Production path: inject the run's metrics collector into the sampler
         // (and through it the preparation/forward/final-layer/euler executors).
         if let sampler = sampler as? DiffusionSampler {
@@ -310,7 +341,7 @@ struct GenerationEngine {
     }
 
     private func decodeVAE(models: ResolvedModels, latent: MTLBuffer) async throws -> DecodedRGBA8 {
-        let decoder = try factory.makeVAE(context: context, fileURL: models.vae)
+        let decoder = try factory.makeVAE(context: context, fileURL: models.vae.url)
         defer { withExtendedLifetime(decoder) {} }
         return try await decoder.decode(latent: latent)
     }
