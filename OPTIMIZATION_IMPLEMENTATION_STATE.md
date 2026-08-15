@@ -2,10 +2,10 @@
 
 Baseline main SHA: f89b1d867883f04b2d9aa4b59e9322b36111c8b4 (origin/main, planner-verified baseline)
 Working branch: opt/a12-sustained-io
-Current HEAD: 34ba332 (P4 complete, CI green)
+Current HEAD: 9d16490 (P5 code + tests committed; CI confirming)
 ## Current phase: P5 — generation-local cross-attention K/V cache (runbook §10)
 Current phase gate: P5 — implement CrossKVCache; tests + normal CI green
-Working tree: clean (at 34ba332)
+Working tree: clean (at 9d16490)
 
 ## Completed phases
 - P0 COMPLETE: branch created from origin/main f89b1d8; state files committed; PR #17; normal CI green (31896517851).
