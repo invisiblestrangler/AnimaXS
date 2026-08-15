@@ -182,4 +182,76 @@ final class GenerationMetricsTests: XCTestCase {
         XCTAssertTrue(disabledText.contains("Numerical warnings: not collected"))
         XCTAssertFalse(disabledText.contains("Numerical warnings: 0"))
     }
+
+    // P2-A: eight completed steps each appear in stepMetrics with wall time and
+    // completed == true.
+    func testRecordsAllEightCompletedSteps() {
+        let collector = MetricsCollector()
+        for step in 0..<8 {
+            collector.beginStep(step)
+            collector.recordGPUCommand(seconds: 0.5)
+            collector.endStep(completed: true)
+        }
+        let metrics = collector.snapshot()
+        XCTAssertEqual(metrics.stepMetrics.count, 8)
+        for entry in metrics.stepMetrics {
+            XCTAssertTrue(entry.completed)
+            XCTAssertEqual(entry.step, entry.step) // step index present
+        }
+        XCTAssertEqual(metrics.stepMetrics.map(\.step), [0, 1, 2, 3, 4, 5, 6, 7])
+    }
+
+    // P2-B: a step that throws is still recorded as a PARTIAL (uncompleted) step
+    // with a nonzero wall duration, so a failing step is attributable.
+    func testRecordsFailedPartialStep() {
+        let collector = MetricsCollector()
+        collector.beginStep(0)
+        collector.recordGPUCommand(seconds: 1.2)
+        // Simulate a mid-step throw: finalize with completed == false.
+        collector.endStep(completed: false)
+        let metrics = collector.snapshot()
+        XCTAssertEqual(metrics.stepMetrics.count, 1)
+        XCTAssertFalse(metrics.stepMetrics[0].completed)
+        XCTAssertGreaterThan(metrics.stepMetrics[0].gpuCommandSeconds, 0)
+    }
+
+    // P2-A: per-step sums reconcile with the global counters (the active-step
+    // accumulation must not double-count or drop traffic).
+    func testPerStepSumsMatchGlobals() {
+        let collector = MetricsCollector()
+        for step in 0..<8 {
+            collector.beginStep(step)
+            collector.recordGPUCommand(seconds: 1.0)
+            collector.recordConversionBytes(1024)
+            collector.recordDequantizedWeightBytesWritten(4096)
+            collector.endStep(completed: true)
+        }
+        // Two additional global-only records after the steps.
+        collector.recordGPUCommand(seconds: 0.5)
+        collector.recordConversionBytes(100)
+        let metrics = collector.snapshot()
+        // Per-step GPU sums + the trailing global record.
+        XCTAssertEqual(metrics.stepMetrics.reduce(0) { $0 + $1.gpuCommandSeconds }, 8.0, accuracy: 0.001)
+        XCTAssertEqual(metrics.gpuCommandTime, 8.5, accuracy: 0.001)
+        XCTAssertEqual(metrics.stepMetrics.reduce(0) { $0 + $1.conversionBytes }, 8 * 1024)
+        XCTAssertEqual(metrics.conversionBytes, 8 * 1024 + 100)
+        XCTAssertEqual(metrics.stepMetrics.reduce(0) { $0 + $1.dequantizedWeightBytesWritten }, 8 * 4096)
+        XCTAssertEqual(metrics.dequantizedWeightBytesWritten, 8 * 4096)
+    }
+
+    // P2-E: the summary renders a per-step table without crashing and the
+    // Diagnostics text remains usable when steps exist.
+    func testPerStepSummaryTableRenders() {
+        let collector = MetricsCollector()
+        for step in 0..<3 {
+            collector.beginStep(step)
+            collector.recordGPUCommand(seconds: 1.0)
+            collector.endStep(completed: true)
+        }
+        collector.finalize(totalWall: 30)
+        let text = collector.snapshot().summaryText
+        XCTAssertTrue(text.contains("Per-step"))
+        XCTAssertTrue(text.contains("Traffic/backend"))
+        XCTAssertFalse(text.isEmpty)
+    }
 }
