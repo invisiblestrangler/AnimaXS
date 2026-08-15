@@ -212,8 +212,7 @@ final class NumericalMonitor {
     private func recordNewFlags(step: Int, block: Int?) {
         guard firstIssue == nil else { return }
         let raw = readRaw()
-        var index = 0
-        for probe in Probe.allCases {
+        for (index, probe) in Probe.allCases.enumerated() {
             let flags = raw[index * 4]
             let delta = flags & ~previousFlags[index]
             if delta != 0 {
@@ -222,15 +221,12 @@ final class NumericalMonitor {
                     probe: probe, stats: stats(at: index, raw: raw))
                 break
             }
-            index += 1
         }
         // Advance previousFlags only where no issue was found so a later read
         // can still delta against the true baseline.
         if firstIssue == nil {
-            index = 0
-            for probe in Probe.allCases {
+            for index in 0..<Probe.allCases.count {
                 previousFlags[index] = raw[index * 4]
-                index += 1
             }
         }
     }

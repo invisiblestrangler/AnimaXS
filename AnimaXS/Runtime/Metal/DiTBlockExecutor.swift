@@ -87,9 +87,11 @@ final class DiTBlockExecutor {
         if streamer.loadedLogicalIndexes[slot] != blockIndex {
             let copyStart = ProcessInfo.processInfo.systemUptime
             try streamer.load(range, from: file, slot: slot)
-            let copyEnd = ProcessInfo.processInfo.systemUptime
-            metrics?.recordWeightCopy(bytes: Int(range.length), seconds: copyEnd - copyStart)
+            metrics?.recordWeightCopy(
+                bytes: Int(range.length),
+                seconds: ProcessInfo.processInfo.systemUptime - copyStart)
         }
+        let encodeStart = ProcessInfo.processInfo.systemUptime
         let weights = try BlockWeights(range: range, ring: streamer.buffer(for: slot))
         guard let command = context.commandQueue.makeCommandBuffer() else {
             throw AnimapkError.validation("failed to create DiT block command buffer")
@@ -136,9 +138,10 @@ final class DiTBlockExecutor {
                 prefetchError = error
             }
         }
+        let slotStreamer = streamer
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            command.addCompletedHandler { [weak self] completed in
-                self?.streamer.complete(slot)
+            command.addCompletedHandler { [weak slotStreamer] completed in
+                slotStreamer?.complete(slot)
                 if let error = completed.error { continuation.resume(throwing: error) }
                 else { continuation.resume() }
             }
@@ -148,7 +151,7 @@ final class DiTBlockExecutor {
         let gpuSeconds = (command.gpuStartTime > 0 && command.gpuEndTime >= command.gpuStartTime)
             ? command.gpuEndTime - command.gpuStartTime : 0
         metrics?.recordGPUCommand(seconds: gpuSeconds)
-        metrics?.recordEncode(seconds: encodeEnd - copyEnd)
+        metrics?.recordEncode(seconds: encodeEnd - encodeStart)
         metrics?.recordHostWait(seconds: (done - encodeEnd) - gpuSeconds)
         metrics?.endBlock()
         // Per-block memory sampling (cheap: no extra GPU sync — the block's

@@ -86,12 +86,8 @@ final class DiTPreparationExecutor {
         let residualHalf = buffers.buffer(
             key: "dit.prepare.residual.f16", bytes: Self.tokens * Self.hidden * 2)
         try encodeComputeBoundary(command, patches, count: Self.tokens * 68)
-        if let monitor {
-            try encodeProbeConvert(command, "float_to_half", patches, patchesHalf,
-                                   Self.tokens * 68, probe: .patchesToHalf)
-        } else {
-            try encodeUnary(command, "float_to_half", patches, patchesHalf, Self.tokens * 68)
-        }
+        try encodeProbeConvert(command, "float_to_half", patches, patchesHalf,
+                               Self.tokens * 68, probe: .patchesToHalf)
         try linear.encode(commandBuffer: command, input: patchesHalf,
                           weight: weights.xEmbed, output: residualHalf,
                           inputRows: Self.tokens)
