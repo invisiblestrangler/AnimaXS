@@ -338,8 +338,10 @@ final class DiTBlockExecutor {
                 try monitor.encodeProbe(command, values: attendedHead, count: Self.tokens * Self.dim,
                                         probe: cross ? .crossAttended : .selfAttended)
             }
-            try encodeTranspose(command, input: attendedHead, output: attendedToken,
+            let attended = buffer("dit.attended.token.f16", Self.tokens * Self.dim, Float16.self)
+            try encodeTranspose(command, input: attendedHead, output: attended,
                                 tokens: Self.tokens, toHeadMajor: false)
+            attendedToken = attended
         }
         let branch = buffer("dit.branch.f16", Self.tokens * Self.dim, Float16.self)
         try linear.encode(commandBuffer: command, input: attendedToken,
