@@ -8,16 +8,14 @@ Current phase gate: P0 — branch created from origin/main f89b1d8, state files 
 Working tree: clean (at P0 commit; local edits to state file not yet committed)
 
 ## Completed phases
-- P0 COMPLETE: branch `opt/a12-sustained-io` created from `origin/main` `f89b1d8`; three state files committed and pushed; draft PR #17; normal CI green (run 31896517851).
-- P1 IN PROGRESS: P1-A foundation committed as WIP `48cf0a7` (ModelVariantDescriptor, ditW4/ditW8V2, descriptor(for:), ResolvedModels→ResolvedModelPack reshape with .hashes, GenerationMetrics.recordDiTPackIdentity). First subagent attempt (deleg_f4593fac9) interrupted mid-inference (no changes); second attempt (deleg_f6307e41) hit iteration budget after P1-A foundation.
+- P0 COMPLETE: branch created from origin/main f89b1d8; state files committed; PR #17; normal CI green (31896517851).
+- P1 COMPLETE (HEAD f42230d): P1-A..P1-H implemented + tested. Normal CI green (31904926712: project-consistency ✓, simulator-tests ✓ 273/0-fail, iphone-build ✓).
 
 ## Current exact objective
-- P1 CODE + TESTS COMMITTED and PUSHED (HEAD f44c5ee): all P1-A..P1-H implemented with tests. xcodeproj regenerated (bootstrap bot commit f44c5ee) to include new CheckpointIdentityTests.swift.
-- Normal CI in progress on f44c5ee: run 31903678319 (workflow_dispatch).
-- On green: P1 gate met. Then P2 (per-step telemetry).
+- P1 gate met. Next: P2 — trustworthy per-step sustained-performance telemetry (runbook §7).
 
 ## Current files being modified
-- P1 complete: code + tests + regenerated xcodeproj (HEAD f44c5ee). Working tree clean.
+- P1 complete: working tree clean at f42230d.
 
 ## Invariants that must not regress
 - W4 known-good path
@@ -30,10 +28,11 @@ Working tree: clean (at P0 commit; local edits to state file not yet committed)
 - no Xcode/Metal/PyTorch installs on VPS; build/test only via GitHub Actions CI
 
 ## Tests already passed at current HEAD
-- P0 normal CI (run 31896517851, PR #17 draft): project-consistency PASS, iphone-build PASS, simulator-tests PASS. Baseline compiles/tests green.
+- P0 normal CI green (31896517851).
+- P1 normal CI green (31904926712): 273 tests, 14 expected skips, 0 failures. Includes P1-A..H tests.
 
 ## Tests still required
-- P1: W8 identity/checkpoint/numerical/error-attribution/failure-telemetry tests (see runbook P1 gate).
+- P2: per-step metrics tests (all 8 completed steps; failed partial step; per-step sums match globals; no added waitUntilCompleted in hot path; Diagnostics text usable).
 
 ## Known unresolved items
 - None at P0.
@@ -45,5 +44,5 @@ Working tree: clean (at P0 commit; local edits to state file not yet committed)
 - Then push branch and trigger normal CI (ci.yml / bootstrap-project.yml not needed since no .swift added).
 
 ## Last safe continuation point
-commit: 48cf0a7 (wip P1-A foundation) on opt/a12-sustained-io — HEAD at 48cf0a7
-notes: P1-A foundation committed but build is BROKEN at 48cf0a7 until consumers updated (ModelStore.swift:173, GenerationCoordinator.swift:212/304/350). Next dispatch continues P1 from here. Two subagent interruptions observed (model inference stalls + iteration budget); work in small steps, commit frequently.
+commit: f42230d (P1 complete, normal CI green) on opt/a12-sustained-io — HEAD at f42230d
+notes: P1 done and green. Next: P2 per-step telemetry. Reminder: after adding/removing .swift files, run bootstrap-project.yml and pull the bot commit before ci.yml. Push every commit (learned: untracked local commits block bootstrap/CI). Delegation provider is deepseek-v4-flash @ /v1 (subagents broken until gateway restart — doing phases directly for now).
