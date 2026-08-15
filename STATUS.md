@@ -87,5 +87,6 @@ The first physical-device run exposed bugs that simulator/CI did not catch:
 - **Tests:** synthetic multi-chunk fixtures (no 2.23 GB pack in CI) — streaming
   success, SHA-mismatch cleanup, size-gate no-staging, re-import replace,
   catalog in-flight state, `ModelManifest` multi-chunk SHA regression.
-- **CI:** TBD (run ID filled after verification). Final acceptance = physical
-  device retest (DEVICE_TESTS.md checklist).
+- **CI:** PASS (run `31883123045`) — project-consistency ✓, iphone-build ✓,
+  simulator-tests ✓ (270 tests, 0 failures, 14 real-pack-gated skips). Final
+  acceptance = physical device retest (DEVICE_TESTS.md checklist).
