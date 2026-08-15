@@ -51,9 +51,17 @@ final class DiTFinalLayerExecutor {
     ) async throws {
         try validate(residual: residual, emb: emb, adalnLora: adalnLora, velocity: velocity)
         let copyStart = ProcessInfo.processInfo.systemUptime
-        try streamer.load(range, from: file)
-        metrics?.recordWeightCopy(bytes: Int(range.length), seconds: ProcessInfo.processInfo.systemUptime - copyStart)
-        let weights = try FinalWeights(range: range, ring: streamer.ring)
+        let result = try streamer.load(
+            range, from: file,
+            mode: optimization.noCopyWeightSource ? .noCopy : .copied)
+        if result.mode == .noCopy {
+            // P6: final-layer memcpy eliminated — record the no-copy bytes.
+            metrics?.recordMmapNoCopyBytes(result.noCopyBytes)
+        } else {
+            metrics?.recordWeightCopy(bytes: Int(range.length),
+                                      seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+        }
+        let weights = try FinalWeights(range: range, ring: streamer.buffer(for: 0))
         guard let command = context.commandQueue.makeCommandBuffer() else {
             throw AnimapkError.validation("failed to create final-layer command buffer")
         }

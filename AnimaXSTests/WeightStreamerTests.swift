@@ -109,4 +109,123 @@ final class WeightStreamerTests: XCTestCase {
         XCTAssertNoThrow(try WeightStreamer(device: device, capacity: 64, slotCount: 1))
         XCTAssertNoThrow(try WeightStreamer(device: device, capacity: 64, slotCount: 4))
     }
+
+    // MARK: - P6 mmap no-copy weight source
+
+    /// P6 eligibility is pure logic: TestPackFactory blobs are 16 KB-aligned,
+    /// so the single-blob range's absolute file offset is 4096-page-aligned
+    /// and inside the file.
+    func testP6EligibleRangeIsPageAligned() throws {
+        let url = try makePack()
+        let file = try AnimapkFile(url: url)
+        let range = try self.range(file: file, index: 0)
+        XCTAssertTrue(WeightNoCopyPolicy.isEligible(range: range, file: file))
+        XCTAssertEqual(Int(range.fileRange.lowerBound) % 4_096, 0)
+    }
+
+    /// P6: an execution range whose absolute file offset is NOT page-aligned
+    /// is ineligible — the no-copy path must never alias a misaligned pointer.
+    func testP6NonPageAlignedRangeIsIneligible() throws {
+        let url = try makePack()
+        let file = try AnimapkFile(url: url)
+        // Offset 256 (the JSON section) is in-file but not 4096-aligned.
+        let misaligned = AnimapkExecutionRange(
+            logicalIndex: 99, fileOffset: 256, length: 64, tensors: [])
+        XCTAssertFalse(WeightNoCopyPolicy.isEligible(range: misaligned, file: file))
+    }
+
+    /// P6-A/B: loading an eligible range with `.noCopy` yields an MTLBuffer
+    /// that ALIASES the file mapping — its bytes equal the file bytes with NO
+    /// memcpy in the test setup (the pack is read zero-copy via
+    /// `file.bytes(in:)`), and `buffer(for:)` returns the alias.
+    func testP6NoCopyLoadAliasesFileBytes() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let streamer = try WeightStreamer(device: device, capacity: 4096, slotCount: 1)
+        let url = try makePack()
+        let file = try AnimapkFile(url: url)
+        let range = try self.range(file: file, index: 0)
+        let result = try streamer.load(range, from: file, slot: 0, mode: .noCopy)
+        guard result.mode == .noCopy else {
+            throw XCTSkip("SKIPPED_NO_BYTES_NO_COPY: device refused the mmap alias")
+        }
+        XCTAssertEqual(result.noCopyBytes, range.length)
+        XCTAssertTrue(streamer.buffer(for: 0) === result.buffer)
+        let fileBytes = try file.bytes(in: range.fileRange)
+        let alias = result.buffer.contents().bindMemory(to: UInt8.self, capacity: Int(range.length))
+        let reference = fileBytes.bindMemory(to: UInt8.self)
+        // Compare a few offsets across the range (no full copy anywhere).
+        for offset in [0, 1, 7, Int(range.length) / 2, Int(range.length) - 1] {
+            XCTAssertEqual(alias[offset], reference[offset], "byte at offset \(offset)")
+        }
+        XCTAssertEqual(streamer.loadedLogicalIndexes[0], 0)
+    }
+
+    /// P6-B: a non-page-aligned range requested with `.noCopy` falls back to
+    /// the copied path — never an alias, bytes identical to the file.
+    func testP6NonPageAlignedRangeFallsBackToCopied() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let streamer = try WeightStreamer(device: device, capacity: 4096, slotCount: 1)
+        let url = try makePack()
+        let file = try AnimapkFile(url: url)
+        let misaligned = AnimapkExecutionRange(
+            logicalIndex: 99, fileOffset: 256, length: 64, tensors: [])
+        let result = try streamer.load(misaligned, from: file, slot: 0, mode: .noCopy)
+        XCTAssertEqual(result.mode, .copied)
+        XCTAssertEqual(result.noCopyBytes, 0)
+        XCTAssertTrue(streamer.buffer(for: 0) === result.buffer)
+        let fileBytes = try file.bytes(in: misaligned.fileRange)
+        let copied = result.buffer.contents().bindMemory(to: UInt8.self, capacity: 64)
+        let reference = fileBytes.bindMemory(to: UInt8.self)
+        for offset in [0, 32, 63] {
+            XCTAssertEqual(copied[offset], reference[offset], "byte at offset \(offset)")
+        }
+    }
+
+    /// P6 regression: the copied backend is byte-identical to the historical
+    /// behavior — load with `.copied` returns the slot ring buffer, memcpys
+    /// the range, and `buffer(for:)` reports the ring.
+    func testP6CopiedBackendIsByteIdenticalToCurrentBehavior() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let streamer = try WeightStreamer(device: device, capacity: 4096, slotCount: 1)
+        let url = try makePack()
+        let file = try AnimapkFile(url: url)
+        let range = try self.range(file: file, index: 0)
+        let result = try streamer.load(range, from: file, slot: 0, mode: .copied)
+        XCTAssertEqual(result.mode, .copied)
+        XCTAssertEqual(result.noCopyBytes, 0)
+        XCTAssertTrue(result.buffer === streamer.buffer(for: 0))
+        XCTAssertEqual(streamer.loadedLogicalIndexes[0], 0)
+        let fileBytes = try file.bytes(in: range.fileRange)
+        let copied = result.buffer.contents().bindMemory(to: UInt8.self, capacity: Int(range.length))
+        let reference = fileBytes.bindMemory(to: UInt8.self)
+        for offset in [0, 16, Int(range.length) / 2, Int(range.length) - 1] {
+            XCTAssertEqual(copied[offset], reference[offset], "byte at offset \(offset)")
+        }
+    }
+
+    /// P6-C: the no-copy buffer aliases the file mmap, so its contents stay
+    /// valid while the file lives; loading a SECOND range into another slot
+    /// must not disturb the first alias (the deallocator never frees the
+    /// mmap'd pointer).
+    func testP6NoCopyBufferLifetimeTracksFile() throws {
+        let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
+        let streamer = try WeightStreamer(device: device, capacity: 4096, slotCount: 2)
+        let url = try makePack()
+        let file = try AnimapkFile(url: url)
+        let range = try self.range(file: file, index: 0)
+        let first = try streamer.load(range, from: file, slot: 0, mode: .noCopy)
+        guard first.mode == .noCopy else {
+            throw XCTSkip("SKIPPED_NO_BYTES_NO_COPY: device refused the mmap alias")
+        }
+        // Load the same range again into the OTHER slot (copied path). The
+        // first slot's alias must still reflect the file bytes.
+        let second = try streamer.load(range, from: file, slot: 1, mode: .copied)
+        XCTAssertEqual(second.mode, .copied)
+        let alias = first.buffer.contents().bindMemory(to: UInt8.self, capacity: Int(range.length))
+        let fileBytes = try file.bytes(in: range.fileRange)
+        let reference = fileBytes.bindMemory(to: UInt8.self)
+        for offset in [0, Int(range.length) / 2, Int(range.length) - 1] {
+            XCTAssertEqual(alias[offset], reference[offset], "byte at offset \(offset)")
+        }
+    }
 }

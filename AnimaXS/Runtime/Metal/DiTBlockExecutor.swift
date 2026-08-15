@@ -153,10 +153,17 @@ final class DiTBlockExecutor {
         // iteration) already placed them in this slot.
         if streamer.loadedLogicalIndexes[slot] != blockIndex {
             let copyStart = ProcessInfo.processInfo.systemUptime
-            try streamer.load(range, from: file, slot: slot)
-            metrics?.recordWeightCopy(
-                bytes: Int(range.length),
-                seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+            let result = try streamer.load(
+                range, from: file, slot: slot,
+                mode: optimization.noCopyWeightSource ? .noCopy : .copied)
+            if result.mode == .noCopy {
+                // P6: memcpy eliminated — prove it in the metrics.
+                metrics?.recordMmapNoCopyBytes(result.noCopyBytes)
+            } else {
+                metrics?.recordWeightCopy(
+                    bytes: Int(range.length),
+                    seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+            }
         }
         let encodeStart = ProcessInfo.processInfo.systemUptime
         let weights = try BlockWeights(range: range, ring: streamer.buffer(for: slot))
@@ -210,10 +217,17 @@ final class DiTBlockExecutor {
             do {
                 let nextRange = try locator.block(prefetchIndex)
                 let copyStart = ProcessInfo.processInfo.systemUptime
-                try streamer.load(nextRange, from: file, slot: prefetchSlot)
-                metrics?.recordWeightCopy(
-                    bytes: Int(nextRange.length),
-                    seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+                let result = try streamer.load(
+                    nextRange, from: file, slot: prefetchSlot,
+                    mode: optimization.noCopyWeightSource ? .noCopy : .copied)
+                if result.mode == .noCopy {
+                    // P6: prefetch memcpy eliminated — record the no-copy bytes.
+                    metrics?.recordMmapNoCopyBytes(result.noCopyBytes)
+                } else {
+                    metrics?.recordWeightCopy(
+                        bytes: Int(nextRange.length),
+                        seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+                }
             } catch {
                 prefetchError = error
             }
@@ -245,10 +259,17 @@ final class DiTBlockExecutor {
     func prefetch(blockIndex: Int, slot: Int) throws {
         let range = try locator.block(blockIndex)
         let copyStart = ProcessInfo.processInfo.systemUptime
-        try streamer.load(range, from: file, slot: slot)
-        metrics?.recordWeightCopy(
-            bytes: Int(range.length),
-            seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+        let result = try streamer.load(
+            range, from: file, slot: slot,
+            mode: optimization.noCopyWeightSource ? .noCopy : .copied)
+        if result.mode == .noCopy {
+            // P6: prologue memcpy eliminated — record the no-copy bytes.
+            metrics?.recordMmapNoCopyBytes(result.noCopyBytes)
+        } else {
+            metrics?.recordWeightCopy(
+                bytes: Int(range.length),
+                seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+        }
     }
 
     private func encodeSnapshot(

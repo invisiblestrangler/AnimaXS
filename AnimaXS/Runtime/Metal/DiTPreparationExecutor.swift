@@ -55,10 +55,17 @@ final class DiTPreparationExecutor {
             throw AnimapkError.validation("invalid DiT preparation input")
         }
         let copyStart = ProcessInfo.processInfo.systemUptime
-        try streamer.load(locator.range, from: file)
-        metrics?.recordWeightCopy(bytes: Int(locator.range.length),
-                                  seconds: ProcessInfo.processInfo.systemUptime - copyStart)
-        let weights = try DiTPreparationWeights(range: locator.range, ring: streamer.ring)
+        let result = try streamer.load(
+            locator.range, from: file,
+            mode: optimization.noCopyWeightSource ? .noCopy : .copied)
+        if result.mode == .noCopy {
+            // P6: preparation memcpy eliminated — record the no-copy bytes.
+            metrics?.recordMmapNoCopyBytes(result.noCopyBytes)
+        } else {
+            metrics?.recordWeightCopy(bytes: Int(locator.range.length),
+                                      seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+        }
+        let weights = try DiTPreparationWeights(range: locator.range, ring: streamer.buffer(for: 0))
         let raw = makeTimestep(sigma)
         guard let command = context.commandQueue.makeCommandBuffer() else {
             throw AnimapkError.validation("failed to create DiT preparation command buffer")
@@ -191,7 +198,7 @@ final class DiTPreparationExecutor {
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(input, offset: 0, index: 0)
         encoder.setBuffer(output, offset: 0, index: 1)
-        encoder.setBuffer(streamer.ring, offset: weightOffset, index: 2)
+        encoder.setBuffer(streamer.buffer(for: 0), offset: weightOffset, index: 2)
         encoder.setBytes(&columns, length: 4, index: 3)
         encoder.setBytes(&epsilon, length: 4, index: 4)
         encoder.setBytes(&useWeight, length: 4, index: 5)
