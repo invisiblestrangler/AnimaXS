@@ -26,7 +26,7 @@ The first physical-device run exposed bugs that simulator/CI did not catch:
 - [x] `AnimapkError` conforms to `LocalizedError` (Fix D)
 - [x] Downloader validates final HTTP response, owns staging, useful disk errors (Fix E)
 - [x] Import/repair replace corrupt destinations atomically (Fix F)
-- [x] Generate blocked reasons visible; thermal policy kept but exposed (Fix G)
+- [x] Generate blocked reasons visible; single-source eligibility (Fix G); thermal policy removed (D102)
 - [x] Keyboard dismissal (Fix H)
 - [x] Diagnostics: cheap snapshot on open, explicit levels, JSON export runs zero tests (Fix I)
 - [x] DiagnosticRunMarker persists running test across launches (crash localization)

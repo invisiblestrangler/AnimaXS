@@ -147,12 +147,11 @@ struct DiagnosticsEngine {
 
     /// Real Metal/MPS command-buffer probes (the A12 crash-risk group). Runs
     /// sequentially with visible per-test progress, persists the running test
-    /// via `marker`, skips cleanly when the thermal gate trips, and records
-    /// thermal/process-memory/elapsed facts per test.
+    /// via `marker`, and records thermal/process-memory/elapsed facts per test.
+    /// Thermal state is observational only — it never skips or gates a test.
     func hardwareTests(
         marker: DiagnosticRunMarker,
-        progress: (String) -> Void,
-        thermalGate: () -> Bool
+        progress: (String) -> Void
     ) async -> [DiagnosticItem] {
         guard isMetalAvailable, let context else {
             let detail = forceMetalUnavailable ? "Metal unavailable (simulated)" : "Metal unavailable"
@@ -162,12 +161,6 @@ struct DiagnosticsEngine {
         }
         var items: [DiagnosticItem] = []
         for name in ["MPS precision", "GEMM", "Attention tile"] {
-            if thermalGate() {
-                items.append(DiagnosticItem(
-                    name: name, status: .skipped,
-                    detail: "skipped: device too warm (thermal state: \(ProcessInfo.processInfo.thermalState))"))
-                continue
-            }
             progress(name)
             marker.markStarted(name)
             let thermalBefore = "\(ProcessInfo.processInfo.thermalState)"
@@ -243,11 +236,10 @@ struct DiagnosticsEngine {
     /// Backs the "Run diagnostics" button.
     func fullRun(
         marker: DiagnosticRunMarker,
-        progress: (String) -> Void,
-        thermalGate: () -> Bool
+        progress: (String) -> Void
     ) async -> [DiagnosticItem] {
         var items = basicSelfTests()
-        items += await hardwareTests(marker: marker, progress: progress, thermalGate: thermalGate)
+        items += await hardwareTests(marker: marker, progress: progress)
         return items
     }
 
