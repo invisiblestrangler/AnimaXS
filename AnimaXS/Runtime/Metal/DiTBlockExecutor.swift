@@ -4,6 +4,44 @@ import Metal
 import Darwin
 #endif
 
+/// P5: generation-local cache of the invariant cross-attention K/V for every
+/// DiT block. Cross context is fixed for a generation, so after the first
+/// executed step each block's cross K/V (post-projection, post-static-boundary,
+/// post-K-RMSNorm) are reused instead of being re-projected every step. EXACT
+/// reuse — no approximation; Q stays dynamic and is never cached.
+///
+/// One contiguous `.storageModePrivate` buffer (~112 MiB for 28 blocks). The
+/// CPU never reads it. If allocation fails the cache is nil and callers fall
+/// back to the legacy per-step projection path (the experiment fails
+/// gracefully, never crashes). The cache belongs to ONE `DiffusionSampler` /
+/// one generation; it is never persisted across prompts and never enters a
+/// checkpoint.
+final class CrossKVCache {
+    static let tensorBytes =
+        DiTBlockExecutor.contextTokens * DiTBlockExecutor.dim
+        * MemoryLayout<Float16>.stride
+    static let blockStride = tensorBytes * 2  // K + V per block
+    static let blockCount = ModelConstants.ditBlocks
+
+    let buffer: MTLBuffer
+    private(set) var ready = [Bool](repeating: false, count: blockCount)
+
+    /// Creates the cache. Returns nil if the device cannot allocate it.
+    init?(device: MTLDevice,
+          options: MTLResourceOptions = .storageModePrivate) {
+        let length = blockCount * blockStride
+        guard let buffer = device.makeBuffer(length: length, options: options) else {
+            return nil
+        }
+        self.buffer = buffer
+    }
+
+    func kOffset(block: Int) -> Int { block * Self.blockStride }
+    func vOffset(block: Int) -> Int { kOffset(block: block) + Self.tensorBytes }
+    func isReady(_ block: Int) -> Bool { ready[block] }
+    func markReady(_ block: Int) { ready[block] = true }
+}
+
 /// Exact fixed-shape MiniTrainDIT block executed with one streamed block range.
 /// Legacy mode keeps residual/modulation/gates in fp32 and projection/attention
 /// boundaries in fp16. `bf16Compute` emulates the reference BF16 model dtype
@@ -35,6 +73,10 @@ final class DiTBlockExecutor {
     /// Immutable optimization snapshot for this executor's lifetime (captured
     /// at Generate). Controls the P3-A/P3-B fused paths.
     private let optimization: InferenceOptimizationConfig
+    /// P5: per-generation cross-attention K/V cache (nil when the toggle is off
+    /// or the buffer could not be allocated). Shared across all steps of one
+    /// generation; never persisted.
+    private let crossKVCache: CrossKVCache?
     /// Run telemetry collector (nil in tests / diagnostic-only construction).
     /// Propagated to the child linear/attention executors so their cheap tile
     /// counters land in the SAME run metrics object (never a separate one).
@@ -54,7 +96,8 @@ final class DiTBlockExecutor {
          attentionNumerics: AttentionNumerics = .legacy,
          activationNumerics: ActivationNumerics = .legacy,
          monitor: NumericalMonitor? = nil,
-         optimization: InferenceOptimizationConfig = .currentBaseline) throws {
+         optimization: InferenceOptimizationConfig = .currentBaseline,
+         crossKVCache: CrossKVCache? = nil) throws {
         let locator = try DiTBlockLocator(file: file)
         guard let maximum = locator.blocks.map(\.length).max(), maximum <= UInt64(Int.max) else {
             throw AnimapkError.validation("invalid DiT execution ranges")
@@ -63,6 +106,7 @@ final class DiTBlockExecutor {
         self.file = file
         self.locator = locator
         self.optimization = optimization
+        self.crossKVCache = crossKVCache
         // Ping-pong ON keeps the existing two-slot streamer; OFF measures the
         // same generation with one slot and no look-ahead prefetch.
         let slotCount = optimization.pingPongWeightStreaming ? 2 : 1
@@ -125,13 +169,15 @@ final class DiTBlockExecutor {
         try encodeComputeBoundary(command, siluEmb, count: Self.dim)
         try encodeAttentionBranch(command, residual: residual, crossContext: crossContext,
                                   rope: rope, siluEmb: siluEmb, adalnLora: adalnLora,
-                                  weights: weights, cross: false, slot: slot)
+                                  weights: weights, cross: false, slot: slot,
+                                  blockIndex: blockIndex)
         let selfSnapshot = try diagnosticBranchCompleted.map { _ in
             try encodeSnapshot(command, source: residual, key: "dit.diagnostic.afterSelf.f32")
         }
         try encodeAttentionBranch(command, residual: residual, crossContext: crossContext,
                                   rope: rope, siluEmb: siluEmb, adalnLora: adalnLora,
-                                  weights: weights, cross: true, slot: slot)
+                                  weights: weights, cross: true, slot: slot,
+                                  blockIndex: blockIndex)
         let crossSnapshot = try diagnosticBranchCompleted.map { _ in
             try encodeSnapshot(command, source: residual, key: "dit.diagnostic.afterCross.f32")
         }
@@ -221,7 +267,7 @@ final class DiTBlockExecutor {
     private func encodeAttentionBranch(
         _ command: MTLCommandBuffer, residual: MTLBuffer, crossContext: MTLBuffer,
         rope: MTLBuffer, siluEmb: MTLBuffer, adalnLora: MTLBuffer,
-        weights: BlockWeights, cross: Bool, slot: Int
+        weights: BlockWeights, cross: Bool, slot: Int, blockIndex: Int
     ) throws {
         let modulation = try encodeModulation(
             command, siluEmb: siluEmb, adalnLora: adalnLora,
@@ -267,35 +313,75 @@ final class DiTBlockExecutor {
                           weight: queryWeight, output: qToken, inputRows: Self.tokens)
         let keyInput = cross ? crossContext : projectionInput
         let keyRows = cross ? Self.contextTokens : Self.tokens
-        try linear.encode(commandBuffer: command, input: keyInput,
-                          weight: keyWeight, output: kToken, inputRows: keyRows)
-        try linear.encode(commandBuffer: command, input: keyInput,
-                          weight: valueWeight, output: vToken, inputRows: keyRows)
+        // P5: cache the invariant cross K/V across diffusion steps. On a hit we
+        // skip the cross K/V projection + static boundary + K RMSNorm and blit
+        // the cached (post-transform) K/V into the scratch buffers, so the
+        // downstream attention sees byte-identical inputs by construction. Q is
+        // always projected fresh (it is dynamic per step).
+        let cacheEnabled = cross && optimization.crossKVCache
+        let cacheHit = cacheEnabled && (crossKVCache?.isReady(blockIndex) ?? false)
+        if cacheHit, let cache = crossKVCache {
+            // Blit cached K/V into the scratch buffers (exact; the cache holds
+            // the state right before attention for this block).
+            if let encoder = command.makeBlitCommandEncoder() {
+                encoder.copy(from: cache.buffer, sourceOffset: cache.kOffset(block: blockIndex),
+                             to: kToken, destinationOffset: 0, size: kTokenCount * MemoryLayout<Float16>.stride)
+                encoder.copy(from: cache.buffer, sourceOffset: cache.vOffset(block: blockIndex),
+                             to: vToken, destinationOffset: 0, size: kTokenCount * MemoryLayout<Float16>.stride)
+                encoder.endEncoding()
+            }
+            metrics?.recordCrossKVHit()
+        } else {
+            try linear.encode(commandBuffer: command, input: keyInput,
+                              weight: keyWeight, output: kToken, inputRows: keyRows)
+            try linear.encode(commandBuffer: command, input: keyInput,
+                              weight: valueWeight, output: vToken, inputRows: keyRows)
+            try encodeHalfComputeBoundary(command, kToken, count: kTokenCount)
+            try encodeHalfComputeBoundary(command, vToken, count: kTokenCount)
+            if NumericalMonitor.detailedProbesEnabled, let monitor {
+                try monitor.encodeProbe(command, values: kToken, count: kTokenCount,
+                                        probe: cross ? .crossKToken : .selfKToken)
+                try monitor.encodeProbe(command, values: vToken, count: kTokenCount,
+                                        probe: cross ? .crossVToken : .selfVToken)
+            }
+            if cross {
+                try encodeRMSHeads(command, input: kToken, weightOffset: weights.crossKNorm,
+                                   output: kToken, rows: Self.contextTokens * Self.heads, slot: slot)
+            } else {
+                try encodeRMSRoPE(command, input: kToken, weightOffset: weights.selfKNorm,
+                                  rope: rope, output: kToken, slot: slot)
+            }
+            try encodeHalfComputeBoundary(command, kToken, count: kTokenCount)
+            // First use of this block's cross K/V: store the post-transform
+            // K/V into the cache for reuse by later steps.
+            if cacheEnabled, let cache = crossKVCache {
+                if let encoder = command.makeBlitCommandEncoder() {
+                    encoder.copy(from: kToken, sourceOffset: 0, to: cache.buffer,
+                                 destinationOffset: cache.kOffset(block: blockIndex),
+                                 size: kTokenCount * MemoryLayout<Float16>.stride)
+                    encoder.copy(from: vToken, sourceOffset: 0, to: cache.buffer,
+                                 destinationOffset: cache.vOffset(block: blockIndex),
+                                 size: kTokenCount * MemoryLayout<Float16>.stride)
+                    encoder.endEncoding()
+                }
+                cache.markReady(blockIndex)
+                metrics?.recordCrossKVMiss()
+            }
+        }
         try encodeHalfComputeBoundary(command, qToken, count: Self.tokens * Self.dim)
-        try encodeHalfComputeBoundary(command, kToken, count: kTokenCount)
-        try encodeHalfComputeBoundary(command, vToken, count: kTokenCount)
         if NumericalMonitor.detailedProbesEnabled, let monitor {
             try monitor.encodeProbe(command, values: qToken, count: Self.tokens * Self.dim,
                                     probe: cross ? .crossQToken : .selfQToken)
-            try monitor.encodeProbe(command, values: kToken, count: kTokenCount,
-                                    probe: cross ? .crossKToken : .selfKToken)
-            try monitor.encodeProbe(command, values: vToken, count: kTokenCount,
-                                    probe: cross ? .crossVToken : .selfVToken)
         }
-
+        // Q is always dynamic. Self Q uses RoPE; cross Q uses RMS norm.
         if cross {
             try encodeRMSHeads(command, input: qToken, weightOffset: weights.crossQNorm,
                                output: qToken, rows: Self.tokens * Self.heads, slot: slot)
-            try encodeRMSHeads(command, input: kToken, weightOffset: weights.crossKNorm,
-                               output: kToken, rows: Self.contextTokens * Self.heads, slot: slot)
         } else {
             try encodeRMSRoPE(command, input: qToken, weightOffset: weights.selfQNorm,
                               rope: rope, output: qToken, slot: slot)
-            try encodeRMSRoPE(command, input: kToken, weightOffset: weights.selfKNorm,
-                              rope: rope, output: kToken, slot: slot)
         }
         try encodeHalfComputeBoundary(command, qToken, count: Self.tokens * Self.dim)
-        try encodeHalfComputeBoundary(command, kToken, count: kTokenCount)
 
         let attendedToken: MTLBuffer
         if strided {
@@ -936,3 +1022,42 @@ private struct BlockWeights {
         }
     }
 }
+
+/// P5: generation-local cache of the invariant cross-attention K/V.
+///
+/// Cross context is fixed for a generation, so for each DiT block the
+/// post-projection, post-static-boundary, post-K-normalization K and the
+/// post-projection/static-boundary V are identical across all diffusion steps.
+/// This cache stores that exact reusable work in ONE contiguous Metal buffer
+/// (~4 MiB per block × 28 blocks ≈ 112 MiB) so later steps skip the cross K/V
+/// projection, boundary, and K RMSNorm. Q stays dynamic and is never cached.
+///
+/// Lifetime: owned by one `DiffusionSampler` / one generation. Never persisted
+/// across prompts or in checkpoints. On Resume the sampler is reconstructed, so
+/// the first resumed step fills the cache and later steps hit it. Readiness is
+/// per-block and independent of absolute step number.
+final class CrossKVCache {
+    static let tensorBytes =
+        DiTBlockExecutor.contextTokens * DiTBlockExecutor.dim * MemoryLayout<Float16>.stride
+    static let blockStride = tensorBytes * 2
+
+    let buffer: MTLBuffer
+    private(set) var ready = [Bool](repeating: false, count: ModelConstants.ditBlocks)
+
+    init(context: MetalContext) throws {
+        let bytes = ModelConstants.ditBlocks * Self.blockStride
+        guard bytes > 0, bytes <= Int.max else {
+            throw AnimapkError.validation("invalid cross-KV cache size")
+        }
+        // CPU never reads the cache, so prefer private (GPU-only) storage.
+        guard let buffer = context.device.makeBuffer(
+            length: bytes, options: .storageModePrivate) else {
+            throw AnimapkError.validation("failed to allocate cross-KV cache (\(bytes) bytes)")
+        }
+        self.buffer = buffer
+    }
+
+    func kOffset(block: Int) -> Int { block * Self.blockStride }
+    func vOffset(block: Int) -> Int { kOffset(block: block) + Self.tensorBytes }
+}
+

@@ -34,6 +34,10 @@ final class DiffusionSampler {
     /// measures monitoring overhead). The final CPU finite guard stays on
     /// regardless — a non-finite latent still fails safely.
     private let monitor: NumericalMonitor?
+    /// P5: per-generation cross-attention K/V cache (nil when the toggle is off
+    /// or allocation failed). Owned here so its lifetime is exactly one
+    /// generation; never persisted across prompts.
+    private let crossKVCache: CrossKVCache?
     private let stateLock = NSLock()
     private var running = false
 
@@ -80,10 +84,15 @@ final class DiffusionSampler {
         preparation = try DiTPreparationExecutor(
             context: context, file: file, activationNumerics: resolvedActivation,
             monitor: monitor, optimization: optimization)
+        // P5: per-generation cross-attention K/V cache. Created when the toggle
+        // is on; if the device cannot allocate the buffer it fails gracefully
+        // to nil and the legacy per-step projection path runs (never crashes).
+        let cache = optimization.crossKVCache ? CrossKVCache(device: context.device) : nil
+        self.crossKVCache = cache
         forward = try DitForward(
             context: context, file: file, attentionNumerics: resolvedAttention,
             activationNumerics: resolvedActivation, monitor: monitor,
-            optimization: optimization)
+            optimization: optimization, crossKVCache: cache)
         euler = EulerSampler(context: context, monitor: monitor)
         buffers = BufferPool(device: context.device)
 

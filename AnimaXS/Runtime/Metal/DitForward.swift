@@ -46,11 +46,12 @@ final class DitForward {
          attentionNumerics: AttentionNumerics = .legacy,
          activationNumerics: ActivationNumerics = .legacy,
          monitor: NumericalMonitor? = nil,
-         optimization: InferenceOptimizationConfig = .currentBaseline) throws {
+         optimization: InferenceOptimizationConfig = .currentBaseline,
+         crossKVCache: CrossKVCache? = nil) throws {
         block = try DiTBlockExecutor(
             context: context, file: file, attentionNumerics: attentionNumerics,
             activationNumerics: activationNumerics, monitor: monitor,
-            optimization: optimization)
+            optimization: optimization, crossKVCache: crossKVCache)
         finalLayer = try DiTFinalLayerExecutor(
             context: context, file: file, activationNumerics: activationNumerics,
             monitor: monitor, optimization: optimization)
