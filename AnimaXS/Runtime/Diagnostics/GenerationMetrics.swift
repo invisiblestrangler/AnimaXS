@@ -95,6 +95,11 @@ struct GenerationMetrics: Equatable {
     /// LayerNorm+AdaLN+to-half, in-place half GELU). See
     /// `DiffusionStepMetrics.fusedTrafficSavedBytes`.
     var fusedTrafficSavedBytes: UInt64 = 0
+    /// P5: cross-attention K/V cache hit/miss counts across the whole run.
+    /// First executed step = 28 misses (one per DiT block); each later step
+    /// = 28 hits. See `DiffusionStepMetrics.crossKVHits/crossKVMisses`.
+    var crossKVHits: Int = 0
+    var crossKVMisses: Int = 0
 
     // Weight streaming + Metal accounting (seconds)
     var weightCopyTime: Double = 0
@@ -219,6 +224,9 @@ struct GenerationMetrics: Equatable {
             if fusedTrafficSavedBytes > 0 {
                 lines.append(String(format: "fused activation traffic saved: %.0f MB",
                                     Double(fusedTrafficSavedBytes) / 1_048_576))
+            }
+            if crossKVHits > 0 || crossKVMisses > 0 {
+                lines.append("cross-KV cache hits/misses: \(crossKVHits)/\(crossKVMisses)")
             }
             lines.append("")
         }
@@ -420,6 +428,44 @@ final class MetricsCollector {
         metrics.fusedTrafficSavedBytes += bytes
         if let index = activeStepIndex {
             metrics.stepMetrics[index].fusedTrafficSavedBytes += bytes
+        }
+    }
+
+    /// P5: a cross-attention K/V cache HIT (the invariant K/V for this block
+    /// was reused instead of being re-projected). Recorded on the cache path.
+    func recordCrossKVHit() {
+        metrics.crossKVHits += 1
+        if let index = activeStepIndex {
+            metrics.stepMetrics[index].crossKVHits += 1
+        }
+    }
+
+    /// P5: a cross-attention K/V cache MISS (the invariant K/V for this block
+    /// was projected and stored for reuse on later steps). Recorded on the
+    /// cache path.
+    func recordCrossKVMiss() {
+        metrics.crossKVMisses += 1
+        if let index = activeStepIndex {
+            metrics.stepMetrics[index].crossKVMisses += 1
+        }
+    }
+
+    /// P5: a cross-attention K/V cache hit — a later diffusion step reused a
+    /// block's cached cross K/V instead of re-projecting it. Accumulates into
+    /// the active step (per-step sums == globals invariant).
+    func recordCrossKVHit() {
+        metrics.crossKVHits += 1
+        if let index = activeStepIndex {
+            metrics.stepMetrics[index].crossKVHits += 1
+        }
+    }
+
+    /// P5: a cross-attention K/V cache miss — the cache did not yet hold this
+    /// block's cross K/V, so it was projected and stored.
+    func recordCrossKVMiss() {
+        metrics.crossKVMisses += 1
+        if let index = activeStepIndex {
+            metrics.stepMetrics[index].crossKVMisses += 1
         }
     }
 
