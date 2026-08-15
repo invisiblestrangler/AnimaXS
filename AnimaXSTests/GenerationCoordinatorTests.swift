@@ -202,10 +202,10 @@ final class GenerationCoordinatorTests: XCTestCase {
         // Adapter and sampler must both receive the DiT URL.
         let adapter = factory.calls.first { $0.stage == "adapter" }!
         let sampler = factory.calls.first { $0.stage == "sampler" }!
-        XCTAssertEqual(adapter.url, models.dit, "adapter reads the DiT pack")
-        XCTAssertEqual(sampler.url, models.dit, "sampler reads the DiT pack")
-        XCTAssertEqual(factory.calls.first { $0.stage == "qwen" }!.url, models.textEncoder)
-        XCTAssertEqual(factory.calls.first { $0.stage == "vae" }!.url, models.vae)
+        XCTAssertEqual(adapter.url, models.dit.url, "adapter reads the DiT pack")
+        XCTAssertEqual(sampler.url, models.dit.url, "sampler reads the DiT pack")
+        XCTAssertEqual(factory.calls.first { $0.stage == "qwen" }!.url, models.textEncoder.url)
+        XCTAssertEqual(factory.calls.first { $0.stage == "vae" }!.url, models.vae.url)
     }
 
     // MARK: - Seed forwarding
