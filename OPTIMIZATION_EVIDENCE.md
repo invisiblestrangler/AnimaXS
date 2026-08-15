@@ -46,3 +46,12 @@ result: ALL PASS. project-consistency ✓, simulator-tests ✓ (287 tests, 14 ex
 key metrics: 0 failures. Adds stridedTokenMajorAttention toggle (default OFF), AttentionInputLayout, strided MPS per-head matrix views eliminating DiT head transposes; strict rejection of GQA/fp32/bf16 on strided path; tests (strided-vs-legacy parity, full DiT shapes, no head mixing, zero transpose bytes, unsupported rejection). Fixed strided MPS parity by transposing legacy head-major reference to token-major before comparison.
 artifact/run id: 31911189760 (PR #17 draft)
 interpretation: P4 gate met. Strided path gated behind toggle (W4 default unchanged). Next: P5.
+
+## 2026-08-15 (P5) — Normal CI green on P5 (cross-attention K/V cache)
+HEAD: 7062064 (P5 complete on opt/a12-sustained-io)
+command: gh workflow run ci.yml --ref opt/a12-sustained-io; gh run watch 31913876755
+configuration: normal CI (ci.yml): project-consistency, simulator-tests, iphone-build
+result: ALL PASS. project-consistency ✓, simulator-tests ✓ (292 tests, 14 expected skips, 0 failures), iphone-build ✓.
+key metrics: 0 failures. Adds CrossKVCache (one contiguous ~112 MiB .storageModePrivate buffer, 28 blocks × 4 MiB, per-block ready flags, generation-local). crossKVCache toggle (default OFF). DiTBlockExecutor cross path: hit = blit cache→scratch (skip cross K/V projection + static boundary + K RMSNorm), miss = project + store + markReady; Q always dynamic, self attention never cached. Threaded DiffusionSampler→DitForward→DiTBlockExecutor. recordCrossKVHit/Miss metrics + summary "cross-KV cache hits/misses: X/Y". Graceful alloc-failure fallback to legacy.
+artifact/run id: 31913876755 (PR #17 draft)
+interpretation: P5 gate met. Cache gated behind toggle (W4 default unchanged). Exact reuse by construction (blit cached post-transform K/V); device measures speed benefit later. Next: P6.
