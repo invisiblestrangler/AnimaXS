@@ -29,7 +29,7 @@ final class CrossKVCache {
     /// Creates the cache. Returns nil if the device cannot allocate it.
     init?(device: MTLDevice,
           options: MTLResourceOptions = .storageModePrivate) {
-        let length = blockCount * blockStride
+        let length = Self.blockCount * Self.blockStride
         guard let buffer = device.makeBuffer(length: length, options: options) else {
             return nil
         }
