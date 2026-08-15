@@ -687,7 +687,7 @@ final class DiTBlockExecutor {
 /// registered BEFORE `commit()` (Metal asserts on late handlers). The handler
 /// fires on a Metal queue thread; the awaiting task resumes via the stored
 /// continuation. Safe whether the handler fires before or after `wait()`.
-private final class CommandBufferGate {
+final class CommandBufferGate {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Void, Error>?
     private var outcome: Result<Void, Error>?
