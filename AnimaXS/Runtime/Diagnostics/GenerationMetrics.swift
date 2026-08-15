@@ -63,6 +63,12 @@ struct GenerationMetrics: Equatable {
     // Immutable per-run configuration snapshot (captured at Generate time).
     var optimizationConfig: InferenceOptimizationConfig?
 
+    /// Filename of the DiT pack actually used by this run (e.g.
+    /// `anima-turbo-v1.0-xsmax-w4.animapk` or the W8-v2 pack), so the summary
+    /// reports which imported variant ran even though it is not a config
+    /// choice.
+    var ditPackFilename: String?
+
     // Cheap executor counters (simple integer increments; no GPU readbacks).
     var linearGEMMTiles: Int = 0
     var linearDirectInputTiles: Int = 0
@@ -80,12 +86,9 @@ struct GenerationMetrics: Equatable {
         return blockTimes.reduce(0, +) / Double(blockTimes.count)
     }
 
-    /// The DiT pack variant actually used by this run.
-    var ditPackVariant: DiTPackVariant {
-        optimizationConfig?.ditPackVariant ?? .productionW4
-    }
-
-    /// Whether checkpointing was enabled for this run (W8 disables it).
+    /// Whether checkpointing was enabled for this run (always on: the DiT
+    /// slot holds one verified pack, so there is no separate experimental
+    /// state a checkpoint could collide with).
     var checkpointingEnabled: Bool {
         optimizationConfig?.checkpointingEnabled ?? true
     }
@@ -131,7 +134,7 @@ struct GenerationMetrics: Equatable {
         }
         lines.append("")
         lines.append("Inference configuration")
-        lines.append("DiT pack: \(ditPackVariant == .productionW4 ? "W4 production" : "W8 v2 experimental")")
+        lines.append("DiT pack: \(ditPackFilename ?? "unknown")")
         if let config = optimizationConfig {
             lines.append("Linear tile rows: \(config.linearTileRows)")
             lines.append("Attention tile rows: \(config.attentionTileRows)")
@@ -139,7 +142,7 @@ struct GenerationMetrics: Equatable {
             lines.append("Ping-pong weight streaming: \(config.pingPongWeightStreaming ? "on" : "off")")
             lines.append("Numerical monitor: \(config.numericalMonitoring ? "on" : "off")")
         }
-        lines.append("Checkpointing: \(checkpointingEnabled ? "on" : "off (experimental W8)")")
+        lines.append("Checkpointing: \(checkpointingEnabled ? "on" : "off")")
         lines.append("")
         lines.append("Environment")
         lines.append("Power: \(environmentStart.powerState) -> \(environmentEnd.powerState)")
@@ -256,6 +259,11 @@ final class MetricsCollector {
     func recordOptimizationConfig(_ config: InferenceOptimizationConfig) {
         metrics.optimizationConfig = config
         metrics.numericalMonitoringDisabled = !config.numericalMonitoring
+    }
+
+    /// Records which DiT pack file (W4 or W8-v2) this run actually used.
+    func recordDiTPackFilename(_ filename: String) {
+        metrics.ditPackFilename = filename
     }
 
     func recordEnvironmentStart(_ snapshot: EnvironmentSnapshot) {

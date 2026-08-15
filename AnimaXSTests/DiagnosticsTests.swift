@@ -27,7 +27,7 @@ final class DiagnosticsTests: XCTestCase {
             secureInstalls: false,
             verifier: { url, entry in
                 counter.increment()
-                try ModelManifest.verify(url, against: entry)
+                return try ModelManifest.matchedVariant(of: url, against: entry)
             },
             receiptsDirectory: root.appendingPathComponent("Receipts", isDirectory: true))
     }
@@ -89,7 +89,7 @@ final class DiagnosticsTests: XCTestCase {
         let source = root.appendingPathComponent("source.animapk")
         try content.write(to: source)
         _ = try await store.importPack(entry, from: source)
-        XCTAssertEqual(counter.count, 1, "import verifies once")
+        XCTAssertEqual(counter.count, 0, "import verifies while streaming, not via the injected verifier")
 
         let engine = makeNoMetalEngine(storeProvider: { store })
         let report = await engine.snapshot()
@@ -101,7 +101,7 @@ final class DiagnosticsTests: XCTestCase {
         // hash the file to discover that.
         XCTAssertFalse(pack.verified, "receipt vs production manifest mismatch is reported truthfully")
         XCTAssertFalse(pack.sha256Verified, "snapshot never claims deep SHA verification")
-        XCTAssertEqual(counter.count, 1, "snapshot adds no hashing on top of import")
+        XCTAssertEqual(counter.count, 0, "snapshot adds no hashing on top of import")
     }
 
     // MARK: - Basic self-tests are pack-free

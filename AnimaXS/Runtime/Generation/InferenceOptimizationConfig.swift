@@ -1,18 +1,5 @@
 import Foundation
 
-/// DiT weight-pack variant used for one generation run.
-///
-/// Only `.productionW4` is part of the normal three-pack production topology.
-/// `.experimentalW8V2` is a Diagnostics-only experiment that substitutes a
-/// separately imported, verified W8 pack for the DiT URL in a run-specific
-/// resolved-model snapshot. It deliberately lives OUTSIDE `ModelManifest.entries`.
-enum DiTPackVariant: String, CaseIterable, Codable, Identifiable {
-    case productionW4
-    case experimentalW8V2
-
-    var id: String { rawValue }
-}
-
 /// Immutable, value-semantic runtime configuration captured for a single
 /// generation when Generate is pressed.
 ///
@@ -27,7 +14,9 @@ enum DiTPackVariant: String, CaseIterable, Codable, Identifiable {
 /// - Direct MPS linear I/O: OFF (per-tile copy path)
 /// - Ping-pong weight streaming: ON (existing two-slot behavior)
 /// - Numerical monitor: ON (existing production probes)
-/// - DiT: production W4
+///
+/// The DiT pack is whichever variant (W4 or W8-v2) was imported into the
+/// `.dit` slot; it is resolved by `ModelStore` and is not a config choice.
 struct InferenceOptimizationConfig: Equatable {
     static let allowedTileRows = [128, 256, 512, 1024]
 
@@ -36,15 +25,13 @@ struct InferenceOptimizationConfig: Equatable {
     var directLinearMPSIO: Bool
     var pingPongWeightStreaming: Bool
     var numericalMonitoring: Bool
-    var ditPackVariant: DiTPackVariant
 
     static let currentBaseline = InferenceOptimizationConfig(
         linearTileRows: 128,
         attentionTileRows: 128,
         directLinearMPSIO: false,
         pingPongWeightStreaming: true,
-        numericalMonitoring: true,
-        ditPackVariant: .productionW4
+        numericalMonitoring: true
     )
 
     /// Sanitizes a tile-row value down to the nearest allowed value (or the
@@ -58,10 +45,11 @@ struct InferenceOptimizationConfig: Equatable {
     }
 
     /// True when checkpoint persistence/resume is meaningful for this run.
-    /// Experimental W8 has checkpointing disabled (its production-W4 hash set
-    /// does not describe the W8 pack, and a W8 checkpoint must never resurrect
-    /// unrelated production resume state).
+    ///
+    /// The DiT slot holds exactly one verified pack (W4 or W8-v2) at a time,
+    /// so there is no separate experimental state that a checkpoint could
+    /// collide with: checkpoint identity is the stable production hash set.
     var checkpointingEnabled: Bool {
-        ditPackVariant == .productionW4
+        true
     }
 }

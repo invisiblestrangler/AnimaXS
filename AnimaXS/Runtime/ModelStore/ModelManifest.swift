@@ -7,12 +7,32 @@ enum ModelComponent: String, Codable {
     case vae
 }
 
+/// One accepted (size, SHA-256) variant for a model pack.
+///
+/// The DiT slot is the only entry with alternates: the user imports either the
+/// W4 pack (default) or the W8-v2 pack into the same `.dit` slot, and whichever
+/// file was imported is the one a generation uses. Text encoder and VAE have a
+/// single pinned variant.
+struct ModelVariant: Codable, Equatable {
+    let size: UInt64
+    let sha256: String
+}
+
 struct ModelManifestEntry: Codable, Equatable {
     let filename: String
     let size: UInt64
     let sha256: String
     let url: URL
     let component: ModelComponent
+    /// Additional accepted (size, SHA-256) variants for this slot (empty for
+    /// the single-variant text encoder and VAE). Verification accepts the
+    /// primary or any alternate.
+    var alternates: [ModelVariant] = []
+
+    /// All accepted variants, primary first.
+    var allVariants: [ModelVariant] {
+        [ModelVariant(size: size, sha256: sha256)] + alternates
+    }
 }
 
 enum ModelManifest {
@@ -21,10 +41,18 @@ enum ModelManifest {
         string: "https://github.com/invisiblestrangler/AnimaXS/releases/download/\(releaseTag)/")!
 
     static let entries: [ModelManifestEntry] = [
+        // The DiT slot accepts either the W4 or the W8-v2 pack. Whichever is
+        // imported is the DiT used by generation. W4 remains the primary so
+        // existing W4 installs/receipts stay valid.
         entry(
             "anima-turbo-v1.0-xsmax-w4.animapk", size: 1_179_435_008,
             sha256: "ba1ce615f03665812f05088f9239f0cb23591a0811067d57fa51773abf6f0d25",
-            component: .dit),
+            component: .dit,
+            alternates: [
+                ModelVariant(
+                    size: 2_232_975_360,
+                    sha256: "8b63c7fd9b5872805e5a2ba799ab6d79989c54a6a89a4f34edf022c59c9ed130"),
+            ]),
         entry(
             "qwen3-0.6b-xsmax-w8.animapk", size: 635_305_984,
             sha256: "ba59e4d1797de5f6512aeafcecf3f38e1f62a47313a2a400b949c9018d84ceab",
@@ -60,18 +88,37 @@ enum ModelManifest {
         return digest.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
-    static func verify(_ url: URL, against entry: ModelManifestEntry) throws {
+    /// Matches `url` against any accepted variant of `entry`. Returns the
+    /// matched variant. Throws when size matches no accepted variant or the
+    /// digest matches no accepted variant. Performs one streaming hash pass
+    /// against the first size that matches (and the primary first), which is
+    /// the normal-case single pass for W4/W8.
+    static func matchedVariant(of url: URL, against entry: ModelManifestEntry) throws -> ModelVariant {
         let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-        guard let number = attributes[.size] as? NSNumber,
-              number.uint64Value == entry.size else {
-            throw AnimapkError.validation("model size does not match manifest")
+        guard let number = attributes[.size] as? NSNumber else {
+            throw AnimapkError.validation("unable to read model file size")
         }
-        guard try sha256(of: url) == entry.sha256.lowercased() else {
-            throw AnimapkError.validation("model SHA-256 does not match manifest")
+        let actualSize = number.uint64Value
+        let sizeMatches = entry.allVariants.filter { $0.size == actualSize }
+        guard !sizeMatches.isEmpty else {
+            throw AnimapkError.validation(
+                "model size does not match any manifest variant for \(entry.component.rawValue)")
         }
+        let digest = try sha256(of: url)
+        guard let variant = sizeMatches.first(where: { $0.sha256.lowercased() == digest }) else {
+            throw AnimapkError.validation(
+                "model SHA-256 does not match manifest for \(entry.component.rawValue)")
+        }
+        return variant
+    }
+
+    static func verify(_ url: URL, against entry: ModelManifestEntry) throws {
+        _ = try matchedVariant(of: url, against: entry)
     }
 
     /// The three production model hashes (used for checkpoint compatibility).
+    /// The DiT hash is the primary (W4) variant, which is the stable
+    /// checkpoint-identity baseline regardless of which DiT pack is installed.
     static func productionHashes() throws -> ModelHashes {
         guard let dit = entries.first(where: { $0.component == .dit })?.sha256,
               let textEncoder = entries.first(where: { $0.component == .textEncoder })?.sha256,
@@ -86,6 +133,17 @@ enum ModelManifest {
     ) -> ModelManifestEntry {
         ModelManifestEntry(
             filename: filename, size: size, sha256: sha256,
-            url: releaseBase.appendingPathComponent(filename), component: component)
+            url: releaseBase.appendingPathComponent(filename), component: component,
+            alternates: [])
+    }
+
+    private static func entry(
+        _ filename: String, size: UInt64, sha256: String, component: ModelComponent,
+        alternates: [ModelVariant]
+    ) -> ModelManifestEntry {
+        ModelManifestEntry(
+            filename: filename, size: size, sha256: sha256,
+            url: releaseBase.appendingPathComponent(filename), component: component,
+            alternates: alternates)
     }
 }

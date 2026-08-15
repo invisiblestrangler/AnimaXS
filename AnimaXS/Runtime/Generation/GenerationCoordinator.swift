@@ -301,6 +301,7 @@ final class GenerationCoordinator: ObservableObject {
     ) {
         let metrics = MetricsCollector()
         metrics.recordOptimizationConfig(optimization)
+        metrics.recordDiTPackFilename(models.dit.lastPathComponent)
         // Observational environment telemetry (never a generation gate):
         // recorded from the coordinator/UI-safe layer, not inside Metal.
         UIDevice.current.isBatteryMonitoringEnabled = true

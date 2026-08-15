@@ -24,7 +24,6 @@ struct DiagnosticsView: View {
     @State private var previousRunWarning: String?
     @State private var exportError: String?
     @State private var exportPresented = false
-    @State private var showingW8Importer = false
     @State private var jsonURL = FileManager.default.temporaryDirectory
         .appendingPathComponent("anima-xs-diagnostics.json")
 
@@ -35,9 +34,6 @@ struct DiagnosticsView: View {
     /// Runtime inference-optimization settings (persistent, Diagnostics-only).
     @ObservedObject var optimizationSettings: InferenceOptimizationSettings
 
-    /// Experimental W8 DiT pack state (Diagnostics-only).
-    @ObservedObject var experimentalPack: ExperimentalDiTPackCatalog
-
     /// Whether a generation is currently active (controls are disabled while
     /// it runs so a toggle can never mutate an in-flight run).
     var isGenerating: Bool
@@ -47,12 +43,10 @@ struct DiagnosticsView: View {
     init(
         lastMetricsText: String? = nil,
         optimizationSettings: InferenceOptimizationSettings,
-        experimentalPack: ExperimentalDiTPackCatalog,
         isGenerating: Bool = false
     ) {
         self.lastMetricsText = lastMetricsText
         self.optimizationSettings = optimizationSettings
-        self.experimentalPack = experimentalPack
         self.isGenerating = isGenerating
     }
 
@@ -71,25 +65,6 @@ struct DiagnosticsView: View {
         .navigationTitle("Diagnostics")
         .task {
             await loadSnapshot()
-            await experimentalPack.refresh()
-        }
-        .fileImporter(
-            isPresented: $showingW8Importer,
-            allowedContentTypes: [.data],
-            allowsMultipleSelection: false
-        ) { result in
-            guard let url = try? result.get().first else { return }
-            // Files-provided URLs are security-scoped: access must be held
-            // for the ENTIRE async import (size check + SHA-256 + copy).
-            let didStart = url.startAccessingSecurityScopedResource()
-            Task {
-                defer {
-                    if didStart {
-                        url.stopAccessingSecurityScopedResource()
-                    }
-                }
-                await experimentalPack.importPack(from: url)
-            }
         }
         .fileExporter(
             isPresented: $exportPresented,
@@ -183,15 +158,6 @@ struct DiagnosticsView: View {
                 .disabled(isGenerating)
             Toggle("Numerical monitor", isOn: numericalMonitorBinding)
                 .disabled(isGenerating)
-            Picker("DiT pack", selection: ditPackBinding) {
-                Text("Production W4").tag(DiTPackVariant.productionW4)
-                Text(experimentalPack.isReady
-                     ? "Experimental W8 v2"
-                     : "Experimental W8 v2 (not imported)")
-                    .tag(DiTPackVariant.experimentalW8V2)
-            }
-            .disabled(isGenerating || !experimentalPack.isReady)
-            w8PackRow
             Button("Reset to current baseline") {
                 optimizationSettings.resetToBaseline()
             }
@@ -201,48 +167,6 @@ struct DiagnosticsView: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
-        }
-    }
-
-    /// Experimental W8 pack status + import/remove (user-triggered only).
-    /// While importing (`.verifying`) no Import button is offered, so a second
-    /// multi-gigabyte import cannot be queued. Import/Remove are also disabled
-    /// while a generation is active, so the W8 file can never be replaced or
-    /// deleted mid-inference.
-    @ViewBuilder
-    private var w8PackRow: some View {
-        let packState = experimentalPack.state
-        VStack(alignment: .leading, spacing: 4) {
-            LabeledContent("W8 v2 status", value: w8StateLabel(packState))
-            if case .ready = packState {
-                Button("Remove W8 v2", role: .destructive) {
-                    Task { await experimentalPack.remove() }
-                }
-                .font(.caption)
-                .disabled(isGenerating)
-            } else if case .verifying = packState {
-                ProgressView("Importing and verifying W8 v2…")
-                    .font(.caption)
-            } else if case .failed(let message) = packState {
-                Text(message).font(.caption2).foregroundStyle(.red)
-                Button("Import W8 v2") { showingW8Importer = true }
-                    .font(.caption)
-                    .disabled(isGenerating)
-            } else {
-                Button("Import W8 v2") { showingW8Importer = true }
-                    .font(.caption)
-                    .disabled(isGenerating)
-            }
-        }
-    }
-
-    private func w8StateLabel(_ state: ExperimentalDiTPackStore.State) -> String {
-        switch state {
-        case .missing: return "not installed"
-        case .verifying: return "verifying…"
-        case .ready: return "verified and ready"
-        case .unverified: return "installed but unverified — re-import required"
-        case .failed(let message): return "failed (\(message))"
         }
     }
 
@@ -274,12 +198,6 @@ struct DiagnosticsView: View {
         Binding(
             get: { optimizationSettings.numericalMonitoring },
             set: { optimizationSettings.setNumericalMonitoring($0) })
-    }
-
-    private var ditPackBinding: Binding<DiTPackVariant> {
-        Binding(
-            get: { optimizationSettings.ditPackVariant },
-            set: { optimizationSettings.setDiTPackVariant($0) })
     }
 
     @ViewBuilder

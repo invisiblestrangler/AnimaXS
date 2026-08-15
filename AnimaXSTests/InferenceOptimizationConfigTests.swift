@@ -15,17 +15,20 @@ final class InferenceOptimizationConfigTests: XCTestCase {
         XCTAssertFalse(baseline.directLinearMPSIO)
         XCTAssertTrue(baseline.pingPongWeightStreaming)
         XCTAssertTrue(baseline.numericalMonitoring)
-        XCTAssertEqual(baseline.ditPackVariant, .productionW4)
     }
 
     func testBaselineEnablesCheckpointing() {
         XCTAssertTrue(InferenceOptimizationConfig.currentBaseline.checkpointingEnabled)
     }
 
-    func testExperimentalW8DisablesCheckpointing() {
+    // The DiT pack is whichever variant (W4 or W8-v2) was imported into the
+    // .dit slot; it is not a config choice, and checkpointing is always on
+    // because the slot holds exactly one verified pack.
+    func testCheckpointingIsAlwaysEnabled() {
         var config = InferenceOptimizationConfig.currentBaseline
-        config.ditPackVariant = .experimentalW8V2
-        XCTAssertFalse(config.checkpointingEnabled)
+        config.linearTileRows = 1024
+        config.numericalMonitoring = false
+        XCTAssertTrue(config.checkpointingEnabled)
     }
 
     // MARK: - Allowed tile rows
@@ -54,11 +57,11 @@ final class InferenceOptimizationConfigTests: XCTestCase {
         var a = InferenceOptimizationConfig.currentBaseline
         var b = a
         b.linearTileRows = 1024
-        b.ditPackVariant = .experimentalW8V2
+        b.numericalMonitoring = false
         XCTAssertEqual(a.linearTileRows, 128)
-        XCTAssertEqual(a.ditPackVariant, .productionW4)
+        XCTAssertTrue(a.numericalMonitoring)
         XCTAssertEqual(b.linearTileRows, 1024)
-        XCTAssertEqual(b.ditPackVariant, .experimentalW8V2)
+        XCTAssertFalse(b.numericalMonitoring)
         XCTAssertEqual(a, InferenceOptimizationConfig.currentBaseline)
     }
 
@@ -101,14 +104,6 @@ final class InferenceOptimizationConfigTests: XCTestCase {
     }
 
     @MainActor
-    func testCorruptPersistedVariantSanitizesToBaseline() {
-        let defaults = makeDefaults()
-        defaults.set("not-a-variant", forKey: InferenceOptimizationSettings.Keys.ditPackVariant)
-        let settings = InferenceOptimizationSettings(defaults: defaults)
-        XCTAssertEqual(settings.ditPackVariant, .productionW4)
-    }
-
-    @MainActor
     func testResetRestoresBaselineAndPersists() {
         let defaults = makeDefaults()
         let settings = InferenceOptimizationSettings(defaults: defaults)
@@ -117,7 +112,6 @@ final class InferenceOptimizationConfigTests: XCTestCase {
         settings.setDirectLinearMPSIO(true)
         settings.setPingPongWeightStreaming(false)
         settings.setNumericalMonitoring(false)
-        settings.setDiTPackVariant(.experimentalW8V2)
         settings.resetToBaseline()
         XCTAssertEqual(settings.snapshot, InferenceOptimizationConfig.currentBaseline)
         let reloaded = InferenceOptimizationSettings(defaults: defaults)

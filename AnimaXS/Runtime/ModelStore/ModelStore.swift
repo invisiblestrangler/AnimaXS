@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Downloads, verifies, and installs the three production model packs, and
@@ -31,12 +32,22 @@ actor ModelStore {
 
     typealias Downloader = (URL) async throws -> URL
     typealias CapacityProvider = (URL) throws -> Int64
-    typealias ModelVerifier = (URL, ModelManifestEntry) throws -> Void
+    /// Full-file verification returning the matched (size, SHA-256) variant.
+    /// Default: `ModelManifest.matchedVariant` (one streaming hash pass).
+    typealias ModelVerifier = (URL, ModelManifestEntry) throws -> ModelVariant
 
     private let directory: URL
     private let downloader: Downloader
     private let availableCapacity: CapacityProvider
     private let secureInstalls: Bool
+    /// Read/write chunk size for the single-pass copy+hash stream. Production
+    /// defaults to 1 MiB (bounded memory); tests inject a tiny value to force
+    /// many stream iterations without a multi-GB fixture.
+    private let chunkBytes: Int
+    /// Verification hook for the explicit full-file re-verify paths
+    /// (`discover` on a missing/stale receipt, `verifyExisting`). Import and
+    /// download verify DURING a single streaming copy pass (`verifyAndStage`)
+    /// and do not route through this hook.
     private let verifier: ModelVerifier
     private let receiptStore: VerificationReceiptStore
     private var states: [ModelComponent: State] = [:]
@@ -48,7 +59,8 @@ actor ModelStore {
         availableCapacity: CapacityProvider? = nil,
         secureInstalls: Bool = true,
         verifier: ModelVerifier? = nil,
-        receiptsDirectory: URL? = nil
+        receiptsDirectory: URL? = nil,
+        chunkBytes: Int = 1 << 20
     ) throws {
         self.secureInstalls = secureInstalls
         if let directory {
@@ -61,7 +73,8 @@ actor ModelStore {
         }
         self.downloader = downloader ?? Self.productionDownloader()
         self.availableCapacity = availableCapacity ?? Self.defaultCapacityProvider()
-        self.verifier = verifier ?? ModelManifest.verify
+        self.verifier = verifier ?? ModelManifest.matchedVariant
+        self.chunkBytes = chunkBytes
         if let receiptsDirectory {
             self.receiptStore = VerificationReceiptStore(directory: receiptsDirectory)
         } else {
@@ -110,8 +123,8 @@ actor ModelStore {
         // download — and it runs on this actor, off the main actor.
         states[entry.component] = .verifying
         do {
-            try verifier(destination, entry)
-            writeReceipt(for: entry, at: destination)
+            let variant = try verifier(destination, entry)
+            writeReceipt(for: entry, at: destination, variant: variant)
             states[entry.component] = .ready(destination)
             return .ready(destination)
         } catch {
@@ -201,8 +214,8 @@ actor ModelStore {
         }
         states[entry.component] = .verifying
         do {
-            try verifier(destination, entry)
-            writeReceipt(for: entry, at: destination)
+            let variant = try verifier(destination, entry)
+            writeReceipt(for: entry, at: destination, variant: variant)
             states[entry.component] = .ready(destination)
             return destination
         } catch {
@@ -226,17 +239,23 @@ actor ModelStore {
     }
 
     /// Legal-block fallback: import a user-provided `.animapk` file. The file
-    /// is verified (size + SHA-256 against the manifest) exactly like a
-    /// download, then installed atomically, replacing any existing (possibly
-    /// corrupt) destination. Rejects arbitrary mismatched files. The caller is
-    /// responsible for holding security-scoped access to `source` for the
-    /// whole operation.
+    /// is verified (size + SHA-256 against the manifest's accepted variants)
+    /// while being streamed into staging exactly once, then installed
+    /// atomically, replacing any existing (possibly corrupt) destination. This
+    /// single-pass copy+hash bounds memory on multi-GB packs (W8-v2 is 2.23 GB)
+    /// instead of the previous full SHA pass followed by a full `copyItem`.
+    /// Rejects arbitrary mismatched files. The caller is responsible for
+    /// holding security-scoped access to `source` for the whole operation.
     func importPack(_ entry: ModelManifestEntry, from source: URL) async throws -> URL {
-        // Verify the source first.
-        try verifier(source, entry)
+        // Verify + copy in a single bounded-memory pass (size gate first).
+        let variant = try Self.verifyAndStage(
+            from: source, entry: entry, secureInstalls: secureInstalls,
+            installDirectory: directory, chunkBytes: chunkBytes)
+        let staging = variant.staging
+        defer { try? FileManager.default.removeItem(at: staging) }
         let destination = localURL(for: entry)
-        let finalURL = try installVerified(source, to: destination, entry: entry)
-        writeReceipt(for: entry, at: finalURL)
+        let finalURL = try installVerified(staging, to: destination, entry: entry)
+        writeReceipt(for: entry, at: finalURL, variant: variant.matched)
         states[entry.component] = .ready(finalURL)
         return finalURL
     }
@@ -287,6 +306,97 @@ actor ModelStore {
 
     // MARK: - Private
 
+    /// Single-pass bounded-memory verify + stage. Streams `source` into an
+    /// app-owned staging file in the install directory EXACTLY ONCE while
+    /// incrementally computing SHA-256, then matches the result against the
+    /// entry's accepted variants (W4 or W8-v2 for the DiT slot). This replaces
+    /// the old full SHA pass + full `copyItem` pass, removing ~2.23 GB of
+    /// redundant I/O for the W8-v2 pack and bounding per-chunk memory on the
+    /// physical device.
+    ///
+    /// - Returns: the staging URL (already in the install directory, ready to
+    ///   be secured + atomically installed) and the matched variant.
+    /// - Throws on read/write failure, size mismatch at stat or EOF, or a
+    ///   digest that matches no accepted variant. On any throw the staging
+    ///   file is removed.
+    static func verifyAndStage(
+        from source: URL, entry: ModelManifestEntry,
+        secureInstalls: Bool, installDirectory: URL, chunkBytes: Int = 1 << 20
+    ) throws -> (staging: URL, matched: ModelVariant) {
+        guard chunkBytes > 0 else {
+            throw AnimapkError.validation("model import chunk size must be positive")
+        }
+        guard let sourceSize = (try? FileManager.default.attributesOfItem(atPath: source.path))?[.size] as? NSNumber else {
+            throw AnimapkError.validation("unable to read model file size")
+        }
+        let expectedSize: UInt64 = sourceSize.uint64Value
+        // Cheap size gate: the source must match one accepted variant size
+        // BEFORE we stream anything.
+        guard entry.allVariants.contains(where: { $0.size == expectedSize }) else {
+            throw AnimapkError.validation(
+                "model size does not match any manifest variant for \(entry.component.rawValue)")
+        }
+
+        let staging = installDirectory.appendingPathComponent(
+            ".\(entry.filename).staging-\(UUID().uuidString)")
+
+        // On success the CALLER owns `staging` (it installs/moves it, and its
+        // own defer cleans up on later failure). On any failure BEFORE a clean
+        // return, remove the partial staging file here so no `.<name>.staging-*`
+        // is ever left behind (size mismatch, read/write failure, digest
+        // mismatch, or a thrown `secure()`).
+        var handoff = false
+        defer {
+            if !handoff {
+                try? FileManager.default.removeItem(at: staging)
+            }
+        }
+
+        let sourceHandle = try FileHandle(forReadingFrom: source)
+        defer { try? sourceHandle.close() }
+        let created = FileManager.default.createFile(atPath: staging.path, contents: nil)
+        guard created else {
+            throw AnimapkError.validation("failed to create staging file for model import")
+        }
+        let stagingHandle = try FileHandle(forWritingTo: staging)
+        defer { try? stagingHandle.close() }
+
+        var digest = SHA256()
+        var bytesCopied: UInt64 = 0
+        while true {
+            let reachedEOF = try autoreleasepool { () throws -> Bool in
+                let data = try sourceHandle.read(upToCount: chunkBytes) ?? Data()
+                guard !data.isEmpty else { return true }
+                digest.update(data: data)
+                try stagingHandle.write(contentsOf: data)
+                bytesCopied += UInt64(data.count)
+                if bytesCopied > expectedSize {
+                    throw AnimapkError.validation(
+                        "model size changed while importing (\(entry.component.rawValue))")
+                }
+                return false
+            }
+            if reachedEOF { break }
+        }
+        guard bytesCopied == expectedSize else {
+            throw AnimapkError.validation(
+                "model size mismatch: got \(bytesCopied), expected \(expectedSize)")
+        }
+        let hex = digest.finalize().map { String(format: "%02x", $0) }.joined()
+        guard let variant = entry.allVariants.first(where: { $0.sha256.lowercased() == hex }) else {
+            throw AnimapkError.validation(
+                "model SHA-256 does not match manifest for \(entry.component.rawValue)")
+        }
+        if secureInstalls {
+            try secure(staging)
+        }
+        // Hand the staging file to the caller (it installs/moves it into
+        // place and cleans up on any later failure). Suppress the local
+        // cleanup so the file survives past this function's return.
+        handoff = true
+        return (staging, variant)
+    }
+
     private func downloadAndInstall(
         _ entry: ModelManifestEntry, destination: URL
     ) async throws -> URL {
@@ -308,9 +418,13 @@ actor ModelStore {
             // verification + install complete.
             defer { try? FileManager.default.removeItem(at: downloaded) }
             states[entry.component] = .verifying
-            try verifier(downloaded, entry)
-            let finalURL = try installVerified(downloaded, to: destination, entry: entry)
-            writeReceipt(for: entry, at: finalURL)
+            let variant = try Self.verifyAndStage(
+                from: downloaded, entry: entry, secureInstalls: secureInstalls,
+                installDirectory: directory, chunkBytes: chunkBytes)
+            let staging = variant.staging
+            defer { try? FileManager.default.removeItem(at: staging) }
+            let finalURL = try installVerified(staging, to: destination, entry: entry)
+            writeReceipt(for: entry, at: finalURL, variant: variant.matched)
             states[entry.component] = .ready(finalURL)
             return finalURL
         } catch {
@@ -326,28 +440,23 @@ actor ModelStore {
     /// - Returns: the final installed URL (may differ from `destination` when
     ///   the system performs a true replace).
     private func installVerified(_ source: URL, to destination: URL, entry: ModelManifestEntry) throws -> URL {
-        let staging = directory.appendingPathComponent(
-            ".\(entry.filename).staging-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: staging) }
-        try FileManager.default.copyItem(at: source, to: staging)
-        if secureInstalls {
-            try secure(staging)
-        }
+        // The staging file is already secured inside `verifyAndStage` when
+        // `secureInstalls` is true; `source` here is that staging file.
         if FileManager.default.fileExists(atPath: destination.path) {
             // Replace (not move): moveItem cannot overwrite an existing file,
             // which would block every repair/import over a corrupt destination.
             guard let replaced = try FileManager.default.replaceItemAt(
-                destination, withItemAt: staging) else {
+                destination, withItemAt: source) else {
                 throw AnimapkError.validation(
                     "failed to replace existing model file at \(destination.path)")
             }
             return replaced
         }
-        try FileManager.default.moveItem(at: staging, to: destination)
+        try FileManager.default.moveItem(at: source, to: destination)
         return destination
     }
 
-    private func secure(_ url: URL) throws {
+    private static func secure(_ url: URL) throws {
         var values = URLResourceValues()
         values.isExcludedFromBackup = true
         var mutableURL = url
@@ -362,12 +471,15 @@ actor ModelStore {
     private func receiptIsValid(for entry: ModelManifestEntry, at url: URL) -> Bool {
         guard let receipt = receiptStore.receipt(for: entry.filename),
               receipt.schemaVersion == VerificationReceipt.currentSchemaVersion,
-              receipt.expectedSize == entry.size,
-              receipt.expectedSHA256 == entry.sha256.lowercased(),
-              receipt.installedSize == entry.size,
+              // The receipt records the ACTUAL matched variant (W4 or W8-v2 for
+              // the DiT slot), which must still be an accepted variant today.
+              entry.allVariants.contains(where: {
+                  $0.size == receipt.expectedSize && $0.sha256.lowercased() == receipt.expectedSHA256
+              }),
+              receipt.installedSize == receipt.expectedSize,
               let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
               let size = (attributes[.size] as? NSNumber)?.uint64Value,
-              size == entry.size else {
+              size == receipt.expectedSize else {
             return false
         }
         // File metadata must still match the receipt: a rewrite (or touch)
@@ -380,18 +492,22 @@ actor ModelStore {
     }
 
     /// Best-effort: a failed receipt write only costs one full verification on
-    /// the next launch — it never blocks readiness.
-    private func writeReceipt(for entry: ModelManifestEntry, at url: URL) {
+    /// the next launch — it never blocks readiness. The receipt records the
+    /// matched variant (size + SHA-256) so discovery accepts whichever pack
+    /// (W4 or W8-v2) was actually installed into the slot.
+    private func writeReceipt(
+        for entry: ModelManifestEntry, at url: URL, variant: ModelVariant
+    ) {
         var receipts = receiptStore.load()
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
         receipts[entry.filename] = VerificationReceipt(
             schemaVersion: VerificationReceipt.currentSchemaVersion,
             component: entry.component,
             filename: entry.filename,
-            expectedSize: entry.size,
-            expectedSHA256: entry.sha256.lowercased(),
+            expectedSize: variant.size,
+            expectedSHA256: variant.sha256.lowercased(),
             verifiedAt: Date(),
-            installedSize: (attributes?[.size] as? NSNumber)?.uint64Value ?? entry.size,
+            installedSize: (attributes?[.size] as? NSNumber)?.uint64Value ?? variant.size,
             installedModificationDate: attributes?[.modificationDate] as? Date)
         try? receiptStore.save(receipts)
     }

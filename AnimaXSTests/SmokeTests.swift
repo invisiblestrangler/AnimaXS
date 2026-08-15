@@ -106,6 +106,40 @@ final class SmokeTests: XCTestCase {
         XCTAssertThrowsError(try ModelManifest.sha256(of: url, chunkBytes: 0))
     }
 
+    /// The DiT slot accepts the W8-v2 pack as an alternate variant; its pinned
+    /// size/SHA must match the HuggingFace LFS metadata exactly (verified
+    /// 2026-08-15 via the tree API). This pins the constants so a
+    /// digit-transcription error (like the 2_232_973_560 vs 2_232_975_360 flip
+    /// that rejected every import) is caught in CI without downloading the
+    /// 2.23 GB pack.
+    func testDiTSlotAcceptsPinnedW8V2Variant() throws {
+        let dit = try XCTUnwrap(ModelManifest.entries.first { $0.component == .dit })
+        let w8 = try XCTUnwrap(dit.alternates.first)
+        XCTAssertEqual(dit.alternates.count, 1, "the DiT slot accepts exactly one alternate (W8-v2)")
+        XCTAssertEqual(w8.size, 2_232_975_360,
+                       "must match HuggingFace LFS size for the pinned revision")
+        XCTAssertEqual(
+            w8.sha256,
+            "8b63c7fd9b5872805e5a2ba799ab6d79989c54a6a89a4f34edf022c59c9ed130")
+        // The primary W4 variant must remain untouched.
+        XCTAssertEqual(dit.size, 1_179_435_008)
+        XCTAssertEqual(
+            dit.sha256,
+            "ba1ce615f03665812f05088f9239f0cb23591a0811067d57fa51773abf6f0d25")
+    }
+
+    /// A file matching no accepted DiT variant must be rejected by the
+    /// variant matcher (import/verify gate).
+    func testDiTRejectsNonVariantFile() throws {
+        let dit = try XCTUnwrap(ModelManifest.entries.first { $0.component == .dit })
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-w8variant-\(UUID().uuidString)")
+        // 3 bytes of "abc": matches no production variant, must be rejected.
+        try Data("abc".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        XCTAssertThrowsError(try ModelManifest.matchedVariant(of: url, against: dit))
+    }
+
     /// 5.6 — `ModelManifest.sha256(of:chunkBytes:)` must hash a file correctly
     /// when a deliberately tiny chunk forces many iterations, and agree with
     /// CryptoKit's one-shot digest. Uses a deterministic few-KiB fixture, not a
