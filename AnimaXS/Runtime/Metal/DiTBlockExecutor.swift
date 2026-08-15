@@ -120,6 +120,17 @@ final class DiTBlockExecutor {
 
         let encodeEnd = ProcessInfo.processInfo.systemUptime
         streamer.markInFlight(slot)
+        // Metal requires the completed handler to be registered BEFORE commit
+        // (addCompletedHandler after commit is a hard assertion). Store the
+        // continuation in a gate, register the handler, commit, then run the
+        // next-block prefetch memcpy while the GPU executes, and finally await.
+        let gate = CommandBufferGate()
+        let slotStreamer = streamer
+        command.addCompletedHandler { [weak slotStreamer] completed in
+            slotStreamer?.complete(slot)
+            if let error = completed.error { gate.resume(throwing: error) }
+            else { gate.resume() }
+        }
         command.commit()
         // Ping-pong prefetch: copy the next block's weights into the other
         // slot while this command buffer executes on the GPU. Safe because the
@@ -138,14 +149,7 @@ final class DiTBlockExecutor {
                 prefetchError = error
             }
         }
-        let slotStreamer = streamer
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            command.addCompletedHandler { [weak slotStreamer] completed in
-                slotStreamer?.complete(slot)
-                if let error = completed.error { continuation.resume(throwing: error) }
-                else { continuation.resume() }
-            }
-        }
+        try await gate.wait()
         if let prefetchError { throw prefetchError }
         let done = ProcessInfo.processInfo.systemUptime
         let gpuSeconds = (command.gpuStartTime > 0 && command.gpuEndTime >= command.gpuStartTime)
@@ -675,6 +679,43 @@ final class DiTBlockExecutor {
         ]
         for (buffer, bytes, label) in requirements where buffer.length < bytes {
             throw AnimapkError.validation("DiT \(label) buffer is too small")
+        }
+    }
+}
+
+/// Await gate for a committed MTLCommandBuffer whose completion handler must be
+/// registered BEFORE `commit()` (Metal asserts on late handlers). The handler
+/// fires on a Metal queue thread; the awaiting task resumes via the stored
+/// continuation. Safe whether the handler fires before or after `wait()`.
+private final class CommandBufferGate {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var outcome: Result<Void, Error>?
+
+    func resume(throwing error: Error? = nil) {
+        lock.lock()
+        if let continuation {
+            self.continuation = nil
+            lock.unlock()
+            if let error { continuation.resume(throwing: error) }
+            else { continuation.resume() }
+        } else {
+            if let error { outcome = .failure(error) }
+            else { outcome = .success(()) }
+            lock.unlock()
+        }
+    }
+
+    func wait() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            lock.lock()
+            if let outcome {
+                lock.unlock()
+                continuation.resume(with: outcome)
+            } else {
+                self.continuation = continuation
+                lock.unlock()
+            }
         }
     }
 }

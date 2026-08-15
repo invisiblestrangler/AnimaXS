@@ -98,6 +98,19 @@ No thermal logic. No silent clamping. No global FP32. Small, reversible commits.
 - `DiffusionSampler.numericalReport` / `earliestNumericalIssue` accessors for
   the harness.
 
+### D205 — Two-slot streamer crash found by CI + fixed
+- The first full-inference run on the branch CRASHED the test host:
+  `-[_MTLCommandBuffer addCompletedHandler:]:976: failed assertion 'Completed
+  handler provided after commit call'` — the ping-pong restructure committed the
+  block command buffer BEFORE registering its completion handler (Metal hard
+  assertion). The golden-case test therefore never ran its correctness gates.
+- Fix: `CommandBufferGate` — the handler is registered BEFORE `commit()`, then
+  the next-block prefetch memcpy runs, then `wait()` resumes via the stored
+  continuation. The gate is correct in both orderings (resume-before-wait and
+  wait-before-resume, with error propagation). Regression tests cover both.
+- Lesson: never move `addCompletedHandler` after `commit()` when restructuring
+  Metal awaits; keep handler registration adjacent to commit.
+
 ## Open questions
 - Which boundary is the actual first-unsafe site on A12? (Instrument → stress →
   attribute; do not guess.)
