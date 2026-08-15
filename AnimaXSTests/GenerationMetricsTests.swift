@@ -100,9 +100,10 @@ final class GenerationMetricsTests: XCTestCase {
         collector.finalize(totalWall: 100)
 
         let text = collector.snapshot().summaryText
-        // Config snapshot.
+        // Config snapshot. (No DiT pack file was recorded for this run, so the
+        // summary reports "unknown".)
         XCTAssertTrue(text.contains("Inference configuration"))
-        XCTAssertTrue(text.contains("DiT pack: W4 production"))
+        XCTAssertTrue(text.contains("DiT pack: unknown"))
         XCTAssertTrue(text.contains("Linear tile rows: 1024"))
         XCTAssertTrue(text.contains("Attention tile rows: 512"))
         XCTAssertTrue(text.contains("Direct MPS linear I/O: on"))

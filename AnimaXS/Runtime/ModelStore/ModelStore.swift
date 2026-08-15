@@ -251,8 +251,10 @@ actor ModelStore {
         let variant = try Self.verifyAndStage(
             from: source, entry: entry, secureInstalls: secureInstalls,
             installDirectory: directory, chunkBytes: chunkBytes)
+        let staging = variant.staging
+        defer { try? FileManager.default.removeItem(at: staging) }
         let destination = localURL(for: entry)
-        let finalURL = try installVerified(variant.staging, to: destination, entry: entry)
+        let finalURL = try installVerified(staging, to: destination, entry: entry)
         writeReceipt(for: entry, at: finalURL, variant: variant.matched)
         states[entry.component] = .ready(finalURL)
         return finalURL
@@ -337,7 +339,6 @@ actor ModelStore {
 
         let staging = installDirectory.appendingPathComponent(
             ".\(entry.filename).staging-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: staging) }
 
         let sourceHandle = try FileHandle(forReadingFrom: source)
         defer { try? sourceHandle.close() }
@@ -377,6 +378,9 @@ actor ModelStore {
         if secureInstalls {
             try secure(staging)
         }
+        // NOTE: the caller is responsible for installing (moving) `staging`
+        // into place AND for removing it on any later failure. It is returned
+        // intact here; its lifecycle extends past this function's return.
         return (staging, variant)
     }
 
@@ -404,7 +408,9 @@ actor ModelStore {
             let variant = try Self.verifyAndStage(
                 from: downloaded, entry: entry, secureInstalls: secureInstalls,
                 installDirectory: directory, chunkBytes: chunkBytes)
-            let finalURL = try installVerified(variant.staging, to: destination, entry: entry)
+            let staging = variant.staging
+            defer { try? FileManager.default.removeItem(at: staging) }
+            let finalURL = try installVerified(staging, to: destination, entry: entry)
             writeReceipt(for: entry, at: finalURL, variant: variant.matched)
             states[entry.component] = .ready(finalURL)
             return finalURL
