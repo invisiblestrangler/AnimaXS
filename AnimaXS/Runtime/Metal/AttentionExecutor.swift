@@ -195,7 +195,7 @@ final class AttentionExecutor {
                                 threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
         encoder.endEncoding()
         // P2-C: fp16 elements materialized by the BF16 round-trip (counted once).
-        metrics?.recordConversionBytes(UInt64(count * MemoryLayout<Float16>.stride))
+        metrics?.recordConversionBytes(UInt64(Int(count) * MemoryLayout<Float16>.stride))
     }
 
     private func encodeFP32(
