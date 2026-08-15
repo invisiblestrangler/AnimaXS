@@ -340,6 +340,18 @@ actor ModelStore {
         let staging = installDirectory.appendingPathComponent(
             ".\(entry.filename).staging-\(UUID().uuidString)")
 
+        // On success the CALLER owns `staging` (it installs/moves it, and its
+        // own defer cleans up on later failure). On any failure BEFORE a clean
+        // return, remove the partial staging file here so no `.<name>.staging-*`
+        // is ever left behind (size mismatch, read/write failure, digest
+        // mismatch, or a thrown `secure()`).
+        var handoff = false
+        defer {
+            if !handoff {
+                try? FileManager.default.removeItem(at: staging)
+            }
+        }
+
         let sourceHandle = try FileHandle(forReadingFrom: source)
         defer { try? sourceHandle.close() }
         let created = FileManager.default.createFile(atPath: staging.path, contents: nil)
@@ -378,9 +390,10 @@ actor ModelStore {
         if secureInstalls {
             try secure(staging)
         }
-        // NOTE: the caller is responsible for installing (moving) `staging`
-        // into place AND for removing it on any later failure. It is returned
-        // intact here; its lifecycle extends past this function's return.
+        // Hand the staging file to the caller (it installs/moves it into
+        // place and cleans up on any later failure). Suppress the local
+        // cleanup so the file survives past this function's return.
+        handoff = true
         return (staging, variant)
     }
 
