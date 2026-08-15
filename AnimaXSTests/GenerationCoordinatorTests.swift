@@ -880,7 +880,7 @@ final class GenerationCoordinatorTests: XCTestCase {
     // silently folded into "Other".
     func testThrownDiffusionStageRecordsNonzeroDiffusionTime() async throws {
         let context = try makeContext()
-        struct ThrowingSampler: DiffusionStage {
+        final class ThrowingSampler: DiffusionStage {
             func execute(
                 initialLatent: MTLBuffer, crossContext: MTLBuffer, outputLatent: MTLBuffer,
                 startStep: Int,
