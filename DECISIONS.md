@@ -212,3 +212,33 @@ No thermal logic. No silent clamping. No global FP32. Small, reversible commits.
   jetsam** until the new build is re-tested on the physical iPhone XS Max (see
   DEVICE_TESTS.md). This patch removes the concrete high-risk multi-GB import
   behavior already identified in the code.
+
+---
+
+## W8 v2 becomes a normal DiT pack (main page) — decisions (append-only)
+
+- **The experimental W8 special path is removed.** `ExperimentalDiTPackStore`,
+  `ExperimentalDiTPackCatalog`, `ExperimentalDiTManifest`, and the
+  `DiTPackVariant` picker/per-run substitution are deleted. K's directive:
+  "have it load the normal way like w4 at main page and remove it from the
+  diagnostics page. The user can then import either w4 or w8-v2."
+- **The `.dit` slot accepts either W4 (primary) or W8-v2 (alternate).**
+  `ModelManifestEntry.allVariants` lists accepted (size, SHA-256) pairs;
+  `matchedVariant`/`verify` accept the primary or any alternate. Whichever
+  pack the user imports into the Models row is the DiT a generation uses.
+  Importing W8 over W4 replaces it; discovery trusts the receipt for either.
+- **Receipts record the ACTUAL matched variant** (size + SHA-256), so a
+  relaunch trusts whichever pack (W4 or W8-v2) was installed without re-hashing.
+- **The single-pass streaming import moved into the normal path.**
+  `ModelStore.verifyAndStage` streams source → staging exactly once (1 MiB
+  chunks, `autoreleasepool` per chunk), computes SHA-256 during the copy, and
+  matches against the accepted variants. It is shared by download and manual
+  import. The production `ModelStore.importPack` no longer does a separate
+  full-SHA pass + `FileManager.copyItem`. This preserves the W8 crash fix on
+  the normal path while removing the old two-pass behavior.
+- **Generation config no longer carries a DiT variant.** Checkpointing is
+  always on (the slot holds one verified pack, so no separate experimental
+  state can collide). Run metrics report the actual DiT pack filename.
+- **Tests:** multi-chunk streaming import, alternate-variant import/replace/
+  receipt, SHA-mismatch cleanup, and the W8-v2 manifest pin live in
+  `ModelStoreTests`/`SmokeTests`. No 2.23 GB pack in CI.

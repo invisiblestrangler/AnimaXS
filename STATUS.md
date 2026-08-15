@@ -90,3 +90,27 @@ The first physical-device run exposed bugs that simulator/CI did not catch:
 - **CI:** PASS (run `31883123045`) — project-consistency ✓, iphone-build ✓,
   simulator-tests ✓ (270 tests, 0 failures, 14 real-pack-gated skips). Final
   acceptance = physical device retest (DEVICE_TESTS.md checklist).
+- **Superseded** by the W8-as-normal-pack refactor below.
+
+## W8 v2 is now a normal DiT pack (main page), not a Diagnostics experiment (2026-08-15)
+
+- **Branch:** `fix/w8-import-refactor` (off `origin/main` `15f9c81`)
+- **Decision (K):** "have it load the normal way like w4 at main page and
+  remove it from the diagnostics page. The user can then import either w4 or
+  w8-v2."
+- The experimental W8 special path is **removed** (deleted
+  `ExperimentalDiTPackStore`/`ExperimentalDiTPackCatalog`/
+  `ExperimentalDiTManifest` and the `DiTPackVariant` picker/substitution).
+- W8-v2 is now an **alternate variant** of the production `.dit` slot in
+  `ModelManifest`: whichever pack (W4 or W8-v2) you import into the main-page
+  Models row is the DiT a generation uses. Importing W8 over W4 replaces it;
+  discovery is receipt-cheap for either variant.
+- The **single-pass streaming import** (the crash fix) now lives in the normal
+  `ModelStore.verifyAndStage` (1 MiB chunks, autoreleasepool per chunk),
+  shared by download and manual import. The old full-SHA + `copyItem` two-pass
+  is gone from the normal path too.
+- Generation config no longer carries a DiT variant; checkpointing is always
+  on; run metrics report the actual DiT pack filename.
+- **CI:** PASS (run `31888994142`) — project-consistency ✓, iphone-build ✓,
+  simulator-tests ✓ (262 tests, 0 failures, 14 real-pack-gated skips).
+  Final acceptance = physical device retest (DEVICE_TESTS.md checklist).
