@@ -158,10 +158,10 @@ actor ModelStore {
     func resolveInstalledModels(
         entries: [ModelManifestEntry] = ModelManifest.entries
     ) async throws -> ResolvedModels {
-        var byComponent: [ModelComponent: URL] = [:]
+        var byComponent: [ModelComponent: ResolvedModelPack] = [:]
         for entry in entries {
             if case .ready(let url) = await discover(entry) {
-                byComponent[entry.component] = url
+                byComponent[entry.component] = try resolvedPack(entry: entry, url: url)
             }
         }
         guard let textEncoder = byComponent[.textEncoder],
@@ -171,6 +171,24 @@ actor ModelStore {
                 "incomplete production model set (local discovery only)")
         }
         return ResolvedModels(textEncoder: textEncoder, dit: dit, vae: vae)
+    }
+
+    /// Builds a `ResolvedModelPack` for a ready slot from the slot's valid
+    /// verification receipt. The receipt already records the ACTUAL matched
+    /// variant (W4 or W8-v2 for the DiT slot), so this is a metadata read —
+    /// it never re-hashes the pack.
+    private func resolvedPack(
+        entry: ModelManifestEntry, url: URL
+    ) throws -> ResolvedModelPack {
+        guard let receipt = receiptStore.receipt(for: entry.filename),
+              let variant = try? ModelManifest.descriptor(
+                  for: entry,
+                  matchedSize: receipt.expectedSize,
+                  matchedSHA256: receipt.expectedSHA256) else {
+            throw AnimapkError.validation(
+                "valid receipt for \\(entry.component.rawValue) but no manifest variant matches")
+        }
+        return ResolvedModelPack(url: url, component: entry.component, variant: variant)
     }
 
     /// Cheap, hashing-free file facts for diagnostics snapshots: existence,

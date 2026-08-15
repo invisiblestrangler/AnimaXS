@@ -12,11 +12,12 @@ Working tree: clean (at P0 commit; local edits to state file not yet committed)
 - P1 IN PROGRESS: P1-A foundation committed as WIP `48cf0a7` (ModelVariantDescriptor, ditW4/ditW8V2, descriptor(for:), ResolvedModels→ResolvedModelPack reshape with .hashes, GenerationMetrics.recordDiTPackIdentity). First subagent attempt (deleg_f4593fac9) interrupted mid-inference (no changes); second attempt (deleg_f6307e41) hit iteration budget after P1-A foundation.
 
 ## Current exact objective
-- Continue P1 from commit `48cf0a7`. Complete P1-A consumers (ModelStore.resolveInstalledModels builds ResolvedModelPack from receipts; GenerationCoordinator variant telemetry), then P1-B checkpoint identity, P1-C numerics policy, P1-D final-layer BF16 boundary, P1-E error attribution, P1-F stage timing, P1-G numerical bookkeeping, P1-H cancellation reasons. Then CI + P1 gate.
+- P1-A COMPLETE (committing now): ResolvedModels→ResolvedModelPack reshape + ModelStore builds packs from receipts + GenerationCoordinator variant telemetry + checkpoint identity uses models.hashes + test doubles updated.
+- Next (same P1): P1-B checkpoint cross-variant tests, P1-C numerics policy, P1-D final-layer BF16 boundary, P1-E error attribution, P1-F stage timing, P1-G numerical bookkeeping, P1-H cancellation reasons. Then CI + P1 gate.
 
 ## Current files being modified
-- Committed: ModelManifest.swift, GenerationEngine.swift, GenerationMetrics.swift (48cf0a7).
-- Next: ModelStore.swift (build ResolvedModelPack from receipt), GenerationCoordinator.swift (telemetry + checkpoint identity + cancellation), DiffusionSampler.swift, DiTFinalLayerExecutor.swift, DitForward.swift, DiTBlockExecutor.swift, NumericalFailure.swift, AnimaXSTests/*, scripts/dit_source_oracle.py.
+- P1-A committed: ModelManifest.swift, GenerationEngine.swift, GenerationMetrics.swift (48cf0a7); + ModelStore.swift, GenerationCoordinator.swift, GenerationCoordinatorTests.swift, ResumeEquivalenceTests.swift, InferenceOptimizationCoordinatorTests.swift, GenerationMetricsTests.swift, ModelStoreTests.swift (now).
+- Next: DiffusionSampler.swift, DiTFinalLayerExecutor.swift, DitForward.swift, DiTBlockExecutor.swift, NumericalFailure.swift, scripts/dit_source_oracle.py, more AnimaXSTests.
 
 ## Invariants that must not regress
 - W4 known-good path

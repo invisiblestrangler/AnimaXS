@@ -209,7 +209,7 @@ final class GenerationCoordinator: ObservableObject {
             return
         }
         do {
-            let hashes = try ModelManifest.productionHashes()
+            let hashes = models.hashes
             let store = try checkpointStore ?? CheckpointStore()
             _ = try store.validate(
                 checkpoint, prompt: prompt, seed: seed,
@@ -231,9 +231,6 @@ final class GenerationCoordinator: ObservableObject {
             from: latent, byteCount: latent.count * 4)
         generationEpoch += 1
         state = .tokenizing
-        // Resume is production-W4 only: it reconstructs the same checkpoint
-        // state and is not a performance-comparison vehicle (per the runtime
-        // experiment runbook, use fresh Generate for benchmarks).
         run(engine: GenerationEngine(context: context, factory: factory),
             prompt: prompt, seed: seed, models: models,
             noise: noise ?? buffer, startStep: checkpoint.step,
@@ -301,7 +298,11 @@ final class GenerationCoordinator: ObservableObject {
     ) {
         let metrics = MetricsCollector()
         metrics.recordOptimizationConfig(optimization)
-        metrics.recordDiTPackFilename(models.dit.lastPathComponent)
+        metrics.recordDiTPackIdentity(
+            id: models.dit.variant.id,
+            filename: models.dit.variant.displayFilename,
+            sha256: models.dit.variant.sha256,
+            bytes: models.dit.variant.size)
         // Observational environment telemetry (never a generation gate):
         // recorded from the coordinator/UI-safe layer, not inside Metal.
         UIDevice.current.isBatteryMonitoringEnabled = true
@@ -326,11 +327,10 @@ final class GenerationCoordinator: ObservableObject {
                         }
                     },
                     checkpoint: { [weak self] completedStep, latent in
-                        // Experimental W8 runs never persist checkpoints: the
-                        // production W4 hash set does not describe the W8 pack,
-                        // and a W8 checkpoint must not resurrect unrelated
-                        // production Resume state. Production W4 keeps the
-                        // current-HEAD checkpoint behavior exactly.
+                        // Checkpoint identity uses the ACTUAL resolved model
+                        // hashes (models.hashes), so a W8 checkpoint is stamped
+                        // with the W8 hashes and can never validate against a
+                        // W4 pack (and vice versa).
                         guard optimization.checkpointingEnabled,
                               let self else { return }
                         // Persist the full-metadata checkpoint immediately so
@@ -347,7 +347,7 @@ final class GenerationCoordinator: ObservableObject {
                             prompt: prompt, seed: seed,
                             width: ModelConstants.imageSize,
                             height: ModelConstants.imageSize,
-                            modelHashes: try ModelManifest.productionHashes()) else {
+                            modelHashes: models.hashes) else {
                             return
                         }
                         // Apply on the main actor, but only while this run is

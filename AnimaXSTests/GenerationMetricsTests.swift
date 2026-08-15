@@ -127,14 +127,19 @@ final class GenerationMetricsTests: XCTestCase {
         XCTAssertTrue(text.contains("Low Power Mode: off -> off"))
     }
 
-    /// The summary reports which DiT pack file ran and that checkpointing is
+    /// The summary reports which DiT pack variant ran and that checkpointing is
     /// always on (the DiT slot holds one verified pack).
     func testSummaryReportsDiTPackFilenameAndCheckpointing() {
         let collector = MetricsCollector()
-        collector.recordDiTPackFilename("anima-turbo-v1.0-xsmax-w8-v2.animapk")
+        collector.recordDiTPackIdentity(
+            id: "w8-v2",
+            filename: "anima-turbo-v1.0-xsmax-w8-v2.animapk",
+            sha256: "8b63c7fd9b5872805e5a2ba799ab6d79989c54a6a89a4f34edf022c59c9ed130",
+            bytes: 2_232_975_360)
         collector.finalize(totalWall: 100)
         let text = collector.snapshot().summaryText
         XCTAssertTrue(text.contains("DiT pack: anima-turbo-v1.0-xsmax-w8-v2.animapk"))
+        XCTAssertTrue(text.contains("(w8-v2)"))
         XCTAssertTrue(text.contains("Checkpointing: on"))
     }
 }

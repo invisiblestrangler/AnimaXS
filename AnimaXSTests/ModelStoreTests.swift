@@ -374,9 +374,9 @@ final class ModelStoreTests: XCTestCase {
         })
         let resolved = try await store.resolveInstalledModels(entries: entries)
         XCTAssertEqual(Set([resolved.textEncoder, resolved.dit, resolved.vae]).count, 3)
-        XCTAssertTrue(resolved.textEncoder.lastPathComponent.contains("qwen3"))
-        XCTAssertTrue(resolved.dit.lastPathComponent.contains("anima-turbo"))
-        XCTAssertTrue(resolved.vae.lastPathComponent.contains("vae"))
+        XCTAssertTrue(resolved.textEncoder.url.lastPathComponent.contains("qwen3"))
+        XCTAssertTrue(resolved.dit.url.lastPathComponent.contains("anima-turbo"))
+        XCTAssertTrue(resolved.vae.url.lastPathComponent.contains("vae"))
     }
 
     // MARK: - Verification receipts (real-device fix B)
@@ -898,9 +898,9 @@ final class ModelStoreTests: XCTestCase {
 
         let resolved = try await store.resolveInstalledModels(entries: entries)
         XCTAssertEqual(Set([resolved.textEncoder, resolved.dit, resolved.vae]).count, 3)
-        XCTAssertTrue(resolved.textEncoder.lastPathComponent.contains("qwen3"))
-        XCTAssertTrue(resolved.dit.lastPathComponent.contains("anima-turbo"))
-        XCTAssertTrue(resolved.vae.lastPathComponent.contains("vae"))
+        XCTAssertTrue(resolved.textEncoder.url.lastPathComponent.contains("qwen3"))
+        XCTAssertTrue(resolved.dit.url.lastPathComponent.contains("anima-turbo"))
+        XCTAssertTrue(resolved.vae.url.lastPathComponent.contains("vae"))
     }
 
     /// Best-effort temp cleanup that can never throw or fail the test.
