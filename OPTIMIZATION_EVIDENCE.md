@@ -64,3 +64,12 @@ result: ALL PASS. simulator-tests ✓ (302 tests, 14 expected skips, 0 failures)
 key metrics: 10 new P6 tests (WeightStreamerTests testP6*). Adds noCopyWeightSource toggle (default OFF), WeightStorageMode/WeightNoCopyPolicy, WeightStorageView, mmap no-copy MTLBuffer source with safe fallback; recordMmapNoCopyBytes metric. Fixed: added optimization property to DiTPreparation/DiTFinalLayer executors; added GenerationMetrics.mmapNoCopyBytes global field.
 artifact/run id: 31915690478 (PR #17 draft)
 interpretation: P6 gate met. mmap no-copy is experimental (behind toggle, default OFF); copied ping-pong retained. Next: P7.
+
+## 2026-08-15 (P6) — Normal CI green on P6 (mmap no-copy weight source)
+HEAD: e0b6109 (P6 complete on opt/a12-sustained-io)
+command: gh workflow run ci.yml --ref opt/a12-sustained-io; gh run watch 31915690478
+configuration: normal CI (ci.yml): project-consistency, simulator-tests, iphone-build
+result: ALL PASS. project-consistency ✓, simulator-tests ✓ (302 tests, 14 expected skips, 0 failures), iphone-build ✓.
+key metrics: 0 failures. Adds WeightStorageMode (copied/noCopy) + WeightLoadResult + WeightNoCopyPolicy (page-aligned eligibility; makeBuffer(bytesNoCopy:) MTLBuffer alias over the mmap'd pack region, deallocator nil so AnimapkFile retains the mmap). noCopyWeightSource toggle (default OFF) wired through DiTBlock/DiTPreparation/DiTFinalLayer executors; WeightStreamer.load(mode:) with no-copy fast path + copied fallback; buffer(for:) returns the alias on the no-copy path; recordMmapNoCopyBytes + summary "Weight bytes served mmap no-copy". Qwen/VAE/LLMAdapter unchanged (DiT-scoped). Fixed: added GenerationMetrics.mmapNoCopyBytes global field + stored optimization snapshot in DiTPreparation/DiTFinalLayer executors.
+artifact/run id: 31915690478 (PR #17 draft)
+interpretation: P6 gate met. no-copy gated behind toggle (W4 default unchanged); page-aligned-only with safe copied fallback; device decides speed benefit later. Next: P7.
