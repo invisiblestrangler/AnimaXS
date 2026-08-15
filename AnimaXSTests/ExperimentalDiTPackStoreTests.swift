@@ -124,7 +124,8 @@ final class ExperimentalDiTPackStoreTests: XCTestCase {
         } catch {
             XCTAssertTrue(error.localizedDescription.localizedCaseInsensitiveContains("sha"))
         }
-        XCTAssertEqual(await store.discover(), .missing)
+        let state = await store.discover()
+        XCTAssertEqual(state, .missing)
     }
 
     func testInsufficientDiskRejectedBeforeCopy() async throws {
@@ -141,7 +142,8 @@ final class ExperimentalDiTPackStoreTests: XCTestCase {
             XCTAssertTrue(error.localizedDescription.localizedCaseInsensitiveContains("disk")
                           || error.localizedDescription.localizedCaseInsensitiveContains("space"))
         }
-        XCTAssertEqual(await store.discover(), .missing)
+        let state = await store.discover()
+        XCTAssertEqual(state, .missing)
     }
 
     func testChangedFileInvalidatesReceipt() async throws {
@@ -151,14 +153,15 @@ final class ExperimentalDiTPackStoreTests: XCTestCase {
         let data = try Data(contentsOf: source)
         let store = try makeStore(dir: dir, spec: makeSpec(for: data))
         let url = try await store.importPack(from: source)
-        XCTAssertEqual(await store.discover(), .ready(url))
+        let state = await store.discover()
+        XCTAssertEqual(state, .ready(url))
 
         // Corrupt the installed file (same size, different bytes): the cheap
         // receipt must no longer trust it → unverified.
         let corrupted = Data((0..<256).map { ($0 &* 3 &+ 1) & 0xFF })
         try corrupted.write(to: url)
-        let state = await store.discover()
-        XCTAssertEqual(state, .unverified)
+        let stateAfterCorruption = await store.discover()
+        XCTAssertEqual(stateAfterCorruption, .unverified)
     }
 
     func testRemoveDeletesPackAndReceipt() async throws {
@@ -168,10 +171,12 @@ final class ExperimentalDiTPackStoreTests: XCTestCase {
         let data = try Data(contentsOf: source)
         let store = try makeStore(dir: dir, spec: makeSpec(for: data))
         let url = try await store.importPack(from: source)
-        XCTAssertEqual(await store.discover(), .ready(url))
+        let state = await store.discover()
+        XCTAssertEqual(state, .ready(url))
         await store.remove()
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
-        XCTAssertEqual(await store.discover(), .missing)
+        let afterRemove = await store.discover()
+        XCTAssertEqual(afterRemove, .missing)
     }
 
     func testReimportReplacesExistingPack() async throws {
@@ -181,7 +186,8 @@ final class ExperimentalDiTPackStoreTests: XCTestCase {
         let data1 = try Data(contentsOf: source1)
         let store1 = try makeStore(dir: dir, spec: makeSpec(for: data1))
         let first = try await store1.importPack(from: source1)
-        XCTAssertEqual(await store1.discover(), .ready(first))
+        let firstState = await store1.discover()
+        XCTAssertEqual(firstState, .ready(first))
 
         // Re-import with the SAME spec from a second source: replace, not fail.
         let source2 = try makeSource(dir: dir, salt: 2)
@@ -193,7 +199,8 @@ final class ExperimentalDiTPackStoreTests: XCTestCase {
             availableCapacity: { _ in 10_000_000_000 },
             secureInstalls: false)
         let second = try await store2.importPack(from: source2)
-        XCTAssertEqual(await store2.discover(), .ready(second))
+        let secondState = await store2.discover()
+        XCTAssertEqual(secondState, .ready(second))
         XCTAssertTrue(FileManager.default.fileExists(atPath: second.path))
     }
 }
