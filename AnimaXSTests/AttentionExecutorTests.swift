@@ -220,7 +220,8 @@ final class AttentionExecutorTests: XCTestCase {
             query: makeHalfBuffer(zeros, context: context),
             key: makeHalfBuffer(zeroKey, context: context),
             value: makeHalfBuffer(value, context: context), output: output,
-            heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: dim)
+            heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: dim,
+            keyValueHeads: 1)
         // 2 heads × ceil(130/128) = 2 × 2 = 4 tiles.
         XCTAssertEqual(collector.snapshot().attentionQueryTiles, 4)
     }
