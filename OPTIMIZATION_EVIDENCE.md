@@ -20,6 +20,15 @@ key metrics: 0 failures. Adds dit_layernorm_modulate_to_half(+probe) and dit_gel
 artifact/run id: 31908033162 (PR #17 draft)
 interpretation: P3 gate met. Fused paths gated behind toggles (W4 default unchanged); device measures speed benefit later. Next: P4.
 
+## 2026-08-15 (P4) — Normal CI green on P4 (strided token-major MPS attention)
+HEAD: 34ba332 (P4 complete on opt/a12-sustained-io)
+command: gh workflow run ci.yml --ref opt/a12-sustained-io; gh run watch 31911367183
+configuration: normal CI (ci.yml): project-consistency, simulator-tests, iphone-build
+result: ALL PASS. project-consistency ✓, simulator-tests ✓ (287 tests, 14 expected skips, 0 failures), iphone-build ✓.
+key metrics: 0 failures. Adds AttentionInputLayout (.headMajor default/.tokenMajor), AttentionExecutor.encodeTokenMajor + tokenMajorHeadMatrix (strided MPS head views, tight score scratch), stridedTokenMajorAttention toggle (default OFF), DiTBlockExecutor gated path eliminating the 3-in+1-out head transposes, strict rejection of GQA/fp32/bf16 on strided path (P4-F), UI toggle. Tests: strided-vs-legacy parity (token-major reference transpose fix 4e29342), full DiT shapes self 1024/1024 + cross 1024/512, no-head-mixing (tolerance loosened 0.002→0.05 in 378df32 for fp16-vs-fp32 rounding), zero transpose bytes, unsupported-combo rejection, config toggles.
+artifact/run id: 31911367183 (PR #17 draft); also 31911189760 (workflow_dispatch, 287/0)
+interpretation: P4 gate met. Strided path gated behind toggle (W4 default unchanged). Device decides strided vs legacy speed later. Next: P5.
+
 ## 2026-08-15 (P4) — Strided token-major MPS attention implemented (transpose elimination)
 HEAD: b3aeb14 (P4 code + tests committed on opt/a12-sustained-io)
 command: edits to AttentionExecutor/DiTBlockExecutor/InferenceOptimizationConfig(+Settings+DiagnosticsView)/AttentionExecutorTests/InferenceOptimizationConfigTests; commit + push; CI run triggered (id pending)
