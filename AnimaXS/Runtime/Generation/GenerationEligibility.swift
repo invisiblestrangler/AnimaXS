@@ -17,7 +17,6 @@ enum GenerationEligibility: Equatable {
         canResume: Bool,
         prompt: String,
         seedText: String,
-        thermalState: ProcessInfo.ThermalState,
         metalAvailable: Bool
     ) -> GenerationEligibility {
         if isGenerating {
@@ -34,10 +33,6 @@ enum GenerationEligibility: Equatable {
         }
         if UInt64(seedText.trimmingCharacters(in: .whitespaces)) == nil {
             return .blocked("Seed must be an unsigned 64-bit integer.")
-        }
-        if thermalState == .serious || thermalState == .critical {
-            return .blocked(
-                "Device is too warm to start generation (thermal state: \(thermalState)).")
         }
         if !metalAvailable {
             return .blocked("Metal is unavailable on this device.")

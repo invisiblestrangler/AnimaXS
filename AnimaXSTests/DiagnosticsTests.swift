@@ -128,8 +128,7 @@ final class DiagnosticsTests: XCTestCase {
         let engine = makeNoMetalEngine()
         let items = await engine.hardwareTests(
             marker: DiagnosticRunMarker(defaults: makeDefaults()),
-            progress: { _ in },
-            thermalGate: { false })
+            progress: { _ in })
         XCTAssertEqual(items.count, 3)
         for item in items {
             XCTAssertEqual(item.status, .skipped, "\(item.name) must be SKIPPED without Metal")
@@ -138,28 +137,10 @@ final class DiagnosticsTests: XCTestCase {
                        Set(["MPS precision", "GEMM", "Attention tile"]))
     }
 
-    func testHardwareTestsRespectThermalGate() async throws {
-        let engine = DiagnosticsEngine()
-        try XCTSkipUnless(engine.isMetalAvailable,
-                          "SKIPPED_NO_METAL: default Metal device/library unavailable")
-        // With a gate that always trips, every hardware test must be skipped
-        // with an explicit reason — never run, never fail.
-        let items = await engine.hardwareTests(
-            marker: DiagnosticRunMarker(defaults: makeDefaults()),
-            progress: { _ in },
-            thermalGate: { true })
-        XCTAssertEqual(items.count, 3)
-        for item in items {
-            XCTAssertEqual(item.status, .skipped)
-            XCTAssertTrue(item.detail.contains("too warm"),
-                          "thermal skip must explain itself: \(item.detail)")
-        }
-    }
-
     func testFullRunExecutesEachTestOnce() async throws {
         let engine = makeNoMetalEngine()
         let marker = DiagnosticRunMarker(defaults: makeDefaults())
-        let items = await engine.fullRun(marker: marker, progress: { _ in }, thermalGate: { false })
+        let items = await engine.fullRun(marker: marker, progress: { _ in })
         let names = items.map(\.name)
         let occurrences = Dictionary(grouping: names, by: { $0 }).mapValues(\.count)
         for name in ["W4 vector", "W8 vector", "Golden-noise RNG", "mmap benchmark",
@@ -178,8 +159,7 @@ final class DiagnosticsTests: XCTestCase {
                           "SKIPPED_NO_METAL: default Metal device/library unavailable")
         let items = await engine.hardwareTests(
             marker: DiagnosticRunMarker(defaults: makeDefaults()),
-            progress: { _ in },
-            thermalGate: { false })
+            progress: { _ in })
         let mps = try XCTUnwrap(items.first { $0.name == "MPS precision" })
         XCTAssertNotEqual(mps.status, .skipped,
                           "MPS precision must actually run when Metal is available")

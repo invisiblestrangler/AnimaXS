@@ -256,19 +256,6 @@ final class GenerationCoordinator: ObservableObject {
         cancel()
     }
 
-    /// Thermal policy (documented in DECISIONS.md): nominal/fair → continue;
-    /// serious/critical → stop safely and preserve resume state.
-    func handleThermalState(_ state: ProcessInfo.ThermalState) {
-        switch state {
-        case .nominal, .fair:
-            return // continue generation
-        case .serious, .critical:
-            if isGenerating { cancel() }
-        @unknown default:
-            return
-        }
-    }
-
     // MARK: - Private
 
     private func run(

@@ -12,7 +12,6 @@ final class GenerationEligibilityTests: XCTestCase {
         canResume: Bool = false,
         prompt: String = "masterpiece",
         seedText: String = "1337",
-        thermalState: ProcessInfo.ThermalState = .nominal,
         metalAvailable: Bool = true
     ) -> GenerationEligibility {
         GenerationEligibility.evaluate(
@@ -21,7 +20,6 @@ final class GenerationEligibilityTests: XCTestCase {
             canResume: canResume,
             prompt: prompt,
             seedText: seedText,
-            thermalState: thermalState,
             metalAvailable: metalAvailable)
     }
 
@@ -37,7 +35,7 @@ final class GenerationEligibilityTests: XCTestCase {
         // Generation in flight takes precedence over everything else.
         let result = evaluate(
             modelsResolved: false, isGenerating: true, prompt: "",
-            seedText: "not-a-seed", thermalState: .critical)
+            seedText: "not-a-seed")
         guard case .blocked(let reason) = result else {
             return XCTFail("expected blocked, got \(result)")
         }
@@ -80,23 +78,6 @@ final class GenerationEligibilityTests: XCTestCase {
         }
     }
 
-    func testBlockedWhenThermalSerious() {
-        let result = evaluate(thermalState: .serious)
-        guard case .blocked(let reason) = result else {
-            return XCTFail("expected blocked, got \(result)")
-        }
-        XCTAssertTrue(reason.contains("thermal state"), reason)
-        XCTAssertTrue(reason.contains("serious"), reason)
-    }
-
-    func testBlockedWhenThermalCritical() {
-        let result = evaluate(thermalState: .critical)
-        guard case .blocked(let reason) = result else {
-            return XCTFail("expected blocked, got \(result)")
-        }
-        XCTAssertTrue(reason.contains("critical"), reason)
-    }
-
     func testBlockedWhenMetalUnavailable() {
         let result = evaluate(metalAvailable: false)
         guard case .blocked(let reason) = result else {
@@ -114,8 +95,6 @@ final class GenerationEligibilityTests: XCTestCase {
             evaluate(canResume: true),
             evaluate(prompt: ""),
             evaluate(seedText: "x"),
-            evaluate(thermalState: .serious),
-            evaluate(thermalState: .critical),
             evaluate(metalAvailable: false),
         ]
         for result in cases {
