@@ -103,16 +103,43 @@ final class InferenceOptimizationCoordinatorTests: XCTestCase {
         XCTAssertEqual(captured, config, "the engine must forward the exact immutable snapshot")
     }
 
-    /// A W8 generation never writes a checkpoint (resume must stay off even
-    /// though the sampler would normally save at each step). Use a sampler
-    /// that fires the step-completed callback so the checkpoint path runs.
+    /// Production W4 still persists checkpoints exactly as current HEAD: a
+    /// PARTIAL run (cancelled after step 0) retains its checkpoint.
+    @MainActor
+    func testProductionW4KeepsCheckpointPath() async throws {
+        let context = try makeContext()
+        let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-w4cp-\(UUID().uuidString)", isDirectory: true))
+        defer { store.remove() }
+        let factory = SuspendSamplerFactory()
+        let coordinator = GenerationCoordinator(
+            context: context, factory: factory,
+            attemptMetalFallback: false, checkpointStore: store)
+
+        coordinator.generate(prompt: "p", seed: 1, models: testModels())
+        // Wait for the sampler to complete step 0 and fire the checkpoint.
+        for _ in 0..<250 {
+            if factory.sampler?.completedSteps ?? 0 >= 1 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        coordinator.cancel()
+        for _ in 0..<250 {
+            if !coordinator.isGenerating { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        // A partial W4 run retains its checkpoint (exactly the D206 behavior).
+        XCTAssertTrue(store.hasCheckpoint,
+                      "production W4 partial run must retain the checkpoint path")
+    }
+
+    /// Experimental W8: even a partial run must NEVER persist a checkpoint.
     @MainActor
     func testExperimentalW8DisablesCheckpointPersistence() async throws {
         let context = try makeContext()
         let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
             .appendingPathComponent("AnimaXS-w8cp-\(UUID().uuidString)", isDirectory: true))
         defer { store.remove() }
-        let factory = StepSamplerFactory()
+        let factory = SuspendSamplerFactory()
         let coordinator = GenerationCoordinator(
             context: context, factory: factory,
             attemptMetalFallback: false, checkpointStore: store)
@@ -121,40 +148,24 @@ final class InferenceOptimizationCoordinatorTests: XCTestCase {
 
         coordinator.generate(prompt: "p", seed: 1, models: testModels(), optimization: config)
         for _ in 0..<250 {
+            if factory.sampler?.completedSteps ?? 0 >= 1 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        coordinator.cancel()
+        for _ in 0..<250 {
             if !coordinator.isGenerating { break }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
-        // No checkpoint written for the experimental W8 run.
         XCTAssertFalse(store.hasCheckpoint,
                        "experimental W8 must never persist a checkpoint")
         XCTAssertNil(coordinator.completedSteps)
     }
 
-    /// Production W4 still persists checkpoints exactly as current HEAD.
-    @MainActor
-    func testProductionW4KeepsCheckpointPath() async throws {
-        let context = try makeContext()
-        let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
-            .appendingPathComponent("AnimaXS-w4cp-\(UUID().uuidString)", isDirectory: true))
-        defer { store.remove() }
-        let factory = StepSamplerFactory()
-        let coordinator = GenerationCoordinator(
-            context: context, factory: factory,
-            attemptMetalFallback: false, checkpointStore: store)
-
-        coordinator.generate(prompt: "p", seed: 1, models: testModels())
-        for _ in 0..<250 {
-            if !coordinator.isGenerating { break }
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-        // Cancelled after step 0 → a partial checkpoint was saved (as in the
-        // existing D206 behavior for a partial run).
-        XCTAssertTrue(store.hasCheckpoint,
-                      "production W4 must retain the current checkpoint path")
-    }
-
-    /// Fires one step-completed callback then completes.
-    private final class StepSampler: DiffusionStage {
+    /// Fires one step-completed callback then suspends until cancelled, so the
+    /// checkpoint path runs but the generation stays partial (mirrors the
+    /// existing LifecycleSampler pattern in GenerationCoordinatorTests).
+    private final class SuspendSampler: DiffusionStage {
+        private(set) var completedSteps = 0
         func execute(initialLatent: MTLBuffer, crossContext: MTLBuffer,
                      outputLatent: MTLBuffer, startStep: Int,
                      blockProgress: ((Int, Int) throws -> Void)?,
@@ -162,11 +173,15 @@ final class InferenceOptimizationCoordinatorTests: XCTestCase {
             let count = initialLatent.length / 4
             let out = outputLatent.contents().bindMemory(to: Float.self, capacity: count)
             for i in 0..<count { out[i] = 1 }
+            completedSteps += 1
             try stepCompleted?(0, 1.0, 0.5, outputLatent, outputLatent)
+            // Deterministic pause: suspend until the coordinator cancels.
+            try await Task.sleep(nanoseconds: 60_000_000_000)
         }
     }
 
-    private final class StepSamplerFactory: GenerationStageFactory {
+    private final class SuspendSamplerFactory: GenerationStageFactory {
+        private(set) var sampler: SuspendSampler?
         func makePromptEncoder(context: MetalContext, fileURL: URL) throws -> PromptEncoderStage {
             ProbeEncoder()
         }
@@ -177,7 +192,9 @@ final class InferenceOptimizationCoordinatorTests: XCTestCase {
             context: MetalContext, fileURL: URL,
             optimization: InferenceOptimizationConfig
         ) throws -> DiffusionStage {
-            StepSampler()
+            let sampler = SuspendSampler()
+            self.sampler = sampler
+            return sampler
         }
         func makeVAE(context: MetalContext, fileURL: URL) throws -> VAEDecodeStage {
             ProbeVAE()

@@ -156,10 +156,14 @@ final class ExperimentalDiTPackStoreTests: XCTestCase {
         let state = await store.discover()
         XCTAssertEqual(state, .ready(url))
 
-        // Corrupt the installed file (same size, different bytes): the cheap
-        // receipt must no longer trust it → unverified.
+        // Corrupt the installed file (same size, different bytes) AND give it
+        // a clearly different modification date: the cheap receipt check
+        // compares size AND mod-date identity, so either change invalidates it.
         let corrupted = Data((0..<256).map { UInt8(($0 &* 3 &+ 1) & 0xFF) })
         try corrupted.write(to: url)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date(timeIntervalSince1970: 1_600_000_000)],
+            ofItemAtPath: url.path)
         let stateAfterCorruption = await store.discover()
         XCTAssertEqual(stateAfterCorruption, .unverified)
     }
