@@ -10,12 +10,13 @@ Working tree: clean (at P0 commit; local edits to state file not yet committed)
 ## Completed phases
 - P0 COMPLETE: branch created from origin/main f89b1d8; state files committed; PR #17; normal CI green (31896517851).
 - P1 COMPLETE (HEAD f42230d): P1-A..P1-H implemented + tested. Normal CI green (31904926712: project-consistency ✓, simulator-tests ✓ 273/0-fail, iphone-build ✓).
+- P2 COMPLETE (HEAD 738831e): per-step DiffusionStepMetrics + activeStep accumulation + partial-step recording + traffic counters + summary table. Normal CI green (31906565105: simulator-tests ✓ 277/0-fail).
 
 ## Current exact objective
-- P1 gate met. Next: P2 — trustworthy per-step sustained-performance telemetry (runbook §7). Delegating to one subagent (delegation provider verified working: deepseek-v4-flash @ /v1).
+- P2 gate met. Next: P3 — low-risk activation traffic fusion (runbook §8): fused LayerNorm+modulation, in-place half GELU.
 
 ## Current files being modified
-- P1 complete: working tree clean at f42230d.
+- P2 complete: working tree clean at 738831e.
 
 ## Invariants that must not regress
 - W4 known-good path
@@ -29,10 +30,11 @@ Working tree: clean (at P0 commit; local edits to state file not yet committed)
 
 ## Tests already passed at current HEAD
 - P0 normal CI green (31896517851).
-- P1 normal CI green (31904926712): 273 tests, 14 expected skips, 0 failures. Includes P1-A..H tests.
+- P1 normal CI green (31904926712): 273 tests, 0 failures.
+- P2 normal CI green (31906565105): 277 tests, 0 failures. Per-step metrics tests pass.
 
 ## Tests still required
-- P2: per-step metrics tests (all 8 completed steps; failed partial step; per-step sums match globals; no added waitUntilCompleted in hot path; Diagnostics text usable).
+- P3: fused LayerNorm+modulate shader parity; in-place half GELU parity; W4 block fixture parity vs legacy; W8 BF16 boundary tests; metrics prove conversion bytes drop when toggles on; no additional command-buffer synchronization.
 
 ## Known unresolved items
 - None at P0.
@@ -44,5 +46,5 @@ Working tree: clean (at P0 commit; local edits to state file not yet committed)
 - Then push branch and trigger normal CI (ci.yml / bootstrap-project.yml not needed since no .swift added).
 
 ## Last safe continuation point
-commit: f42230d (P1 complete, normal CI green) on opt/a12-sustained-io — HEAD at f42230d
-notes: P1 done and green. Next: P2 per-step telemetry. Reminder: after adding/removing .swift files, run bootstrap-project.yml and pull the bot commit before ci.yml. Push every commit (learned: untracked local commits block bootstrap/CI). Delegation provider is deepseek-v4-flash @ /v1 (subagents broken until gateway restart — doing phases directly for now).
+commit: 738831e (P2 complete, normal CI green) on opt/a12-sustained-io — HEAD at 738831e
+notes: P2 done and green. Next: P3 fused activation fusion. Reminders: after adding/removing .swift files run bootstrap-project.yml + pull bot commit before ci.yml; push every commit; delegation provider deepseek-v4-flash @ /v1 works (delegating phases to single subagents).
