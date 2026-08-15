@@ -19,6 +19,9 @@ final class DiTFinalLayerExecutor {
     private let linear: LinearExecutor
     private let activationNumerics: ActivationNumerics
     private let monitor: NumericalMonitor?
+    /// Immutable optimization snapshot (captured at Generate). Used for the
+    /// P6 no-copy weight source toggle and linear tile config.
+    private let optimization: InferenceOptimizationConfig
     /// Run telemetry collector (nil in tests / diagnostic-only construction).
     var metrics: MetricsCollector?
     private var emulatesBF16: Bool { activationNumerics == .bf16Compute }
@@ -34,6 +37,7 @@ final class DiTFinalLayerExecutor {
         self.context = context
         self.file = file
         self.range = range
+        self.optimization = optimization
         self.streamer = try WeightStreamer(device: context.device, capacity: Int(range.length))
         self.buffers = BufferPool(device: context.device)
         self.linear = LinearExecutor(

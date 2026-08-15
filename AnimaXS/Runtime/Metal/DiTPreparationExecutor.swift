@@ -18,6 +18,9 @@ final class DiTPreparationExecutor {
     private let buffers: BufferPool
     private let activationNumerics: ActivationNumerics
     private let monitor: NumericalMonitor?
+    /// Immutable optimization snapshot (captured at Generate). Used for the
+    /// P6 no-copy weight source toggle and linear tile config.
+    private let optimization: InferenceOptimizationConfig
     /// Run telemetry collector (nil in tests / diagnostic-only construction).
     var metrics: MetricsCollector?
 
@@ -32,6 +35,7 @@ final class DiTPreparationExecutor {
         self.context = context
         self.file = file
         self.locator = locator
+        self.optimization = optimization
         self.streamer = try WeightStreamer(device: context.device, capacity: Int(locator.range.length))
         self.linear = LinearExecutor(
             context: context, tileRows: optimization.linearTileRows,
