@@ -63,7 +63,7 @@ final class CheckpointStore {
     ) throws -> Int {
         guard checkpoint.step >= 1, checkpoint.step <= ModelConstants.samplerSteps else {
             throw GenerationError.sampler(
-                "checkpoint step \\(checkpoint.step) out of range 1...\\(ModelConstants.samplerSteps)")
+                "checkpoint step \(checkpoint.step) out of range 1...\(ModelConstants.samplerSteps)")
         }
         guard checkpoint.prompt == prompt else {
             throw GenerationError.sampler(
@@ -76,8 +76,8 @@ final class CheckpointStore {
         guard checkpoint.width == resolution.width,
               checkpoint.height == resolution.height else {
             throw GenerationError.sampler(
-                "checkpoint resolution \\(checkpoint.width)x\\(checkpoint.height) "
-                + "does not match \\(resolution.width)x\\(resolution.height)")
+                "checkpoint resolution \(checkpoint.width)x\(checkpoint.height) "
+                + "does not match \(resolution.width)x\(resolution.height)")
         }
         guard checkpoint.modelHashes == modelHashes else {
             throw GenerationError.sampler(

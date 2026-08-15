@@ -1,5 +1,8 @@
 import Foundation
 import Metal
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// Exact fixed-shape MiniTrainDIT block executed with one streamed block range.
 /// Legacy mode keeps residual/modulation/gates in fp32 and projection/attention
@@ -28,11 +31,15 @@ final class DiTBlockExecutor {
     private let linear: LinearExecutor
     private let attention: AttentionExecutor
     private let activationNumerics: ActivationNumerics
+    private let monitor: NumericalMonitor?
+    /// Run telemetry collector (nil in tests / diagnostic-only construction).
+    var metrics: MetricsCollector?
     private var emulatesBF16: Bool { activationNumerics == .bf16Compute }
 
     init(context: MetalContext, file: AnimapkFile,
          attentionNumerics: AttentionNumerics = .legacy,
-         activationNumerics: ActivationNumerics = .legacy) throws {
+         activationNumerics: ActivationNumerics = .legacy,
+         monitor: NumericalMonitor? = nil) throws {
         let locator = try DiTBlockLocator(file: file)
         guard let maximum = locator.blocks.map(\.length).max(), maximum <= UInt64(Int.max) else {
             throw AnimapkError.validation("invalid DiT execution ranges")
@@ -40,17 +47,25 @@ final class DiTBlockExecutor {
         self.context = context
         self.file = file
         self.locator = locator
-        self.streamer = try WeightStreamer(device: context.device, capacity: Int(maximum))
+        self.streamer = try WeightStreamer(device: context.device, capacity: Int(maximum), slotCount: 2)
         self.buffers = BufferPool(device: context.device)
         self.linear = LinearExecutor(context: context)
         self.activationNumerics = activationNumerics
+        self.monitor = monitor
         let effectiveAttention = activationNumerics == .bf16Compute && attentionNumerics == .legacy
             ? .bf16Compute : attentionNumerics
-        self.attention = AttentionExecutor(context: context, numerics: effectiveAttention)
+        self.attention = AttentionExecutor(context: context, numerics: effectiveAttention, monitor: monitor)
     }
 
     /// Mutates `residual` in place. All input buffers are tightly packed and use these types:
     /// residual/emb/adalnLora/rope fp32, crossContext fp16.
+    ///
+    /// `slot` selects the weight slot the block's weights were (or will be)
+    /// loaded into. `prefetchIndex`/`prefetchSlot` request the next block's
+    /// weights to be copied into the other slot AFTER this block's command
+    /// buffer is committed and BEFORE it is awaited, so the CPU memcpy hides
+    /// behind GPU execution (Phase 12 ping-pong). The streamer itself refuses
+    /// to overwrite a slot still in flight.
     func execute(
         blockIndex: Int,
         residual: MTLBuffer,
@@ -58,13 +73,26 @@ final class DiTBlockExecutor {
         adalnLora: MTLBuffer,
         crossContext: MTLBuffer,
         rope: MTLBuffer,
+        slot: Int = 0,
+        prefetchIndex: Int? = nil,
+        prefetchSlot: Int = 0,
         diagnosticBranchCompleted: DiagnosticBranchCompleted? = nil
     ) async throws {
         try validateInputs(residual: residual, emb: emb, adalnLora: adalnLora,
                            crossContext: crossContext, rope: rope)
         let range = try locator.block(blockIndex)
-        try streamer.load(range, from: file)
-        let weights = try BlockWeights(range: range, ring: streamer.ring)
+        metrics?.beginBlock(blockIndex)
+        // Load the block's weights unless a prefetch (prologue or previous
+        // iteration) already placed them in this slot.
+        if streamer.loadedLogicalIndexes[slot] != blockIndex {
+            let copyStart = ProcessInfo.processInfo.systemUptime
+            try streamer.load(range, from: file, slot: slot)
+            metrics?.recordWeightCopy(
+                bytes: Int(range.length),
+                seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+        }
+        let encodeStart = ProcessInfo.processInfo.systemUptime
+        let weights = try BlockWeights(range: range, ring: streamer.buffer(for: slot))
         guard let command = context.commandQueue.makeCommandBuffer() else {
             throw AnimapkError.validation("failed to create DiT block command buffer")
         }
@@ -74,13 +102,13 @@ final class DiTBlockExecutor {
         try encodeComputeBoundary(command, siluEmb, count: Self.dim)
         try encodeAttentionBranch(command, residual: residual, crossContext: crossContext,
                                   rope: rope, siluEmb: siluEmb, adalnLora: adalnLora,
-                                  weights: weights, cross: false)
+                                  weights: weights, cross: false, slot: slot)
         let selfSnapshot = try diagnosticBranchCompleted.map { _ in
             try encodeSnapshot(command, source: residual, key: "dit.diagnostic.afterSelf.f32")
         }
         try encodeAttentionBranch(command, residual: residual, crossContext: crossContext,
                                   rope: rope, siluEmb: siluEmb, adalnLora: adalnLora,
-                                  weights: weights, cross: true)
+                                  weights: weights, cross: true, slot: slot)
         let crossSnapshot = try diagnosticBranchCompleted.map { _ in
             try encodeSnapshot(command, source: residual, key: "dit.diagnostic.afterCross.f32")
         }
@@ -90,18 +118,68 @@ final class DiTBlockExecutor {
             try encodeSnapshot(command, source: residual, key: "dit.diagnostic.afterMLP.f32")
         }
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            command.addCompletedHandler { completed in
-                if let error = completed.error { continuation.resume(throwing: error) }
-                else { continuation.resume() }
-            }
-            command.commit()
+        let encodeEnd = ProcessInfo.processInfo.systemUptime
+        streamer.markInFlight(slot)
+        // Metal requires the completed handler to be registered BEFORE commit
+        // (addCompletedHandler after commit is a hard assertion). Store the
+        // continuation in a gate, register the handler, commit, then run the
+        // next-block prefetch memcpy while the GPU executes, and finally await.
+        let gate = CommandBufferGate()
+        let slotStreamer = streamer
+        command.addCompletedHandler { [weak slotStreamer] completed in
+            slotStreamer?.complete(slot)
+            if let error = completed.error { gate.resume(throwing: error) }
+            else { gate.resume() }
         }
+        command.commit()
+        // Ping-pong prefetch: copy the next block's weights into the other
+        // slot while this command buffer executes on the GPU. Safe because the
+        // other slot's previous user (block i-1) was already awaited. If the
+        // prefetch fails, still await the in-flight buffer before propagating.
+        var prefetchError: Error?
+        if let prefetchIndex {
+            do {
+                let nextRange = try locator.block(prefetchIndex)
+                let copyStart = ProcessInfo.processInfo.systemUptime
+                try streamer.load(nextRange, from: file, slot: prefetchSlot)
+                metrics?.recordWeightCopy(
+                    bytes: Int(nextRange.length),
+                    seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+            } catch {
+                prefetchError = error
+            }
+        }
+        try await gate.wait()
+        if let prefetchError { throw prefetchError }
+        let done = ProcessInfo.processInfo.systemUptime
+        let gpuSeconds = (command.gpuStartTime > 0 && command.gpuEndTime >= command.gpuStartTime)
+            ? command.gpuEndTime - command.gpuStartTime : 0
+        metrics?.recordGPUCommand(seconds: gpuSeconds)
+        metrics?.recordEncode(seconds: encodeEnd - encodeStart)
+        metrics?.recordHostWait(seconds: (done - encodeEnd) - gpuSeconds)
+        metrics?.endBlock()
+        // Per-block memory sampling (cheap: no extra GPU sync — the block's
+        // command buffer has already completed).
+        context.refreshDiagnostics()
+        metrics?.recordMemory(
+            allocated: context.currentAllocatedSize,
+            available: UInt64(os_proc_available_memory()))
         if let diagnosticBranchCompleted {
             try diagnosticBranchCompleted("self", selfSnapshot!)
             try diagnosticBranchCompleted("cross", crossSnapshot!)
             try diagnosticBranchCompleted("mlp", mlpSnapshot!)
         }
+    }
+
+    /// Load a block's weights into a slot without executing it (ping-pong
+    /// prologue). The loop's in-flight guard still applies.
+    func prefetch(blockIndex: Int, slot: Int) throws {
+        let range = try locator.block(blockIndex)
+        let copyStart = ProcessInfo.processInfo.systemUptime
+        try streamer.load(range, from: file, slot: slot)
+        metrics?.recordWeightCopy(
+            bytes: Int(range.length),
+            seconds: ProcessInfo.processInfo.systemUptime - copyStart)
     }
 
     private func encodeSnapshot(
@@ -120,7 +198,7 @@ final class DiTBlockExecutor {
     private func encodeAttentionBranch(
         _ command: MTLCommandBuffer, residual: MTLBuffer, crossContext: MTLBuffer,
         rope: MTLBuffer, siluEmb: MTLBuffer, adalnLora: MTLBuffer,
-        weights: BlockWeights, cross: Bool
+        weights: BlockWeights, cross: Bool, slot: Int
     ) throws {
         let modulation = try encodeModulation(
             command, siluEmb: siluEmb, adalnLora: adalnLora,
@@ -133,7 +211,8 @@ final class DiTBlockExecutor {
         try encodeModulate(command, normalized: norm, modulation: modulation,
                            output: modulated, count: Self.tokens * Self.dim)
         try encodeFloatToComputeHalf(command, input: modulated, output: projectionInput,
-                                      count: Self.tokens * Self.dim)
+                                      count: Self.tokens * Self.dim,
+                                      probe: cross ? .crossProjectionInput : .selfProjectionInput)
 
         let qToken = buffer("dit.q.token.f16", Self.tokens * Self.dim, Float16.self)
         let qHead = buffer("dit.q.head.f16", Self.tokens * Self.dim, Float16.self)
@@ -156,17 +235,25 @@ final class DiTBlockExecutor {
         try encodeHalfComputeBoundary(command, qToken, count: Self.tokens * Self.dim)
         try encodeHalfComputeBoundary(command, kToken, count: kTokenCount)
         try encodeHalfComputeBoundary(command, vToken, count: kTokenCount)
+        if NumericalMonitor.detailedProbesEnabled, let monitor {
+            try monitor.encodeProbe(command, values: qToken, count: Self.tokens * Self.dim,
+                                    probe: cross ? .crossQToken : .selfQToken)
+            try monitor.encodeProbe(command, values: kToken, count: kTokenCount,
+                                    probe: cross ? .crossKToken : .selfKToken)
+            try monitor.encodeProbe(command, values: vToken, count: kTokenCount,
+                                    probe: cross ? .crossVToken : .selfVToken)
+        }
 
         if cross {
             try encodeRMSHeads(command, input: qToken, weightOffset: weights.crossQNorm,
-                               output: qToken, rows: Self.tokens * Self.heads)
+                               output: qToken, rows: Self.tokens * Self.heads, slot: slot)
             try encodeRMSHeads(command, input: kToken, weightOffset: weights.crossKNorm,
-                               output: kToken, rows: Self.contextTokens * Self.heads)
+                               output: kToken, rows: Self.contextTokens * Self.heads, slot: slot)
         } else {
             try encodeRMSRoPE(command, input: qToken, weightOffset: weights.selfQNorm,
-                              rope: rope, output: qToken)
+                              rope: rope, output: qToken, slot: slot)
             try encodeRMSRoPE(command, input: kToken, weightOffset: weights.selfKNorm,
-                              rope: rope, output: kToken)
+                              rope: rope, output: kToken, slot: slot)
         }
         try encodeHalfComputeBoundary(command, qToken, count: Self.tokens * Self.dim)
         try encodeHalfComputeBoundary(command, kToken, count: kTokenCount)
@@ -180,8 +267,13 @@ final class DiTBlockExecutor {
         let attendedToken = buffer("dit.attended.token.f16", Self.tokens * Self.dim, Float16.self)
         try attention.encode(commandBuffer: command, query: qHead, key: kHead, value: vHead,
                              output: attendedHead, heads: Self.heads, queryCount: Self.tokens,
-                             keyCount: keyRows, headDim: Self.headDim)
+                             keyCount: keyRows, headDim: Self.headDim,
+                             probe: cross ? .crossScores : .selfScores)
         try encodeHalfComputeBoundary(command, attendedHead, count: Self.tokens * Self.dim)
+        if NumericalMonitor.detailedProbesEnabled, let monitor {
+            try monitor.encodeProbe(command, values: attendedHead, count: Self.tokens * Self.dim,
+                                    probe: cross ? .crossAttended : .selfAttended)
+        }
         try encodeTranspose(command, input: attendedHead, output: attendedToken,
                             tokens: Self.tokens, toHeadMajor: false)
         let branch = buffer("dit.branch.f16", Self.tokens * Self.dim, Float16.self)
@@ -189,9 +281,19 @@ final class DiTBlockExecutor {
                           weight: cross ? weights.crossO : weights.selfO,
                           output: branch, inputRows: Self.tokens)
         try encodeHalfComputeBoundary(command, branch, count: Self.tokens * Self.dim)
+        if NumericalMonitor.detailedProbesEnabled, let monitor {
+            try monitor.encodeProbe(command, values: branch, count: Self.tokens * Self.dim,
+                                    probe: cross ? .crossBranch : .selfBranch)
+        }
         try encodeGateAdd(command, residual: residual, branch: branch, modulation: modulation,
-                          count: Self.tokens * Self.dim)
+                          count: Self.tokens * Self.dim,
+                          probe: cross ? .crossGateAdd : .selfGateAdd)
         try encodeActivationBoundary(command, residual)
+        if NumericalMonitor.detailedProbesEnabled, let monitor {
+            try monitor.encodeProbeF32(command, values: residual,
+                                       count: Self.tokens * Self.dim,
+                                       probe: cross ? .crossResidual : .selfResidual)
+        }
     }
 
     private func encodeMLP(
@@ -207,7 +309,7 @@ final class DiTBlockExecutor {
         try encodeModulate(command, normalized: norm, modulation: modulation,
                            output: modulated, count: Self.tokens * Self.dim)
         try encodeFloatToComputeHalf(command, input: modulated, output: projectionInput,
-                                      count: Self.tokens * Self.dim)
+                                      count: Self.tokens * Self.dim, probe: .mlpProjectionInput)
         let hiddenHalf = buffer("dit.hidden.f16", Self.tokens * Self.hidden, Float16.self)
         let hiddenFloat = buffer("dit.hidden.f32", Self.tokens * Self.hidden, Float.self)
         try linear.encode(commandBuffer: command, input: projectionInput,
@@ -218,15 +320,29 @@ final class DiTBlockExecutor {
         try encodeUnary(command, kernel: "gelu", input: hiddenFloat,
                         output: hiddenFloat, count: Self.tokens * Self.hidden)
         try encodeComputeBoundary(command, hiddenFloat, count: Self.tokens * Self.hidden)
-        try encodeConvert(command, kernel: "float_to_half", input: hiddenFloat,
-                          output: hiddenHalf, count: Self.tokens * Self.hidden)
+        if let monitor {
+            try encodeProbeConvert(command, input: hiddenFloat, output: hiddenHalf,
+                                   count: Self.tokens * Self.hidden,
+                                   monitor: monitor, probe: .mlpHiddenToHalf)
+        } else {
+            try encodeConvert(command, kernel: "float_to_half", input: hiddenFloat,
+                              output: hiddenHalf, count: Self.tokens * Self.hidden)
+        }
         let branch = buffer("dit.branch.f16", Self.tokens * Self.dim, Float16.self)
         try linear.encode(commandBuffer: command, input: hiddenHalf,
                           weight: weights.mlp2, output: branch, inputRows: Self.tokens)
         try encodeHalfComputeBoundary(command, branch, count: Self.tokens * Self.dim)
+        if NumericalMonitor.detailedProbesEnabled, let monitor {
+            try monitor.encodeProbe(command, values: branch, count: Self.tokens * Self.dim,
+                                    probe: .mlpBranch)
+        }
         try encodeGateAdd(command, residual: residual, branch: branch, modulation: modulation,
-                          count: Self.tokens * Self.dim)
+                          count: Self.tokens * Self.dim, probe: .mlpGateAdd)
         try encodeActivationBoundary(command, residual)
+        if NumericalMonitor.detailedProbesEnabled, let monitor {
+            try monitor.encodeProbeF32(command, values: residual,
+                                       count: Self.tokens * Self.dim, probe: .mlpResidual)
+        }
     }
 
     private func encodeActivationBoundary(
@@ -246,11 +362,48 @@ final class DiTBlockExecutor {
     }
 
     private func encodeFloatToComputeHalf(
-        _ command: MTLCommandBuffer, input: MTLBuffer, output: MTLBuffer, count: Int
+        _ command: MTLCommandBuffer, input: MTLBuffer, output: MTLBuffer, count: Int,
+        probe: NumericalMonitor.Probe
     ) throws {
         try encodeComputeBoundary(command, input, count: count)
-        try encodeConvert(command, kernel: "float_to_half", input: input,
-                          output: output, count: count)
+        if let monitor {
+            try encodeProbeConvert(command, input: input, output: output, count: count,
+                                   monitor: monitor, probe: probe)
+        } else {
+            try encodeConvert(command, kernel: "float_to_half", input: input,
+                              output: output, count: count)
+        }
+    }
+
+    /// float_to_half with in-kernel numerical-health recording. The probe
+    /// kernel performs the identical conversion; stats land in the monitor.
+    private func encodeProbeConvert(
+        _ command: MTLCommandBuffer, input: MTLBuffer, output: MTLBuffer, count: Int,
+        monitor: NumericalMonitor, probe: NumericalMonitor.Probe
+    ) throws {
+        let pipeline = try context.pipeline(named: "float_to_half_probe")
+        guard let encoder = command.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create float_to_half_probe encoder")
+        }
+        var elementCount = UInt32(count)
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(input, offset: 0, index: 0)
+        encoder.setBuffer(output, offset: 0, index: 1)
+        encoder.setBytes(&elementCount, length: 4, index: 2)
+        monitor.bindProbe(encoder, probe: probe, statsIndex: 3, slotIndex: 4)
+        dispatchProbe(encoder, pipeline: pipeline, count: count)
+        encoder.endEncoding()
+    }
+
+    /// Dispatch shape for the probe kernels: exactly one thread per element in
+    /// fixed 256-thread threadgroups (the kernels reduce via threadgroup memory).
+    private func dispatchProbe(
+        _ encoder: MTLComputeCommandEncoder, pipeline: MTLComputePipelineState, count: Int
+    ) {
+        let groups = (count + 255) / 256
+        encoder.dispatchThreadgroups(
+            MTLSize(width: groups, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
     }
 
     private func encodeHalfComputeBoundary(
@@ -356,7 +509,7 @@ final class DiTBlockExecutor {
 
     private func encodeRMSRoPE(
         _ command: MTLCommandBuffer, input: MTLBuffer, weightOffset: Int,
-        rope: MTLBuffer, output: MTLBuffer
+        rope: MTLBuffer, output: MTLBuffer, slot: Int
     ) throws {
         let pipeline = try context.pipeline(named: "rms_rope_split_half")
         guard let encoder = command.makeComputeCommandEncoder() else {
@@ -365,7 +518,7 @@ final class DiTBlockExecutor {
         var tokens = UInt32(Self.tokens), heads = UInt32(Self.heads), epsilon = Self.eps
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(input, offset: 0, index: 0)
-        encoder.setBuffer(streamer.ring, offset: weightOffset, index: 1)
+        encoder.setBuffer(streamer.buffer(for: slot), offset: weightOffset, index: 1)
         encoder.setBuffer(rope, offset: 0, index: 2)
         encoder.setBuffer(output, offset: 0, index: 3)
         encoder.setBytes(&tokens, length: 4, index: 4)
@@ -378,7 +531,7 @@ final class DiTBlockExecutor {
 
     private func encodeRMSHeads(
         _ command: MTLCommandBuffer, input: MTLBuffer, weightOffset: Int,
-        output: MTLBuffer, rows: Int
+        output: MTLBuffer, rows: Int, slot: Int
     ) throws {
         let pipeline = try context.pipeline(named: "rmsnorm_heads_half")
         guard let encoder = command.makeComputeCommandEncoder() else {
@@ -387,7 +540,7 @@ final class DiTBlockExecutor {
         var rowCount = UInt32(rows), epsilon = Self.eps
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(input, offset: 0, index: 0)
-        encoder.setBuffer(streamer.ring, offset: weightOffset, index: 1)
+        encoder.setBuffer(streamer.buffer(for: slot), offset: weightOffset, index: 1)
         encoder.setBuffer(output, offset: 0, index: 2)
         encoder.setBytes(&rowCount, length: 4, index: 3)
         encoder.setBytes(&epsilon, length: 4, index: 4)
@@ -420,8 +573,25 @@ final class DiTBlockExecutor {
 
     private func encodeGateAdd(
         _ command: MTLCommandBuffer, residual: MTLBuffer, branch: MTLBuffer,
-        modulation: MTLBuffer, count: Int
+        modulation: MTLBuffer, count: Int, probe: NumericalMonitor.Probe
     ) throws {
+        if let monitor {
+            let pipeline = try context.pipeline(named: "gate_add_half_f32_probe")
+            guard let encoder = command.makeComputeCommandEncoder() else {
+                throw AnimapkError.validation("failed to create gated residual encoder")
+            }
+            var n = UInt32(Self.dim), elementCount = UInt32(count)
+            encoder.setComputePipelineState(pipeline)
+            encoder.setBuffer(residual, offset: 0, index: 0)
+            encoder.setBuffer(branch, offset: 0, index: 1)
+            encoder.setBuffer(modulation, offset: 2 * Self.dim * MemoryLayout<Float>.stride, index: 2)
+            encoder.setBytes(&n, length: 4, index: 3)
+            encoder.setBytes(&elementCount, length: 4, index: 4)
+            monitor.bindProbe(encoder, probe: probe, statsIndex: 5, slotIndex: 6)
+            dispatchProbe(encoder, pipeline: pipeline, count: count)
+            encoder.endEncoding()
+            return
+        }
         let pipeline = try context.pipeline(named: "gate_add_half_f32")
         guard let encoder = command.makeComputeCommandEncoder() else {
             throw AnimapkError.validation("failed to create gated residual encoder")
@@ -509,6 +679,43 @@ final class DiTBlockExecutor {
         ]
         for (buffer, bytes, label) in requirements where buffer.length < bytes {
             throw AnimapkError.validation("DiT \(label) buffer is too small")
+        }
+    }
+}
+
+/// Await gate for a committed MTLCommandBuffer whose completion handler must be
+/// registered BEFORE `commit()` (Metal asserts on late handlers). The handler
+/// fires on a Metal queue thread; the awaiting task resumes via the stored
+/// continuation. Safe whether the handler fires before or after `wait()`.
+final class CommandBufferGate {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var outcome: Result<Void, Error>?
+
+    func resume(throwing error: Error? = nil) {
+        lock.lock()
+        if let continuation {
+            self.continuation = nil
+            lock.unlock()
+            if let error { continuation.resume(throwing: error) }
+            else { continuation.resume() }
+        } else {
+            if let error { outcome = .failure(error) }
+            else { outcome = .success(()) }
+            lock.unlock()
+        }
+    }
+
+    func wait() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            lock.lock()
+            if let outcome {
+                lock.unlock()
+                continuation.resume(with: outcome)
+            } else {
+                self.continuation = continuation
+                lock.unlock()
+            }
         }
     }
 }

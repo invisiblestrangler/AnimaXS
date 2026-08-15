@@ -419,6 +419,112 @@ final class FullInferenceTests: XCTestCase {
         print("FULL_INFERENCE=\(inferencePassed ? "PASS" : "FAIL")")
     }
 
+    /// Phase 2/4 — broad-seed numerical stress with the numerical monitor's
+    /// probes enabled (always-on + detailed MPS-output passes). Runs the
+    /// production diffusion sampler over many ordinary seeds (diverse noise
+    /// on the golden conditioning), then prints the aggregate evidence:
+    /// total/success/failure, first-unsafe-boundary distribution, and maximum
+    /// magnitudes observed at every probed boundary.
+    ///
+    /// This is evidence collection, not a correctness gate: it never asserts
+    /// "zero warnings" (that is the investigation's question). It DOES fail on
+    /// any non-finite latent (correctness must never regress). Seed count via
+    /// ANIMAXS_STRESS_SEEDS (default 4); numerics modes via the standard
+    /// attention_numerics / activation_numerics diagnostic config.
+    func testNumericalStressAcrossSeeds() async throws {
+        guard let context else {
+            throw XCTSkip("SKIPPED_NO_METAL: default Metal device/library unavailable")
+        }
+        let ditURL = try requiredFixture(
+            envKey: "ANIMAXS_DIFFUSION_PACK", name: "anima-turbo-refine.animapk")
+        let noiseURL = try requiredFixture(
+            envKey: "ANIMAXS_NOISE_FILE", name: "case1_noise.f32")
+        // Golden conditioning isolates the DiT forward (same convention as the
+        // canonical test's golden_dit_context path).
+        let cross = try XCTUnwrap(context.device.makeBuffer(
+            length: LLMAdapterMetal.maximumTokens * LLMAdapterMetal.hidden * 4,
+            options: .storageModeShared))
+        let ditContextURL = try requiredFixture(
+            envKey: "ANIMAXS_DIT_CONTEXT_FILE", name: "case1_dit_context.f32")
+        let golden = try floats(from: ditContextURL)
+        XCTAssertEqual(golden.count, LLMAdapterMetal.maximumTokens * LLMAdapterMetal.hidden)
+        golden.withUnsafeBytes { bytes in
+            if let base = bytes.baseAddress {
+                memcpy(cross.contents(), base, bytes.count)
+            }
+        }
+
+        let attentionNumerics = AttentionNumerics(
+            rawValue: diagnosticConfig("attention_numerics") ?? "legacy") ?? .legacy
+        let activationNumerics = ActivationNumerics(
+            rawValue: diagnosticConfig("activation_numerics") ?? "legacy") ?? .legacy
+        print("FULL_STRESS_ATTENTION_NUMERICS=\(attentionNumerics.rawValue)")
+        print("FULL_STRESS_ACTIVATION_NUMERICS=\(activationNumerics.rawValue)")
+        NumericalMonitor.detailedProbesEnabled = true
+        defer { NumericalMonitor.detailedProbesEnabled = false }
+
+        let seedCount = Int(env("ANIMAXS_STRESS_SEEDS") ?? "") ?? 4
+        let baseNoise = try floats(from: noiseURL)
+        var successes = 0
+        var failures = 0
+        var firstIssueDistribution: [String: Int] = [:]
+        var firstIssueSteps: [Int: Int] = [:]
+        var boundaryMagnitudes: [String: Float] = [:]
+        var failureMessages: [String] = []
+
+        for run in 0..<seedCount {
+            let seed = UInt64(1_337 + run * 7_919)
+            var rng = SeededRNG(seed: seed)
+            var noise = baseNoise
+            for i in 0..<noise.count { noise[i] = Float(rng.nextNormal()) }
+            let initial = makeBuffer(noise, on: context.device)
+            let finalLatent = try XCTUnwrap(context.device.makeBuffer(
+                length: DiffusionSampler.latentElements * 4, options: .storageModeShared))
+            let sampler = try DiffusionSampler(
+                context: context, file: AnimapkFile(url: ditURL),
+                attentionNumerics: attentionNumerics,
+                activationNumerics: activationNumerics)
+            let start = Date()
+            do {
+                try await sampler.executeDiagnostic(
+                    initialLatent: initial, crossContext: cross, outputLatent: finalLatent)
+                successes += 1
+            } catch {
+                failures += 1
+                failureMessages.append(error.localizedDescription)
+                print("FULL_STRESS_SEED_\(seed)=FAIL \(error.localizedDescription)")
+            }
+            let seconds = Date().timeIntervalSince(start)
+            print("FULL_STRESS_SEED_\(seed)=done seconds=\(String(format: "%.1f", seconds))")
+
+            // Aggregate evidence from the monitor (valid after the run's GPU
+            // work completed, whether it succeeded or threw).
+            if let issue = sampler.earliestNumericalIssue {
+                firstIssueDistribution[issue.probe.stageLabel, default: 0] += 1
+                firstIssueSteps[issue.step, default: 0] += 1
+            }
+            for (probe, stats) in sampler.numericalReport where stats.maxAbs > 0 {
+                boundaryMagnitudes[probe.stageLabel] = max(
+                    boundaryMagnitudes[probe.stageLabel] ?? 0, stats.maxAbs)
+            }
+        }
+
+        print("FULL_STRESS_TOTAL=\(seedCount) SUCCESS=\(successes) FAILURES=\(failures)")
+        for (label, count) in firstIssueDistribution.sorted(by: { $0.value > $1.value }) {
+            print("FULL_STRESS_FIRST_ISSUE=\(label) count=\(count)")
+        }
+        for (step, count) in firstIssueSteps.sorted(by: { $0.key < $1.key }) {
+            print("FULL_STRESS_FIRST_ISSUE_STEP=\(step) count=\(count)")
+        }
+        for (label, magnitude) in boundaryMagnitudes.sorted(by: { $0.key < $1.key }) {
+            print(String(format: "FULL_STRESS_MAXABS=%@ %.6g", label, magnitude))
+        }
+        // Correctness gate only: a non-finite latent is always a failure.
+        // Numerical warnings without a non-finite latent are evidence.
+        XCTAssertEqual(failures, 0, "non-finite latents under stress: \(failureMessages)")
+        print("FULL_STRESS=\(failures == 0 ? "PASS" : "EVIDENCE")")
+    }
+
     // MARK: - Required-mode fixture resolution
 
     /// Returns the env-injected pack path, or the bundled fixture if present.

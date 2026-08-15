@@ -1161,3 +1161,472 @@ kernel void vae_position_to_rgba8(
         (uchar)(b * 255.0 + 0.5),
         255);
 }
+
+// ---------------------------------------------------------------------------
+// Numerical-health probes (optimization phase, D201).
+//
+// Stats ABI shared by every probe kernel below. `stats` is an array of
+// uint32 quads, one per probe slot:
+//   [slot*4+0] flags   (bit meanings per kernel, see below)
+//   [slot*4+1] maxAbs  float bit pattern of max |value| observed (0 if none)
+//   [slot*4+2] firstIndex  first offending element index (0xFFFFFFFFu if none)
+//   [slot*4+3] reserved
+// Writes are relaxed atomics from thread 0 of each threadgroup, so multiple
+// concurrent kernels/tiles can safely accumulate into one slot.
+//
+// Common flag bits (float_to_half / standalone probes):
+//   bit0 NaN observed
+//   bit1 +Inf observed
+//   bit2 -Inf observed
+//   bit3 |value| >= 65504 (would overflow/round at an fp16 storage boundary)
+// gate_add probe adds:
+//   bit4 result (residual) became NaN
+//   bit5 result (residual) became +/-Inf
+// ---------------------------------------------------------------------------
+constant uint NUM_FLAG_NAN          = 1u << 0;
+constant uint NUM_FLAG_POS_INF      = 1u << 1;
+constant uint NUM_FLAG_NEG_INF      = 1u << 2;
+constant uint NUM_FLAG_HALF_OVERFLOW = 1u << 3;
+constant uint NUM_FLAG_RESULT_NAN   = 1u << 4;
+constant uint NUM_FLAG_RESULT_INF   = 1u << 5;
+constant uint NUM_SLOT_UINTS        = 4u;
+
+// fp32 -> fp16 conversion that also records input-health stats. Replaces
+// float_to_half at probed call sites; identical conversion semantics.
+kernel void float_to_half_probe(
+    device const float *source    [[buffer(0)]],
+    device half       *destination [[buffer(1)]],
+    constant uint     &count      [[buffer(2)]],
+    device uint       *stats      [[buffer(3)]],
+    constant uint     &probeSlot  [[buffer(4)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    threadgroup uint partialFlags[256];
+    threadgroup uint partialMax[256];
+    threadgroup uint partialIndex[256];
+    uint base = group.x * 256;
+    uint i = base + tid;
+    uint localFlags = 0;
+    uint localMax = 0;
+    uint localIndex = 0xFFFFFFFFu;
+    if (i < count) {
+        float v = source[i];
+        destination[i] = half(v);
+        if (isnan(v)) {
+            localFlags |= NUM_FLAG_NAN;
+            localIndex = min(localIndex, i);
+        } else if (isinf(v)) {
+            localFlags |= (v > 0.0f) ? NUM_FLAG_POS_INF : NUM_FLAG_NEG_INF;
+            localIndex = min(localIndex, i);
+        } else {
+            float a = fabs(v);
+            if (a > 65504.0f) {
+                localFlags |= NUM_FLAG_HALF_OVERFLOW;
+                localIndex = min(localIndex, i);
+            }
+            uint bits = as_type<uint>(a);
+            if (bits > localMax) localMax = bits;
+        }
+    }
+    partialFlags[tid] = localFlags;
+    partialMax[tid] = localMax;
+    partialIndex[tid] = localIndex;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            partialFlags[tid] |= partialFlags[tid + stride];
+            partialMax[tid] = max(partialMax[tid], partialMax[tid + stride]);
+            partialIndex[tid] = min(partialIndex[tid], partialIndex[tid + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0 && partialFlags[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        uint slotBase = probeSlot * NUM_SLOT_UINTS;
+        atomic_fetch_or_explicit(&atom[slotBase + 0], partialFlags[0], memory_order_relaxed);
+        atomic_fetch_min_explicit(&atom[slotBase + 2], partialIndex[0], memory_order_relaxed);
+    }
+    if (tid == 0 && partialMax[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        atomic_fetch_max_explicit(&atom[probeSlot * NUM_SLOT_UINTS + 1], partialMax[0], memory_order_relaxed);
+    }
+}
+
+// Gated fp16-branch add into fp32 residual that also records branch/residual
+// health. Replaces gate_add_half_f32 at probed call sites.
+kernel void gate_add_half_f32_probe(
+    device float       *residual [[buffer(0)]],
+    device const half  *branch   [[buffer(1)]],
+    device const float *gate     [[buffer(2)]],
+    constant uint      &N        [[buffer(3)]],
+    constant uint      &count    [[buffer(4)]],
+    device uint        *stats    [[buffer(5)]],
+    constant uint      &probeSlot [[buffer(6)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    threadgroup uint partialFlags[256];
+    threadgroup uint partialMax[256];
+    threadgroup uint partialIndex[256];
+    uint base = group.x * 256;
+    uint i = base + tid;
+    uint localFlags = 0;
+    uint localMax = 0;
+    uint localIndex = 0xFFFFFFFFu;
+    if (i < count) {
+        float b = float(branch[i]);
+        float g = gate[i % N];
+        float result = residual[i] + b * g;
+        residual[i] = result;
+        if (isnan(b)) {
+            localFlags |= NUM_FLAG_NAN;
+            localIndex = min(localIndex, i);
+        } else if (isinf(b)) {
+            localFlags |= (b > 0.0f) ? NUM_FLAG_POS_INF : NUM_FLAG_NEG_INF;
+            localIndex = min(localIndex, i);
+        } else {
+            float a = fabs(b);
+            if (a > 65504.0f) {
+                localFlags |= NUM_FLAG_HALF_OVERFLOW;
+                localIndex = min(localIndex, i);
+            }
+            uint bits = as_type<uint>(a);
+            if (bits > localMax) localMax = bits;
+        }
+        if (isnan(result)) {
+            localFlags |= NUM_FLAG_RESULT_NAN;
+            localIndex = min(localIndex, i);
+        } else if (isinf(result)) {
+            localFlags |= NUM_FLAG_RESULT_INF;
+            localIndex = min(localIndex, i);
+        }
+    }
+    partialFlags[tid] = localFlags;
+    partialMax[tid] = localMax;
+    partialIndex[tid] = localIndex;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            partialFlags[tid] |= partialFlags[tid + stride];
+            partialMax[tid] = max(partialMax[tid], partialMax[tid + stride]);
+            partialIndex[tid] = min(partialIndex[tid], partialIndex[tid + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0 && partialFlags[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        uint slotBase = probeSlot * NUM_SLOT_UINTS;
+        atomic_fetch_or_explicit(&atom[slotBase + 0], partialFlags[0], memory_order_relaxed);
+        atomic_fetch_min_explicit(&atom[slotBase + 2], partialIndex[0], memory_order_relaxed);
+    }
+    if (tid == 0 && partialMax[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        atomic_fetch_max_explicit(&atom[probeSlot * NUM_SLOT_UINTS + 1], partialMax[0], memory_order_relaxed);
+    }
+}
+
+// Row softmax over fp16 scores that also records input-score health. Input
+// semantics identical to attention_softmax_rows; stats record the raw scores
+// as read during the max pass.
+kernel void attention_softmax_rows_probe(
+    device half       *scores    [[buffer(0)]],
+    constant uint     &rows      [[buffer(1)]],
+    constant uint     &columns   [[buffer(2)]],
+    constant uint     &queryBase [[buffer(3)]],
+    constant uint     &causal    [[buffer(4)]],
+    device uint       *stats     [[buffer(5)]],
+    constant uint     &probeSlot [[buffer(6)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint3 threads [[threads_per_threadgroup]])
+{
+    uint row = group.x;
+    if (row >= rows) return;
+    uint threadCount = threads.x;
+    threadgroup float partial[256];
+    threadgroup uint localFlags[256];
+    threadgroup uint localMax[256];
+    threadgroup uint localIndex[256];
+    float localMaxScore = -INFINITY;
+    uint flags = 0;
+    uint maxBits = 0;
+    uint firstIndex = 0xFFFFFFFFu;
+    for (uint column = tid; column < columns; column += threadCount) {
+        if (causal == 0 || column <= queryBase + row) {
+            float s = float(scores[row * columns + column]);
+            localMaxScore = max(localMaxScore, s);
+            if (isnan(s)) {
+                flags |= NUM_FLAG_NAN;
+                firstIndex = min(firstIndex, column);
+            } else if (isinf(s)) {
+                flags |= (s > 0.0f) ? NUM_FLAG_POS_INF : NUM_FLAG_NEG_INF;
+                firstIndex = min(firstIndex, column);
+            } else {
+                float a = fabs(s);
+                if (a > 65504.0f) {
+                    flags |= NUM_FLAG_HALF_OVERFLOW;
+                    firstIndex = min(firstIndex, column);
+                }
+                uint bits = as_type<uint>(a);
+                if (bits > maxBits) maxBits = bits;
+            }
+        }
+    }
+    partial[tid] = localMaxScore;
+    localFlags[tid] = flags;
+    localMax[tid] = maxBits;
+    localIndex[tid] = firstIndex;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            partial[tid] = max(partial[tid], partial[tid + stride]);
+            localFlags[tid] |= localFlags[tid + stride];
+            localMax[tid] = max(localMax[tid], localMax[tid + stride]);
+            localIndex[tid] = min(localIndex[tid], localIndex[tid + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float rowMax = partial[0];
+    if (tid == 0 && localFlags[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        uint slotBase = probeSlot * NUM_SLOT_UINTS;
+        atomic_fetch_or_explicit(&atom[slotBase + 0], localFlags[0], memory_order_relaxed);
+        atomic_fetch_min_explicit(&atom[slotBase + 2], localIndex[0], memory_order_relaxed);
+    }
+    if (tid == 0 && localMax[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        atomic_fetch_max_explicit(&atom[probeSlot * NUM_SLOT_UINTS + 1], localMax[0], memory_order_relaxed);
+    }
+    float localSum = 0.0f;
+    for (uint column = tid; column < columns; column += threadCount) {
+        float probability = 0.0f;
+        if (causal == 0 || column <= queryBase + row) {
+            probability = exp(float(scores[row * columns + column]) - rowMax);
+        }
+        localSum += probability;
+    }
+    partial[tid] = localSum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inverseSum = 1.0f / partial[0];
+    for (uint column = tid; column < columns; column += threadCount) {
+        float probability = 0.0f;
+        if (causal == 0 || column <= queryBase + row) {
+            probability = exp(float(scores[row * columns + column]) - rowMax) * inverseSum;
+        }
+        scores[row * columns + column] = half(probability);
+    }
+}
+
+// Row softmax over fp32 scores (fp32-scores attention mode) with stats.
+kernel void attention_softmax_rows_f32_probe(
+    device float *scores    [[buffer(0)]],
+    constant uint &rows     [[buffer(1)]],
+    constant uint &columns  [[buffer(2)]],
+    constant uint &queryBase [[buffer(3)]],
+    constant uint &causal   [[buffer(4)]],
+    device uint   *stats    [[buffer(5)]],
+    constant uint &probeSlot [[buffer(6)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint3 threads [[threads_per_threadgroup]])
+{
+    uint row = group.x;
+    if (row >= rows) return;
+    uint threadCount = threads.x;
+    threadgroup float partial[256];
+    threadgroup uint localFlags[256];
+    threadgroup uint localMax[256];
+    threadgroup uint localIndex[256];
+    float localMaxScore = -INFINITY;
+    uint flags = 0;
+    uint maxBits = 0;
+    uint firstIndex = 0xFFFFFFFFu;
+    for (uint column = tid; column < columns; column += threadCount) {
+        if (causal == 0 || column <= queryBase + row) {
+            float s = scores[row * columns + column];
+            localMaxScore = max(localMaxScore, s);
+            if (isnan(s)) {
+                flags |= NUM_FLAG_NAN;
+                firstIndex = min(firstIndex, column);
+            } else if (isinf(s)) {
+                flags |= (s > 0.0f) ? NUM_FLAG_POS_INF : NUM_FLAG_NEG_INF;
+                firstIndex = min(firstIndex, column);
+            } else {
+                float a = fabs(s);
+                if (a > 65504.0f) {
+                    flags |= NUM_FLAG_HALF_OVERFLOW;
+                    firstIndex = min(firstIndex, column);
+                }
+                uint bits = as_type<uint>(a);
+                if (bits > maxBits) maxBits = bits;
+            }
+        }
+    }
+    partial[tid] = localMaxScore;
+    localFlags[tid] = flags;
+    localMax[tid] = maxBits;
+    localIndex[tid] = firstIndex;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            partial[tid] = max(partial[tid], partial[tid + stride]);
+            localFlags[tid] |= localFlags[tid + stride];
+            localMax[tid] = max(localMax[tid], localMax[tid + stride]);
+            localIndex[tid] = min(localIndex[tid], localIndex[tid + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float rowMax = partial[0];
+    if (tid == 0 && localFlags[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        uint slotBase = probeSlot * NUM_SLOT_UINTS;
+        atomic_fetch_or_explicit(&atom[slotBase + 0], localFlags[0], memory_order_relaxed);
+        atomic_fetch_min_explicit(&atom[slotBase + 2], localIndex[0], memory_order_relaxed);
+    }
+    if (tid == 0 && localMax[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        atomic_fetch_max_explicit(&atom[probeSlot * NUM_SLOT_UINTS + 1], localMax[0], memory_order_relaxed);
+    }
+    float localSum = 0.0f;
+    for (uint column = tid; column < columns; column += threadCount) {
+        if (causal == 0 || column <= queryBase + row)
+            localSum += exp(scores[row * columns + column] - rowMax);
+    }
+    partial[tid] = localSum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inverseSum = 1.0f / partial[0];
+    for (uint column = tid; column < columns; column += threadCount) {
+        scores[row * columns + column] =
+            (causal == 0 || column <= queryBase + row)
+            ? exp(scores[row * columns + column] - rowMax) * inverseSum : 0.0f;
+    }
+}
+
+// Standalone fp16 stats pass over an arbitrary fp16 buffer (MPS outputs:
+// q/k/v tokens, attended, branch, projected). Flag bits as the common set.
+kernel void probe_f16_stats(
+    device const half *values [[buffer(0)]],
+    device uint       *stats  [[buffer(1)]],
+    constant uint     &count  [[buffer(2)]],
+    constant uint     &probeSlot [[buffer(3)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    threadgroup uint partialFlags[256];
+    threadgroup uint partialMax[256];
+    threadgroup uint partialIndex[256];
+    uint base = group.x * 256;
+    uint i = base + tid;
+    uint localFlags = 0;
+    uint localMax = 0;
+    uint localIndex = 0xFFFFFFFFu;
+    if (i < count) {
+        float v = float(values[i]);
+        if (isnan(v)) {
+            localFlags |= NUM_FLAG_NAN;
+            localIndex = min(localIndex, i);
+        } else if (isinf(v)) {
+            localFlags |= (v > 0.0f) ? NUM_FLAG_POS_INF : NUM_FLAG_NEG_INF;
+            localIndex = min(localIndex, i);
+        } else {
+            float a = fabs(v);
+            if (a > 65504.0f) {
+                localFlags |= NUM_FLAG_HALF_OVERFLOW;
+                localIndex = min(localIndex, i);
+            }
+            uint bits = as_type<uint>(a);
+            if (bits > localMax) localMax = bits;
+        }
+    }
+    partialFlags[tid] = localFlags;
+    partialMax[tid] = localMax;
+    partialIndex[tid] = localIndex;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            partialFlags[tid] |= partialFlags[tid + stride];
+            partialMax[tid] = max(partialMax[tid], partialMax[tid + stride]);
+            partialIndex[tid] = min(partialIndex[tid], partialIndex[tid + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0 && partialFlags[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        uint slotBase = probeSlot * NUM_SLOT_UINTS;
+        atomic_fetch_or_explicit(&atom[slotBase + 0], partialFlags[0], memory_order_relaxed);
+        atomic_fetch_min_explicit(&atom[slotBase + 2], partialIndex[0], memory_order_relaxed);
+    }
+    if (tid == 0 && partialMax[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        atomic_fetch_max_explicit(&atom[probeSlot * NUM_SLOT_UINTS + 1], partialMax[0], memory_order_relaxed);
+    }
+}
+
+// Standalone fp32 stats pass (velocity, denoised, Euler output, fp32 residual
+// after each branch). Flag bit3 means "|v| >= 65504 (would overflow fp16)".
+kernel void probe_f32_stats(
+    device const float *values [[buffer(0)]],
+    device uint        *stats  [[buffer(1)]],
+    constant uint      &count  [[buffer(2)]],
+    constant uint      &probeSlot [[buffer(3)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    threadgroup uint partialFlags[256];
+    threadgroup uint partialMax[256];
+    threadgroup uint partialIndex[256];
+    uint base = group.x * 256;
+    uint i = base + tid;
+    uint localFlags = 0;
+    uint localMax = 0;
+    uint localIndex = 0xFFFFFFFFu;
+    if (i < count) {
+        float v = values[i];
+        if (isnan(v)) {
+            localFlags |= NUM_FLAG_NAN;
+            localIndex = min(localIndex, i);
+        } else if (isinf(v)) {
+            localFlags |= (v > 0.0f) ? NUM_FLAG_POS_INF : NUM_FLAG_NEG_INF;
+            localIndex = min(localIndex, i);
+        } else {
+            float a = fabs(v);
+            if (a > 65504.0f) {
+                localFlags |= NUM_FLAG_HALF_OVERFLOW;
+                localIndex = min(localIndex, i);
+            }
+            uint bits = as_type<uint>(a);
+            if (bits > localMax) localMax = bits;
+        }
+    }
+    partialFlags[tid] = localFlags;
+    partialMax[tid] = localMax;
+    partialIndex[tid] = localIndex;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            partialFlags[tid] |= partialFlags[tid + stride];
+            partialMax[tid] = max(partialMax[tid], partialMax[tid + stride]);
+            partialIndex[tid] = min(partialIndex[tid], partialIndex[tid + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0 && partialFlags[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        uint slotBase = probeSlot * NUM_SLOT_UINTS;
+        atomic_fetch_or_explicit(&atom[slotBase + 0], partialFlags[0], memory_order_relaxed);
+        atomic_fetch_min_explicit(&atom[slotBase + 2], partialIndex[0], memory_order_relaxed);
+    }
+    if (tid == 0 && partialMax[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        atomic_fetch_max_explicit(&atom[probeSlot * NUM_SLOT_UINTS + 1], partialMax[0], memory_order_relaxed);
+    }
+}

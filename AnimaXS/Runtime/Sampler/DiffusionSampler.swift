@@ -30,19 +30,33 @@ final class DiffusionSampler {
     private let euler: EulerSampler
     private let buffers: BufferPool
     private let rope: MTLBuffer
+    private let monitor: NumericalMonitor
     private let stateLock = NSLock()
     private var running = false
+
+    /// Run telemetry collector (injected by GenerationEngine after stage
+    /// construction). Forwarded to the stage executors.
+    var metrics: MetricsCollector? {
+        didSet {
+            preparation.metrics = metrics
+            forward.metrics = metrics
+            euler.metrics = metrics
+        }
+    }
 
     init(context: MetalContext, file: AnimapkFile,
          attentionNumerics: AttentionNumerics = .legacy,
          activationNumerics: ActivationNumerics = .legacy) throws {
         self.context = context
+        let monitor = try NumericalMonitor(context: context)
+        self.monitor = monitor
         preparation = try DiTPreparationExecutor(
-            context: context, file: file, activationNumerics: activationNumerics)
+            context: context, file: file, activationNumerics: activationNumerics,
+            monitor: monitor)
         forward = try DitForward(
             context: context, file: file, attentionNumerics: attentionNumerics,
-            activationNumerics: activationNumerics)
-        euler = EulerSampler(context: context)
+            activationNumerics: activationNumerics, monitor: monitor)
+        euler = EulerSampler(context: context, monitor: monitor)
         buffers = BufferPool(device: context.device)
 
         let values = DitRoPE.generate()
@@ -95,9 +109,10 @@ final class DiffusionSampler {
     ) async throws {
         try beginRun()
         defer { endRun() }
+        monitor.beginRun()
         guard (0...ModelConstants.samplerSteps).contains(startStep) else {
             throw AnimapkError.validation(
-                "startStep \\(startStep) out of range 0...\\(ModelConstants.samplerSteps)")
+                "startStep \(startStep) out of range 0...\(ModelConstants.samplerSteps)")
         }
         let bytes = Self.latentElements * 4
         guard initialLatent.length >= bytes, outputLatent.length >= bytes,
@@ -127,6 +142,7 @@ final class DiffusionSampler {
         // Resume: the checkpoint latent already contains the result of steps
         // [0, startStep); only execute the remaining sigma transitions.
         for step in startStep..<EulerSampler.sigmas.count - 1 {
+            metrics?.beginStep(step)
             let sigma = EulerSampler.sigmas[step]
             let nextSigma = EulerSampler.sigmas[step + 1]
             try await preparation.execute(
@@ -137,9 +153,10 @@ final class DiffusionSampler {
             try await forward.execute(
                 residual: residual, emb: embedding, adalnLora: adaln,
                 crossContext: crossHalf, rope: rope,
-                blockCompleted: { block, _ in
+                blockCompleted: { [self] block, _ in
                 try blockProgress?(step, block)
                 try diagnosticBlockCompleted?(step, block, residual)
+                monitor.noteBlockCompleted(step: step, block: block)
             }, diagnosticBranchFilter: { block in
                 diagnosticBranchFilter?(step, block) ?? true
             }, diagnosticBranchCompleted: { block, branch, current in
@@ -153,13 +170,31 @@ final class DiffusionSampler {
             try await euler.executeStep(
                 latent: latent, denoised: denoised, output: next,
                 sigma: sigma, nextSigma: nextSigma, count: Self.latentElements)
+            monitor.noteStepCompleted(step: step)
             guard isFinite(next, count: Self.latentElements) else {
-                throw AnimapkError.validation("non-finite diffusion latent after step \\(step)")
+                // 1-based step for the human-visible message; attribution
+                // (block/stage/condition) is added by the numerical monitor.
+                throw numericalFailure(step: step)
             }
+            metrics?.endStep()
             try stepCompleted?(step, sigma, nextSigma, denoised, next)
             swap(&latent, &next)
         }
+        metrics?.setNumericalWarnings(monitor.warningCount())
+        metrics?.setNumericalDetails(monitor.warningDetails())
         try await copy(latent, to: outputLatent, bytes: bytes)
+    }
+
+    // MARK: - Diagnostic accessors (stress harness / tests)
+
+    /// Full probe report after a completed (or failed) run.
+    var numericalReport: [NumericalMonitor.Probe: NumericalMonitor.Stats] {
+        monitor.report()
+    }
+
+    /// First unsafe (step, block, probe) attribution, if any.
+    var earliestNumericalIssue: NumericalMonitor.FirstIssue? {
+        monitor.earliestIssue
     }
 
     static func cpuDenoised(latent: [Float], velocity: [Float], sigma: Float) throws -> [Float] {
@@ -182,6 +217,17 @@ final class DiffusionSampler {
         stateLock.unlock()
     }
 
+    private func numericalFailure(step: Int) -> NumericalFailure {
+        if let issue = monitor.earliestIssue {
+            return NumericalFailure.attributed(
+                step: issue.step, totalSteps: ModelConstants.samplerSteps,
+                block: issue.block ?? 1, totalBlocks: DiTBlockLocator.blockCount,
+                stage: issue.probe.stageLabel, condition: issue.stats.condition)
+        }
+        return NumericalFailure.eulerOutput(
+            step: step + 1, totalSteps: ModelConstants.samplerSteps)
+    }
+
     private func convertVelocity(
         latent: MTLBuffer, velocity: MTLBuffer, denoised: MTLBuffer, sigma: Float
     ) async throws {
@@ -202,6 +248,8 @@ final class DiffusionSampler {
             MTLSize(width: Self.latentElements, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
         encoder.endEncoding()
+        try monitor.encodeProbeF32(
+            command, values: denoised, count: Self.latentElements, probe: .denoised)
         try await commit(command)
     }
 
@@ -212,16 +260,17 @@ final class DiffusionSampler {
               let encoder = command.makeComputeCommandEncoder() else {
             throw AnimapkError.validation("failed to create context conversion command")
         }
-        let pipeline = try context.pipeline(named: "float_to_half")
+        let pipeline = try context.pipeline(named: "float_to_half_probe")
         var count = UInt32(count)
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(input, offset: 0, index: 0)
         encoder.setBuffer(output, offset: 0, index: 1)
         encoder.setBytes(&count, length: 4, index: 2)
-        let width = min(pipeline.threadExecutionWidth, pipeline.maxTotalThreadsPerThreadgroup)
-        encoder.dispatchThreads(
-            MTLSize(width: Int(count), height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+        monitor.bindProbe(encoder, probe: .crossContextToHalf, statsIndex: 3, slotIndex: 4)
+        let groups = (Int(count) + 255) / 256
+        encoder.dispatchThreadgroups(
+            MTLSize(width: groups, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         encoder.endEncoding()
         try await commit(command)
     }

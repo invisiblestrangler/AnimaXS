@@ -30,14 +30,17 @@ final class AttentionExecutor {
 
     private let context: MetalContext
     private let buffers: BufferPool
+    private let monitor: NumericalMonitor?
     let tileRows: Int
     let numerics: AttentionNumerics
 
     init(context: MetalContext, tileRows: Int = defaultTileRows,
-         numerics: AttentionNumerics = .legacy) {
+         numerics: AttentionNumerics = .legacy,
+         monitor: NumericalMonitor? = nil) {
         precondition(tileRows > 0)
         self.context = context
         self.buffers = BufferPool(device: context.device)
+        self.monitor = monitor
         self.tileRows = tileRows
         self.numerics = numerics
     }
@@ -57,7 +60,8 @@ final class AttentionExecutor {
         output: MTLBuffer, outputOffset: Int = 0,
         heads: Int, queryCount: Int, keyCount: Int, headDim: Int,
         keyValueHeads: Int? = nil,
-        causal: Bool = false
+        causal: Bool = false,
+        probe: NumericalMonitor.Probe? = nil
     ) throws {
         let kvHeads = keyValueHeads ?? heads
         try validate(query: query, queryOffset: queryOffset, key: key, keyOffset: keyOffset,
@@ -68,7 +72,9 @@ final class AttentionExecutor {
         let halfBytes = MemoryLayout<Float16>.stride
         let scoreScratch = buffers.buffer(
             key: "attention.scores.fp16", bytes: try maximumScoreScratchBytes(keyCount: keyCount))
-        let softmax = try context.pipeline(named: "attention_softmax_rows")
+        let softmaxName = (monitor != nil && probe != nil)
+            ? "attention_softmax_rows_probe" : "attention_softmax_rows"
+        let softmax = try context.pipeline(named: softmaxName)
         let headRowBytes = headDim * halfBytes
         let scoreRowBytes = keyCount * halfBytes
         let scale = 1 / sqrt(Double(headDim))
@@ -78,7 +84,7 @@ final class AttentionExecutor {
                            key: key, keyOffset: keyOffset, value: value, valueOffset: valueOffset,
                            output: output, outputOffset: outputOffset, heads: heads,
                            queryCount: queryCount, keyCount: keyCount, headDim: headDim,
-                           kvHeads: kvHeads, causal: causal)
+                           kvHeads: kvHeads, causal: causal, probe: probe)
             return
         }
 
@@ -127,6 +133,9 @@ final class AttentionExecutor {
                 encoder.setBytes(&columns, length: 4, index: 2)
                 encoder.setBytes(&base, length: 4, index: 3)
                 encoder.setBytes(&causalFlag, length: 4, index: 4)
+                if let monitor, let probe {
+                    monitor.bindProbe(encoder, probe: probe, statsIndex: 5, slotIndex: 6)
+                }
                 let threads = reductionThreads(limit: softmax.maxTotalThreadsPerThreadgroup)
                 encoder.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1),
                                              threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1))
@@ -182,14 +191,16 @@ final class AttentionExecutor {
         query: MTLBuffer, queryOffset: Int, key: MTLBuffer, keyOffset: Int,
         value: MTLBuffer, valueOffset: Int, output: MTLBuffer, outputOffset: Int,
         heads: Int, queryCount: Int, keyCount: Int, headDim: Int,
-        kvHeads: Int, causal: Bool
+        kvHeads: Int, causal: Bool, probe: NumericalMonitor.Probe?
     ) throws {
         let halfBytes = MemoryLayout<Float16>.stride
         let headRowBytes = headDim * halfBytes
         let scoreScratch = buffers.buffer(
             key: "attention.scores.fp32", bytes: try maximumScoreScratchBytes(keyCount: keyCount))
         let qk = try context.pipeline(named: "attention_qk_f16_to_f32")
-        let softmax = try context.pipeline(named: "attention_softmax_rows_f32")
+        let softmaxName = (monitor != nil && probe != nil)
+            ? "attention_softmax_rows_f32_probe" : "attention_softmax_rows_f32"
+        let softmax = try context.pipeline(named: softmaxName)
         let pv = try context.pipeline(named: "attention_pv_f32_f16_to_f16")
         let scale = Float(1 / sqrt(Double(headDim)))
 
@@ -226,6 +237,9 @@ final class AttentionExecutor {
                 softmaxEncoder.setBytes(&columns, length: 4, index: 2)
                 softmaxEncoder.setBytes(&base, length: 4, index: 3)
                 softmaxEncoder.setBytes(&causalFlag, length: 4, index: 4)
+                if let monitor, let probe {
+                    monitor.bindProbe(softmaxEncoder, probe: probe, statsIndex: 5, slotIndex: 6)
+                }
                 let threads = reductionThreads(limit: softmax.maxTotalThreadsPerThreadgroup)
                 softmaxEncoder.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1),
                     threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1))

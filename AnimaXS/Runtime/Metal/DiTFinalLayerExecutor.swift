@@ -18,10 +18,14 @@ final class DiTFinalLayerExecutor {
     private let buffers: BufferPool
     private let linear: LinearExecutor
     private let activationNumerics: ActivationNumerics
+    private let monitor: NumericalMonitor?
+    /// Run telemetry collector (nil in tests / diagnostic-only construction).
+    var metrics: MetricsCollector?
     private var emulatesBF16: Bool { activationNumerics == .bf16Compute }
 
     init(context: MetalContext, file: AnimapkFile,
-         activationNumerics: ActivationNumerics = .legacy) throws {
+         activationNumerics: ActivationNumerics = .legacy,
+         monitor: NumericalMonitor? = nil) throws {
         let range = try DiTFinalLayerLocator(file: file).range
         guard range.length <= UInt64(Int.max) else {
             throw AnimapkError.validation("DiT final layer range is too large")
@@ -33,6 +37,7 @@ final class DiTFinalLayerExecutor {
         self.buffers = BufferPool(device: context.device)
         self.linear = LinearExecutor(context: context)
         self.activationNumerics = activationNumerics
+        self.monitor = monitor
     }
 
     /// `residual`, `emb`, and `adalnLora` are fp32. `velocity` is fp32
@@ -42,7 +47,9 @@ final class DiTFinalLayerExecutor {
         velocity: MTLBuffer
     ) async throws {
         try validate(residual: residual, emb: emb, adalnLora: adalnLora, velocity: velocity)
+        let copyStart = ProcessInfo.processInfo.systemUptime
         try streamer.load(range, from: file)
+        metrics?.recordWeightCopy(bytes: Int(range.length), seconds: ProcessInfo.processInfo.systemUptime - copyStart)
         let weights = try FinalWeights(range: range, ring: streamer.ring)
         guard let command = context.commandQueue.makeCommandBuffer() else {
             throw AnimapkError.validation("failed to create final-layer command buffer")
@@ -70,19 +77,22 @@ final class DiTFinalLayerExecutor {
             "final.normalizedBoundary.f32", Self.tokens * Self.dim, Float.self)
         let modulated = buffer("final.modulated.f32", Self.tokens * Self.dim, Float.self)
         let projectionInput = buffer("final.projectionInput.f16", Self.tokens * Self.dim, Float16.self)
-        try encodeUnary(command, "float_to_half", residual, residualHalf, Self.tokens * Self.dim)
+        try encodeProbeConvert(command, "float_to_half", residual, residualHalf,
+                               Self.tokens * Self.dim, probe: .finalResidualToHalf)
         try encodeUnary(command, "half_to_float", residualHalf, boundaryFloat, Self.tokens * Self.dim)
         try encodeLayerNorm(command, input: boundaryFloat, output: normalized)
         // torch.layer_norm preserves its fp16 input dtype. AdaLN then promotes the
         // rounded norm output when adding the fp32 shift/scale tensors.
-        try encodeUnary(command, "float_to_half", normalized, normalizedHalf, Self.tokens * Self.dim)
+        try encodeProbeConvert(command, "float_to_half", normalized, normalizedHalf,
+                               Self.tokens * Self.dim, probe: .finalNormalizedToHalf)
         try encodeHalfComputeBoundary(command, normalizedHalf, count: Self.tokens * Self.dim)
         try encodeUnary(command, "half_to_float", normalizedHalf, normalizedBoundary,
                         Self.tokens * Self.dim)
         try encodeModulate(command, normalized: normalizedBoundary,
                            modulation: modulation, output: modulated)
         try encodeComputeBoundary(command, modulated, count: Self.tokens * Self.dim)
-        try encodeUnary(command, "float_to_half", modulated, projectionInput, Self.tokens * Self.dim)
+        try encodeProbeConvert(command, "float_to_half", modulated, projectionInput,
+                               Self.tokens * Self.dim, probe: .finalProjectionInput)
 
         let projectedHalf = buffer("final.projected.f16", Self.tokens * Self.projected, Float16.self)
         let projectedFloat = buffer("final.projected.f32", Self.tokens * Self.projected, Float.self)
@@ -90,9 +100,17 @@ final class DiTFinalLayerExecutor {
                           weight: weights.projection, output: projectedHalf,
                           inputRows: Self.tokens)
         try encodeHalfComputeBoundary(command, projectedHalf, count: Self.tokens * Self.projected)
+        if NumericalMonitor.detailedProbesEnabled, let monitor {
+            try monitor.encodeProbe(command, values: projectedHalf,
+                                    count: Self.tokens * Self.projected, probe: .finalProjected)
+        }
         try encodeUnary(command, "half_to_float", projectedHalf, projectedFloat,
                         Self.tokens * Self.projected)
         try encodeUnpatchify(command, input: projectedFloat, output: velocity)
+        if let monitor {
+            try monitor.encodeProbeF32(command, values: velocity,
+                                       count: Self.outputElements, probe: .velocity)
+        }
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             command.addCompletedHandler { completed in
@@ -200,6 +218,33 @@ final class DiTFinalLayerExecutor {
         encoder.setBuffer(output, offset: 0, index: 1)
         encoder.setBytes(&elements, length: 4, index: 2)
         dispatch(encoder, pipeline, count)
+        encoder.endEncoding()
+    }
+
+    /// float_to_half with in-kernel numerical-health recording (probe kernel
+    /// performs the identical conversion).
+    private func encodeProbeConvert(
+        _ command: MTLCommandBuffer, _ name: String, _ input: MTLBuffer,
+        _ output: MTLBuffer, _ count: Int, probe: NumericalMonitor.Probe
+    ) throws {
+        guard let monitor else {
+            try encodeUnary(command, name, input, output, count)
+            return
+        }
+        let pipeline = try context.pipeline(named: "float_to_half_probe")
+        guard let encoder = command.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create float_to_half_probe encoder")
+        }
+        var elements = UInt32(count)
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(input, offset: 0, index: 0)
+        encoder.setBuffer(output, offset: 0, index: 1)
+        encoder.setBytes(&elements, length: 4, index: 2)
+        monitor.bindProbe(encoder, probe: probe, statsIndex: 3, slotIndex: 4)
+        let groups = (count + 255) / 256
+        encoder.dispatchThreadgroups(
+            MTLSize(width: groups, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         encoder.endEncoding()
     }
 

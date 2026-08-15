@@ -27,12 +27,17 @@ struct DiagnosticsView: View {
     @State private var jsonURL = FileManager.default.temporaryDirectory
         .appendingPathComponent("anima-xs-diagnostics.json")
 
+    /// Phase 8 — telemetry summary of the most recent generation, passed in
+    /// from the coordinator so it is visible without a cable.
+    var lastMetricsText: String?
+
     private let marker = DiagnosticRunMarker()
 
     var body: some View {
         Form {
             previousRunSection
             deviceSection
+            metricsSection
             modelSection
             basicTestsSection
             hardwareTestsSection
@@ -86,6 +91,21 @@ struct DiagnosticsView: View {
                 LabeledContent("Thermal", value: snapshot.thermalState)
             } else {
                 ProgressView("Loading snapshot…")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var metricsSection: some View {
+        if let text = lastMetricsText {
+            Section("Last generation metrics") {
+                Text(text)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                ShareLink(item: text) {
+                    Label("Copy / share metrics", systemImage: "square.and.arrow.up")
+                }
+                .font(.caption)
             }
         }
     }

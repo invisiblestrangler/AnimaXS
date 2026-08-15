@@ -17,9 +17,13 @@ final class EulerSampler {
     ]
 
     private let context: MetalContext
+    private let monitor: NumericalMonitor?
+    /// Run telemetry collector (nil in tests / diagnostic-only construction).
+    var metrics: MetricsCollector?
 
-    init(context: MetalContext) {
+    init(context: MetalContext, monitor: NumericalMonitor? = nil) {
         self.context = context
+        self.monitor = monitor
     }
 
     static func cpuStep(
@@ -72,6 +76,9 @@ final class EulerSampler {
         }
         try encodeStep(commandBuffer: command, latent: latent, denoised: denoised,
                        output: output, sigma: sigma, nextSigma: nextSigma, count: count)
+        if let monitor {
+            try monitor.encodeProbeF32(command, values: output, count: count, probe: .eulerOutput)
+        }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             command.addCompletedHandler { completed in
                 if let error = completed.error { continuation.resume(throwing: error) }
