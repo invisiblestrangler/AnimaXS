@@ -7,6 +7,14 @@ final class DitForward {
     private let block: DiTBlockExecutor
     private let finalLayer: DiTFinalLayerExecutor
 
+    /// Run telemetry collector; forwarded to the block and final-layer executors.
+    var metrics: MetricsCollector? {
+        didSet {
+            block.metrics = metrics
+            finalLayer.metrics = metrics
+        }
+    }
+
     init(context: MetalContext, file: AnimapkFile,
          attentionNumerics: AttentionNumerics = .legacy,
          activationNumerics: ActivationNumerics = .legacy,

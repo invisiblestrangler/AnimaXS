@@ -133,6 +133,8 @@ struct GenerationEngine {
     ///   - progress: Stage progress, including diffusion step/block counts.
     ///   - checkpoint: Called after each completed diffusion step with the
     ///                 completed step index and the fp32 latent snapshot.
+    ///   - metrics: Optional collector for this run's timing/memory telemetry;
+    ///              a private one is created when nil (test path).
     func generate(
         prompt: String,
         seed: UInt64,
@@ -140,12 +142,20 @@ struct GenerationEngine {
         noise: MTLBuffer? = nil,
         startStep: Int = 0,
         progress: ProgressCallback? = nil,
-        checkpoint: ((Int, [Float]) throws -> Void)? = nil
+        checkpoint: ((Int, [Float]) throws -> Void)? = nil,
+        metrics metricsIn: MetricsCollector? = nil
     ) async throws -> DecodedRGBA8 {
+        let metrics = metricsIn ?? MetricsCollector()
+        let generationStart = ProcessInfo.processInfo.systemUptime
+        defer {
+            metrics.finalize(totalWall: ProcessInfo.processInfo.systemUptime - generationStart)
+        }
         // ---- 1. Tokenization (production TokenizerLoader semantics) ----
         progress?(.tokenizing)
         try Task.checkCancellation()
+        metrics.beginStage(.tokenizing)
         let tokenized = try tokenize(prompt: prompt)
+        metrics.endStage(.tokenizing)
         let qwenTokenIDs = tokenized.qwen
         let t5IDs = tokenized.t5
         let t5Weights = tokenized.t5Weights
@@ -154,24 +164,30 @@ struct GenerationEngine {
         // escape this helper) ----
         progress?(.encodingPrompt)
         try Task.checkCancellation()
+        metrics.beginStage(.textEncode)
         let qwenOutput = try await encodePrompt(
             models: models, tokenIDs: qwenTokenIDs)
+        metrics.endStage(.textEncode)
 
         // ---- 3. Adapter → crossContext [512, 1024] fp32 (adapter + its mmap
         // cannot escape this helper) ----
         progress?(.adapting)
         try Task.checkCancellation()
+        metrics.beginStage(.adapter)
         let cross = try await adaptPrompt(
             models: models, qwenContext: qwenOutput,
             contextTokens: qwenTokenIDs.count, t5IDs: t5IDs, t5Weights: t5Weights)
+        metrics.endStage(.adapter)
 
         // ---- 4. Diffusion: seeded noise → final latent (sampler-space) ----
         let totalSteps = ModelConstants.samplerSteps
         let initialLatent = try makeInitialLatent(seed: seed, noise: noise)
+        metrics.beginStage(.diffusion)
         let finalLatent = try await diffuse(
             models: models, initialLatent: initialLatent, cross: cross,
             startStep: startStep, totalSteps: totalSteps,
-            progress: progress, checkpoint: checkpoint)
+            progress: progress, checkpoint: checkpoint, metrics: metrics)
+        metrics.endStage(.diffusion)
 
         // ---- 4b. Wan21 latent-format boundary (sampler-space → VAE-space) ----
         // Root-cause fix (2026-08-14): ComfyUI applies latent_format.process_out
@@ -185,7 +201,9 @@ struct GenerationEngine {
         // ---- 5. VAE decode (VAE + its mmap cannot escape this helper) ----
         progress?(.decoding)
         try Task.checkCancellation()
+        metrics.beginStage(.vae)
         let decoded = try await decodeVAE(models: models, latent: finalLatent)
+        metrics.endStage(.vae)
         return decoded
     }
 
@@ -239,13 +257,19 @@ struct GenerationEngine {
     private func diffuse(
         models: ResolvedModels, initialLatent: MTLBuffer, cross: MTLBuffer,
         startStep: Int, totalSteps: Int,
-        progress: ProgressCallback?, checkpoint: ((Int, [Float]) throws -> Void)?
+        progress: ProgressCallback?, checkpoint: ((Int, [Float]) throws -> Void)?,
+        metrics: MetricsCollector
     ) async throws -> MTLBuffer {
         guard (0...ModelConstants.samplerSteps).contains(startStep) else {
             throw GenerationError.sampler(
                 "startStep \(startStep) out of range 0...\(ModelConstants.samplerSteps)")
         }
         let sampler = try factory.makeDiffusion(context: context, fileURL: models.dit)
+        // Production path: inject the run's metrics collector into the sampler
+        // (and through it the preparation/forward/final-layer/euler executors).
+        if let sampler = sampler as? DiffusionSampler {
+            sampler.metrics = metrics
+        }
         defer { withExtendedLifetime(sampler) {} }
         let output = try makeBuffer(
             length: DiffusionSampler.latentElements * 4, "diffusion output buffer")

@@ -34,6 +34,16 @@ final class DiffusionSampler {
     private let stateLock = NSLock()
     private var running = false
 
+    /// Run telemetry collector (injected by GenerationEngine after stage
+    /// construction). Forwarded to the stage executors.
+    var metrics: MetricsCollector? {
+        didSet {
+            preparation.metrics = metrics
+            forward.metrics = metrics
+            euler.metrics = metrics
+        }
+    }
+
     init(context: MetalContext, file: AnimapkFile,
          attentionNumerics: AttentionNumerics = .legacy,
          activationNumerics: ActivationNumerics = .legacy) throws {
@@ -132,6 +142,7 @@ final class DiffusionSampler {
         // Resume: the checkpoint latent already contains the result of steps
         // [0, startStep); only execute the remaining sigma transitions.
         for step in startStep..<EulerSampler.sigmas.count - 1 {
+            metrics?.beginStep(step)
             let sigma = EulerSampler.sigmas[step]
             let nextSigma = EulerSampler.sigmas[step + 1]
             try await preparation.execute(
@@ -165,9 +176,11 @@ final class DiffusionSampler {
                 // (block/stage/condition) is added by the numerical monitor.
                 throw numericalFailure(step: step)
             }
+            metrics?.endStep()
             try stepCompleted?(step, sigma, nextSigma, denoised, next)
             swap(&latent, &next)
         }
+        metrics?.setNumericalWarnings(monitor.report().values.filter(\.hasIssue).count)
         try await copy(latent, to: outputLatent, bytes: bytes)
     }
 

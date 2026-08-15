@@ -57,6 +57,9 @@ enum GenerationError: Error, LocalizedError {
 final class GenerationCoordinator: ObservableObject {
     @Published private(set) var state: GenerationState = .idle
     @Published private(set) var image: UIImage?
+    /// Compact text summary of the most recent generation's telemetry
+    /// (Phase 8: readable without a cable).
+    @Published private(set) var lastMetricsText: String?
 
     private let context: MetalContext?
     private let factory: any GenerationStageFactory
@@ -266,6 +269,7 @@ final class GenerationCoordinator: ObservableObject {
         noise: MTLBuffer?,
         startStep: Int
     ) {
+        let metrics = MetricsCollector()
         generationTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -300,9 +304,11 @@ final class GenerationCoordinator: ObservableObject {
                                 try? store.save(checkpoint)
                             }
                         }
-                    })
+                    },
+                    metrics: metrics)
                 guard !Task.isCancelled else {
                     self.state = .cancelled
+                    self.publishMetrics(metrics)
                     return
                 }
                 self.image = GenerationCoordinator.makeUIImage(from: decoded)
@@ -312,6 +318,16 @@ final class GenerationCoordinator: ObservableObject {
             } catch {
                 self.state = .failed(error.localizedDescription)
             }
+            self.publishMetrics(metrics)
+        }
+    }
+
+    /// Publish the run's telemetry summary (works for completed, failed, and
+    /// cancelled runs — partial metrics are still useful evidence).
+    private func publishMetrics(_ metrics: MetricsCollector) {
+        let summary = metrics.snapshot().summaryText
+        Task { @MainActor [weak self] in
+            self?.lastMetricsText = summary
         }
     }
 

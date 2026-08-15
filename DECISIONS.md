@@ -61,6 +61,13 @@ No thermal logic. No silent clamping. No global FP32. Small, reversible commits.
   time, GPU command time (command-buffer GPU timestamps), host wait time, peak Metal
   allocation, min available process memory. Summary rendered in-app (post-gen) and
   in the Diagnostics screen.
+- Implemented: `MetricsCollector` (per-run, injected by coordinator → engine →
+  sampler → executors). Stage timing in engine; per-block copy/encode/gpu/wait in
+  `DiTBlockExecutor` (GPU time from `MTLCommandBuffer.gpuStartTime/gpuEndTime`,
+  guarded when unavailable); per-block memory sampling via
+  `MTLCurrentAllocatedSize` + `os_proc_available_memory`; numerical warnings from
+  the monitor report. UI: "Run metrics" section in ContentView + DiagnosticsView
+  with share/copy. `other` = wall − Σ(stages), so counters reconcile with wall.
 
 ### D203 — Phase 12: two-slot streamer decision (pending measurement)
 - Memory headroom: +1 slot ≈ +39 MB (max block range), vs observed ~1.4 GB peak —

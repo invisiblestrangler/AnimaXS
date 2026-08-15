@@ -48,10 +48,11 @@ struct ContentView: View {
                 generationSection
                 errorSection
                 imageSection
+                metricsSection
             }
             .navigationTitle("AnimaXS")
             .navigationDestination(isPresented: $showDiagnostics) {
-                DiagnosticsView()
+                DiagnosticsView(lastMetricsText: coordinator.lastMetricsText)
             }
             .scrollDismissesKeyboard(.interactively)
             .toolbar {
@@ -235,6 +236,22 @@ struct ContentView: View {
                 if let url = shareURL(for: image) {
                     ShareLink(item: url, preview: SharePreview("AnimaXS image", image: Image(uiImage: image)))
                 }
+            }
+        }
+    }
+
+    /// Phase 8 — post-generation telemetry summary (readable unplugged).
+    @ViewBuilder
+    private var metricsSection: some View {
+        if let text = coordinator.lastMetricsText {
+            Section("Run metrics") {
+                Text(text)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+                ShareLink(item: text) {
+                    Label("Copy / share metrics", systemImage: "square.and.arrow.up")
+                }
+                .font(.caption)
             }
         }
     }

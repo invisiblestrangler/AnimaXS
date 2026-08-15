@@ -18,6 +18,8 @@ final class EulerSampler {
 
     private let context: MetalContext
     private let monitor: NumericalMonitor?
+    /// Run telemetry collector (nil in tests / diagnostic-only construction).
+    var metrics: MetricsCollector?
 
     init(context: MetalContext, monitor: NumericalMonitor? = nil) {
         self.context = context

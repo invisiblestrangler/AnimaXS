@@ -19,6 +19,8 @@ final class DiTFinalLayerExecutor {
     private let linear: LinearExecutor
     private let activationNumerics: ActivationNumerics
     private let monitor: NumericalMonitor?
+    /// Run telemetry collector (nil in tests / diagnostic-only construction).
+    var metrics: MetricsCollector?
     private var emulatesBF16: Bool { activationNumerics == .bf16Compute }
 
     init(context: MetalContext, file: AnimapkFile,
@@ -45,7 +47,9 @@ final class DiTFinalLayerExecutor {
         velocity: MTLBuffer
     ) async throws {
         try validate(residual: residual, emb: emb, adalnLora: adalnLora, velocity: velocity)
+        let copyStart = ProcessInfo.processInfo.systemUptime
         try streamer.load(range, from: file)
+        metrics?.recordWeightCopy(bytes: Int(range.length), seconds: ProcessInfo.processInfo.systemUptime - copyStart)
         let weights = try FinalWeights(range: range, ring: streamer.ring)
         guard let command = context.commandQueue.makeCommandBuffer() else {
             throw AnimapkError.validation("failed to create final-layer command buffer")

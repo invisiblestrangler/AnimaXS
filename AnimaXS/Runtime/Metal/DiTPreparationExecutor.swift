@@ -18,6 +18,8 @@ final class DiTPreparationExecutor {
     private let buffers: BufferPool
     private let activationNumerics: ActivationNumerics
     private let monitor: NumericalMonitor?
+    /// Run telemetry collector (nil in tests / diagnostic-only construction).
+    var metrics: MetricsCollector?
 
     init(context: MetalContext, file: AnimapkFile,
          activationNumerics: ActivationNumerics = .legacy,
@@ -49,7 +51,10 @@ final class DiTPreparationExecutor {
               sigma.isFinite else {
             throw AnimapkError.validation("invalid DiT preparation input")
         }
+        let copyStart = ProcessInfo.processInfo.systemUptime
         try streamer.load(locator.range, from: file)
+        metrics?.recordWeightCopy(bytes: Int(locator.range.length),
+                                  seconds: ProcessInfo.processInfo.systemUptime - copyStart)
         let weights = try DiTPreparationWeights(range: locator.range, ring: streamer.ring)
         let raw = makeTimestep(sigma)
         guard let command = context.commandQueue.makeCommandBuffer() else {

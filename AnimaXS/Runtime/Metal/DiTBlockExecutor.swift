@@ -1,5 +1,8 @@
 import Foundation
 import Metal
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// Exact fixed-shape MiniTrainDIT block executed with one streamed block range.
 /// Legacy mode keeps residual/modulation/gates in fp32 and projection/attention
@@ -29,6 +32,8 @@ final class DiTBlockExecutor {
     private let attention: AttentionExecutor
     private let activationNumerics: ActivationNumerics
     private let monitor: NumericalMonitor?
+    /// Run telemetry collector (nil in tests / diagnostic-only construction).
+    var metrics: MetricsCollector?
     private var emulatesBF16: Bool { activationNumerics == .bf16Compute }
 
     init(context: MetalContext, file: AnimapkFile,
@@ -66,7 +71,11 @@ final class DiTBlockExecutor {
         try validateInputs(residual: residual, emb: emb, adalnLora: adalnLora,
                            crossContext: crossContext, rope: rope)
         let range = try locator.block(blockIndex)
+        metrics?.beginBlock(blockIndex)
+        let copyStart = ProcessInfo.processInfo.systemUptime
         try streamer.load(range, from: file)
+        let copyEnd = ProcessInfo.processInfo.systemUptime
+        metrics?.recordWeightCopy(bytes: Int(range.length), seconds: copyEnd - copyStart)
         let weights = try BlockWeights(range: range, ring: streamer.ring)
         guard let command = context.commandQueue.makeCommandBuffer() else {
             throw AnimapkError.validation("failed to create DiT block command buffer")
@@ -93,6 +102,7 @@ final class DiTBlockExecutor {
             try encodeSnapshot(command, source: residual, key: "dit.diagnostic.afterMLP.f32")
         }
 
+        let encodeEnd = ProcessInfo.processInfo.systemUptime
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             command.addCompletedHandler { completed in
                 if let error = completed.error { continuation.resume(throwing: error) }
@@ -100,6 +110,19 @@ final class DiTBlockExecutor {
             }
             command.commit()
         }
+        let done = ProcessInfo.processInfo.systemUptime
+        let gpuSeconds = (command.gpuStartTime > 0 && command.gpuEndTime >= command.gpuStartTime)
+            ? command.gpuEndTime - command.gpuStartTime : 0
+        metrics?.recordGPUCommand(seconds: gpuSeconds)
+        metrics?.recordEncode(seconds: encodeEnd - copyEnd)
+        metrics?.recordHostWait(seconds: (done - encodeEnd) - gpuSeconds)
+        metrics?.endBlock()
+        // Per-block memory sampling (cheap: no extra GPU sync — the block's
+        // command buffer has already completed).
+        context.refreshDiagnostics()
+        metrics?.recordMemory(
+            allocated: context.currentAllocatedSize,
+            available: UInt64(os_proc_available_memory()))
         if let diagnosticBranchCompleted {
             try diagnosticBranchCompleted("self", selfSnapshot!)
             try diagnosticBranchCompleted("cross", crossSnapshot!)
