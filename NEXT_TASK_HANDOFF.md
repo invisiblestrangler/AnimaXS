@@ -34,7 +34,8 @@ catch. The stabilization pass (PR #8, branch `fix/real-device-stabilization`, ba
 8. **Keyboard dismissal (Fix H).** `@FocusState` + keyboard-toolbar Done for prompt and number pad.
 9. **Diagnostics redesign (Fix I).** Opening the screen runs only a cheap snapshot (device facts
    + model presence/size/receipt state — zero hashing). Explicit levels: basic self-tests,
-   hardware tests (sequential, per-test progress, thermal-gated, crash-marked), deep SHA-256
+   hardware tests (sequential, per-test progress, crash-marked; thermal recorded as passive
+   telemetry only), deep SHA-256
    (opt-in, warns ~2.07 GB). `json(report:)`/`writeJSON(_:to:)` serialize an existing report —
    export runs zero tests.
 10. **Crash localization (§14).** `DiagnosticRunMarker` persists the currently-running test in

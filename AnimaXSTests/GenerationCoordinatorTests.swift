@@ -649,7 +649,7 @@ final class GenerationCoordinatorTests: XCTestCase {
         XCTAssertFalse(store.hasCheckpoint, "incompatible checkpoint removed from disk")
     }
 
-    // MARK: - K004 resource policy: memory warning + thermal
+    // MARK: - K004 resource policy: memory warning
 
     @MainActor
     func testMemoryWarningCancelsAndPreservesCheckpoint() async throws {
@@ -694,56 +694,6 @@ final class GenerationCoordinatorTests: XCTestCase {
             context: nil, factory: ProbeFactory(), attemptMetalFallback: false)
         coordinator.handleMemoryWarning()
         XCTAssertEqual(coordinator.state, .idle, "no generation → no state change")
-    }
-
-    @MainActor
-    func testThermalPolicyContinuesOnNominalAndFair() async throws {
-        let context = try makeContext()
-        let factory = LifecycleFactory()
-        let coordinator = GenerationCoordinator(context: context, factory: factory)
-        coordinator.generate(prompt: "k004", seed: 5, models: testModels())
-        // nominal/fair must not cancel a running generation.
-        coordinator.handleThermalState(.nominal)
-        coordinator.handleThermalState(.fair)
-        XCTAssertTrue(coordinator.isGenerating, "nominal/fair continues generation")
-        // Cleanup: cancel and wait for the sampler's cancellation point.
-        coordinator.cancel()
-        for _ in 0..<100 {
-            if !coordinator.isGenerating { break }
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-    }
-
-    @MainActor
-    func testThermalPolicyStopsOnSeriousAndCritical() async throws {
-        let context = try makeContext()
-        let factory = LifecycleFactory()
-        let coordinator = GenerationCoordinator(context: context, factory: factory)
-        coordinator.generate(prompt: "k004", seed: 5, models: testModels())
-        XCTAssertTrue(coordinator.isGenerating)
-        // Wait for a checkpoint to exist before the thermal stop so resume
-        // availability can be asserted.
-        for _ in 0..<250 {
-            if factory.sampler?.completedSteps ?? 0 >= 1 { break }
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-
-        coordinator.handleThermalState(.serious)
-        for _ in 0..<100 {
-            if !coordinator.isGenerating { break }
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-        XCTAssertFalse(coordinator.isGenerating, "serious thermal state stops generation")
-        if case .cancelled = coordinator.state {
-            // expected
-        } else {
-            XCTFail("expected cancelled on serious thermal, got \\(coordinator.state)")
-        }
-        for _ in 0..<100 {
-            if coordinator.canResume { break }
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-        XCTAssertTrue(coordinator.canResume, "thermal stop preserves resume state")
     }
 
     /// Sampler that completes one step then suspends until cancellation, so a

@@ -125,7 +125,7 @@ struct DiagnosticsView: View {
 
     private var hardwareTestsSection: some View {
         Section("Hardware tests") {
-            Text("Real Metal/MPS command-buffer probes. Runs sequentially; skipped cleanly if the device gets too warm. A native failure here can crash the app — the current test is recorded so the next launch can say which one.")
+            Text("Real Metal/MPS command-buffer probes. Runs sequentially. A native failure here can crash the app — the current test is recorded so the next launch can say which one.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Button(isRunning && currentTest != nil ? "Running \(currentTest ?? "tests")…" : "Run hardware tests") {
@@ -213,10 +213,6 @@ struct DiagnosticsView: View {
             marker: marker,
             progress: { test in
                 Task { @MainActor in self.currentTest = test }
-            },
-            thermalGate: {
-                ProcessInfo.processInfo.thermalState == .serious
-                    || ProcessInfo.processInfo.thermalState == .critical
             })
         marker.markSessionClean()
         isRunning = false
@@ -246,10 +242,6 @@ struct DiagnosticsView: View {
             marker: marker,
             progress: { test in
                 Task { @MainActor in self.currentTest = test }
-            },
-            thermalGate: {
-                ProcessInfo.processInfo.thermalState == .serious
-                    || ProcessInfo.processInfo.thermalState == .critical
             })
         marker.markSessionClean()
         isRunning = false

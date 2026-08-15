@@ -73,15 +73,22 @@ struct ContentView: View {
             .onReceive(
                 NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)
             ) { _ in coordinator.handleMemoryWarning() }
-            .onReceive(
-                // K004 thermal policy: surface system thermal-state changes to
-                // the coordinator so a serious/critical condition stops a
-                // running generation (preserving resume) and nominal/fair
-                // continue normally. Uses the proper system notification
-                // (available on the iOS 18 deployment target) rather than
-                // polling.
-                NotificationCenter.default.publisher(for: ProcessInfo.thermalStateDidChangeNotification)
-            ) { _ in coordinator.handleThermalState(ProcessInfo.processInfo.thermalState) }
+            .onChange(of: coordinator.state) { _, newState in
+                // Elapsed-timer lifecycle: any terminal state must stop the
+                // repeating timer so it cannot keep counting after the
+                // generation is done.
+                switch newState {
+                case .completed, .cancelled, .failed:
+                    stopElapsedTimer(updateFinalElapsed: true)
+                default:
+                    break
+                }
+            }
+            .onDisappear {
+                // Never leave the repeating timer attached to the run loop
+                // after this view is gone.
+                stopElapsedTimer(updateFinalElapsed: false)
+            }
             .fileImporter(
                 isPresented: $showingImporter,
                 allowedContentTypes: [.data],
@@ -175,7 +182,18 @@ struct ContentView: View {
 
     private var generationSection: some View {
         Section {
-            if coordinator.canResume {
+            if isGenerating {
+                // While a generation is active the section shows progress and
+                // Cancel — never the normal Generate control, and never the
+                // internal single-generation guard reason as a live warning.
+                Button("Cancel", role: .destructive) {
+                    // Freeze the visible elapsed time immediately, then request
+                    // cooperative cancellation at the engine's next safe
+                    // boundary.
+                    stopElapsedTimer(updateFinalElapsed: true)
+                    coordinator.cancel()
+                }
+            } else if coordinator.canResume {
                 Button("Resume") {
                     startGeneration(resume: true)
                 }
@@ -186,11 +204,6 @@ struct ContentView: View {
                 .disabled(!eligibility.isReady)
                 if let reason = eligibility.blockedReason {
                     Text(reason).font(.caption).foregroundStyle(.orange)
-                }
-            }
-            if isGenerating {
-                Button("Cancel", role: .destructive) {
-                    coordinator.cancel()
                 }
             }
             if coordinator.canResume {
@@ -252,8 +265,20 @@ struct ContentView: View {
             canResume: coordinator.canResume,
             prompt: prompt,
             seedText: seedText,
-            thermalState: ProcessInfo.processInfo.thermalState,
             metalAvailable: coordinator.isMetalAvailable)
+    }
+
+    /// Stops the repeating elapsed timer. When `updateFinalElapsed` is true the
+    /// visible text is frozen once at the value at stop time; a subsequent call
+    /// (e.g. the coordinator reaching `.cancelled` after a Cancel tap) does not
+    /// overwrite the frozen value because the timer is already nil.
+    private func stopElapsedTimer(updateFinalElapsed: Bool = true) {
+        guard elapsedTimer != nil else { return }
+        elapsedTimer?.invalidate()
+        elapsedTimer = nil
+        if updateFinalElapsed {
+            elapsedText = String(format: "%.1f s", Date().timeIntervalSince(generationStart))
+        }
     }
 
     private func startGeneration(resume: Bool) {

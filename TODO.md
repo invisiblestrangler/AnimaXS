@@ -17,7 +17,7 @@ unwanted auto-downloads, no keyboard dismissal, silent Generate no-op, Diagnosti
   Generate taps log thermal/memory/coordinator state
 - [x] Fix H: `@FocusState` + Done toolbar for prompt and number pad; interactive scroll dismissal
 - [x] Fix I: Diagnostics — cheap snapshot on open; explicit basic/hardware/deep levels;
-  `json(report:)`/`writeJSON(_:to:)` run zero tests; thermal-gated hardware tests
+  `json(report:)`/`writeJSON(_:to:)` run zero tests; thermal state recorded as passive telemetry only
 - [x] Crash marker: `DiagnosticRunMarker` persists running test; "Previous run ended during X" warning
 - [x] MPS audit: `MPSMatrixDescriptor.rowBytes(fromColumns:dataType:)` (64-byte aligned) +
   command-buffer status/error inspection after `waitUntilCompleted`
