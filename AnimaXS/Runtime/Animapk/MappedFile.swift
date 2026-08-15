@@ -5,8 +5,13 @@ import Darwin
 import Glibc
 #endif
 
-/// Errors thrown by the ANMA parser.
-enum AnimapkError: Error, CustomStringConvertible {
+/// Errors thrown by the ANMA parser and model validation.
+///
+/// `LocalizedError` conformance ensures `error.localizedDescription` surfaces
+/// the actual reason (e.g. "model SHA-256 does not match manifest") instead of
+/// a generic "The operation couldn't be completed. (AnimaXS.AnimapkError
+/// error 3.)" message.
+enum AnimapkError: Error, CustomStringConvertible, LocalizedError {
     case io(String)
     case header(String)
     case json(String)
@@ -16,6 +21,10 @@ enum AnimapkError: Error, CustomStringConvertible {
         switch self {
         case .io(let m), .header(let m), .json(let m), .validation(let m): return m
         }
+    }
+
+    var errorDescription: String? {
+        description
     }
 }
 

@@ -20,10 +20,16 @@ steps) → Qwen-Image VAE — without a server.
   **Download** action or **Import** (see Models below).
 
 > **Validation note:** GitHub Actions CI validates the code, the pack
-> download/verify path, and functional Metal inference on a simulator. That is
-> **not** a substitute for running on a physical iPhone XS Max. A12
-> performance, memory, and thermal behaviour have **not** been measured on a
-> real device in this project yet.
+> download/verify path, and functional Metal inference on a simulator. A
+> physical iPhone XS Max has been used once (2026-08-15): it exposed bugs that
+> CI could not catch (Files import permissions, silent Generate no-op, a
+> Diagnostics crash, launch-time re-hashing). The repository-side fixes are
+> implemented, but **A12 acceptance remains pending the physical retest** —
+> performance, memory, jetsam, and thermal behaviour are not yet measured on
+> the real device. See `DEVICE_TESTS.md`. Note also: `ModelStoreTests` uses
+> synthetic downloader data; green CI does not prove the real GitHub
+> production download route end-to-end (endpoint reachability + sizes were
+> spot-checked 2026-08-15).
 
 ## Clone / open / build
 
@@ -67,7 +73,16 @@ qwen3-0.6b-xsmax-w8.animapk            (text encoder)
 qwen-image-vae-xsmax-fp16.animapk      (VAE)
 ```
 
-Generation is disabled until all three packs are verified `ready`.
+After a verified install (Download/Import/Repair), the app persists a small
+verification receipt. Normal launches trust installed packs with cheap
+stat/metadata checks — they do **not** re-hash the ~2.07 GB set. A missing or
+stale receipt triggers one full off-main SHA-256 verification (the migration
+path for packs installed by older builds). Model discovery is local-only and
+never downloads; only explicit **Download**/**Retry**/**Repair**/**Import**
+actions touch the network or write model files.
+
+Generation is disabled until all three packs are verified `ready`; the UI
+shows the exact reason whenever Generate cannot start.
 
 ## Generation
 
@@ -86,16 +101,22 @@ Generation is disabled until all three packs are verified `ready`.
 - **Progress** — shows stage, diffusion step (1–8), block (1–28), and elapsed
   time.
 - **Share** — exports the generated PNG via the system share sheet.
-- **Diagnostics** — runs self-tests (pack validation, W4/W8 vector decode, MPS
-  precision, GEMM, attention tile, mmap benchmark, golden-noise RNG) and
-  exports a JSON report.
+- **Diagnostics** — opening the screen collects a cheap snapshot (device
+  facts, model presence/size/receipt state — no hashing). Explicit buttons run
+  basic self-tests (W4/W8 decode, RNG, small file read, Metal capability),
+  hardware tests (MPS precision, GEMM, attention tile — sequential, with
+  per-test progress and a recorded current-test marker so a native crash can
+  be localized on the next launch), and an opt-in deep SHA-256 of all packs
+  (~2.07 GB read). JSON export serializes the current report and runs zero
+  tests.
 
 ## Limitations
 
 - GitHub Actions validates the build and functional Metal inference on a
-  simulator, **not** physical A12 behaviour. Do not assume A12 memory, thermal,
-  or performance characteristics have been tested — they have not, until the
-  app is run on an actual iPhone XS Max.
+  simulator, **not** physical A12 behaviour. A first physical-device run
+  (2026-08-15) found and fixed import/download/diagnostics/launch issues, but
+  A12 memory, thermal, and performance characteristics are still pending the
+  device retest (see `DEVICE_TESTS.md`).
 - VAE tiling is intentionally **not** implemented yet; it will only be added if
   full-frame decoding fails on-device due to memory/timeout pressure (and must
   then preserve convolution halos and global spatial attention).

@@ -124,11 +124,11 @@ final class SmokeTests: XCTestCase {
             availableCapacity: { _ in Int64.max })
         let initialState = await store.state(for: .dit)
         XCTAssertEqual(initialState, .missing)
-        let installed = try await store.prepare(entry)
+        let installed = try await store.download(entry)
         XCTAssertEqual(try Data(contentsOf: installed), Data("abc".utf8))
         let readyState = await store.state(for: .dit)
         XCTAssertEqual(readyState, .ready(installed))
-        let repeated = try await store.prepare(entry)
+        let repeated = try await store.download(entry)
         XCTAssertEqual(repeated, installed)
         XCTAssertTrue(try installed.resourceValues(
             forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup ?? false)
