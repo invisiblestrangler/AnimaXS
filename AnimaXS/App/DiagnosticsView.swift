@@ -166,6 +166,8 @@ struct DiagnosticsView: View {
                 .disabled(isGenerating)
             Toggle("Cross-attention K/V cache (P5)", isOn: crossKVCacheBinding)
                 .disabled(isGenerating)
+            Toggle("Mmap no-copy weight source (P6, experimental)", isOn: noCopyWeightSourceBinding)
+                .disabled(isGenerating)
             Button("Reset to current baseline") {
                 optimizationSettings.resetToBaseline()
             }
@@ -230,6 +232,12 @@ struct DiagnosticsView: View {
         Binding(
             get: { optimizationSettings.crossKVCache },
             set: { optimizationSettings.setCrossKVCache($0) })
+    }
+
+    private var noCopyWeightSourceBinding: Binding<Bool> {
+        Binding(
+            get: { optimizationSettings.noCopyWeightSource },
+            set: { optimizationSettings.setNoCopyWeightSource($0) })
     }
 
     @ViewBuilder

@@ -19,6 +19,7 @@ final class InferenceOptimizationSettings: ObservableObject {
         static let fusedMLPActivation = "inference.fusedMLPActivation"
         static let stridedTokenMajorAttention = "inference.stridedTokenMajorAttention"
         static let crossKVCache = "inference.crossKVCache"
+        static let noCopyWeightSource = "inference.noCopyWeightSource"
     }
 
     private let defaults: UserDefaults
@@ -32,6 +33,7 @@ final class InferenceOptimizationSettings: ObservableObject {
     @Published private(set) var fusedMLPActivation: Bool
     @Published private(set) var stridedTokenMajorAttention: Bool
     @Published private(set) var crossKVCache: Bool
+    @Published private(set) var noCopyWeightSource: Bool
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -56,6 +58,8 @@ final class InferenceOptimizationSettings: ObservableObject {
             ?? baseline.stridedTokenMajorAttention
         crossKVCache = defaults.object(forKey: Keys.crossKVCache) as? Bool
             ?? baseline.crossKVCache
+        noCopyWeightSource = defaults.object(forKey: Keys.noCopyWeightSource) as? Bool
+            ?? baseline.noCopyWeightSource
     }
 
     // MARK: - Mutations (validate before persist)
@@ -105,6 +109,11 @@ final class InferenceOptimizationSettings: ObservableObject {
         defaults.set(value, forKey: Keys.crossKVCache)
     }
 
+    func setNoCopyWeightSource(_ value: Bool) {
+        noCopyWeightSource = value
+        defaults.set(value, forKey: Keys.noCopyWeightSource)
+    }
+
     /// Immutable snapshot of the current settings, used by a single
     /// generation. Never mutated mid-run.
     var snapshot: InferenceOptimizationConfig {
@@ -117,7 +126,8 @@ final class InferenceOptimizationSettings: ObservableObject {
             fusedNormModulation: fusedNormModulation,
             fusedMLPActivation: fusedMLPActivation,
             stridedTokenMajorAttention: stridedTokenMajorAttention,
-            crossKVCache: crossKVCache
+            crossKVCache: crossKVCache,
+            noCopyWeightSource: noCopyWeightSource
         )
     }
 
@@ -134,6 +144,7 @@ final class InferenceOptimizationSettings: ObservableObject {
         fusedMLPActivation = baseline.fusedMLPActivation
         stridedTokenMajorAttention = baseline.stridedTokenMajorAttention
         crossKVCache = baseline.crossKVCache
+        noCopyWeightSource = baseline.noCopyWeightSource
         defaults.set(baseline.linearTileRows, forKey: Keys.linearTileRows)
         defaults.set(baseline.attentionTileRows, forKey: Keys.attentionTileRows)
         defaults.set(baseline.directLinearMPSIO, forKey: Keys.directLinearMPSIO)
@@ -143,6 +154,7 @@ final class InferenceOptimizationSettings: ObservableObject {
         defaults.set(baseline.fusedMLPActivation, forKey: Keys.fusedMLPActivation)
         defaults.set(baseline.stridedTokenMajorAttention, forKey: Keys.stridedTokenMajorAttention)
         defaults.set(baseline.crossKVCache, forKey: Keys.crossKVCache)
+        defaults.set(baseline.noCopyWeightSource, forKey: Keys.noCopyWeightSource)
     }
 
     // MARK: - Loading

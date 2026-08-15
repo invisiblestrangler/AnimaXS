@@ -49,6 +49,46 @@ final class GenerationMetricsTests: XCTestCase {
         XCTAssertEqual(metrics.numericalWarnings, 2)
     }
 
+    /// P6: mmap no-copy bytes accumulate globally AND into the active step,
+    /// and appear in the summary text when nonzero.
+    func testMmapNoCopyBytesAccumulateGloballyAndPerStep() {
+        let collector = MetricsCollector()
+        collector.beginStep(0)
+        collector.recordMmapNoCopyBytes(38_993_920)
+        collector.endStep()
+        collector.beginStep(1)
+        collector.recordMmapNoCopyBytes(2_000)
+        collector.recordMmapNoCopyBytes(3_000)
+        collector.endStep()
+
+        let metrics = collector.snapshot()
+        XCTAssertEqual(metrics.mmapNoCopyBytes, 38_993_920 + 2_000 + 3_000)
+        XCTAssertEqual(metrics.stepMetrics[0].mmapNoCopyBytes, 38_993_920)
+        XCTAssertEqual(metrics.stepMetrics[1].mmapNoCopyBytes, 5_000)
+        let text = metrics.summaryText
+        XCTAssertTrue(text.contains("Weight bytes served mmap no-copy"))
+        XCTAssertTrue(text.contains("weight bytes mmap no-copy"))
+    }
+
+    /// P6: the no-copy path charges 0 weight-copy time; the copied path
+    /// records it via recordWeightCopy (regression guard for the A/B split).
+    func testMmapNoCopyDoesNotChargeWeightCopyTime() {
+        let collector = MetricsCollector()
+        collector.beginStep(0)
+        collector.recordMmapNoCopyBytes(38_993_920)
+        collector.endStep()
+        collector.beginStep(1)
+        collector.recordWeightCopy(bytes: 38_993_920, seconds: 0.05)
+        collector.endStep()
+
+        let metrics = collector.snapshot()
+        XCTAssertEqual(metrics.weightCopyTime, 0.05, accuracy: 0.0001)
+        XCTAssertEqual(metrics.weightCopyBytes, 38_993_920)
+        XCTAssertEqual(metrics.stepMetrics[0].weightCopySeconds, 0, accuracy: 0.0001)
+        XCTAssertEqual(metrics.stepMetrics[0].weightCopyBytes, 0)
+        XCTAssertEqual(metrics.stepMetrics[1].weightCopySeconds, 0.05, accuracy: 0.0001)
+    }
+
     func testSummaryTextShape() {
         let collector = MetricsCollector()
         collector.beginStep(0)

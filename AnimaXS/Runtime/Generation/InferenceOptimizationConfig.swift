@@ -51,6 +51,16 @@ struct InferenceOptimizationConfig: Equatable {
     /// approximation; Q stays dynamic and is never cached. False keeps the
     /// legacy per-step cross K/V projection path exactly for A/B.
     var crossKVCache: Bool
+    /// P6 (EXPERIMENTAL): hand Metal an `MTLBuffer` that ALIASES the already
+    /// mmap'd pack region via `bytesNoCopy` instead of memcpy'ing the range
+    /// into the slot ring, so the GPU reads weights directly from the file
+    /// mapping (no CPU weight copy). Only applied when the range's file
+    /// offset is 4096-byte page-aligned AND the device accepts the alias;
+    /// every other range falls back to the exact copied path. The copied
+    /// path is byte-for-byte unchanged, so this toggle only ever adds the
+    /// no-copy fast path. False keeps the current memcpy path exactly for
+    /// A/B. EXPERIMENTAL — never a production default (device decides later).
+    var noCopyWeightSource: Bool
 
     static let currentBaseline = InferenceOptimizationConfig(
         linearTileRows: 128,
@@ -61,7 +71,8 @@ struct InferenceOptimizationConfig: Equatable {
         fusedNormModulation: false,
         fusedMLPActivation: false,
         stridedTokenMajorAttention: false,
-        crossKVCache: false
+        crossKVCache: false,
+        noCopyWeightSource: false
     )
 
     /// Sanitizes a tile-row value down to the nearest allowed value (or the

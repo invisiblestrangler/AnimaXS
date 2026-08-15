@@ -36,6 +36,21 @@ final class InferenceOptimizationConfigTests: XCTestCase {
         XCTAssertFalse(baseline.stridedTokenMajorAttention)
     }
 
+    // P6: the mmap no-copy weight source toggle defaults OFF, so the
+    // memcpy'd slot-ring path remains the baseline behavior (experimental).
+    func testP6NoCopyWeightSourceDefaultsOff() {
+        let baseline = InferenceOptimizationConfig.currentBaseline
+        XCTAssertFalse(baseline.noCopyWeightSource)
+    }
+
+    func testP6NoCopyWeightSourceIsIndependent() {
+        var config = InferenceOptimizationConfig.currentBaseline
+        config.noCopyWeightSource = true
+        XCTAssertTrue(config.noCopyWeightSource)
+        XCTAssertFalse(config.crossKVCache)          // independent
+        XCTAssertFalse(config.stridedTokenMajorAttention) // independent
+    }
+
     func testP4StridedTokenMajorAttentionIsIndependent() {
         var config = InferenceOptimizationConfig.currentBaseline
         config.stridedTokenMajorAttention = true
@@ -147,6 +162,8 @@ final class InferenceOptimizationConfigTests: XCTestCase {
         settings.setFusedNormModulation(true)
         settings.setFusedMLPActivation(true)
         settings.setStridedTokenMajorAttention(true)
+        settings.setCrossKVCache(true)
+        settings.setNoCopyWeightSource(true)
         settings.resetToBaseline()
         XCTAssertEqual(settings.snapshot, InferenceOptimizationConfig.currentBaseline)
         let reloaded = InferenceOptimizationSettings(defaults: defaults)

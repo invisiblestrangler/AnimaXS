@@ -185,6 +185,10 @@ struct GenerationMetrics: Equatable {
         lines.append(String(format: "Weight copy/load CPU work: %.1f s, %.0f MB",
                             weightCopyTime, Double(weightCopyBytes) / 1_048_576))
         lines.append("  (may overlap GPU time when ping-pong is on)")
+        if mmapNoCopyBytes > 0 {
+            lines.append(String(format: "Weight bytes served mmap no-copy: %.0f MB (memcpy eliminated)",
+                                Double(mmapNoCopyBytes) / 1_048_576))
+        }
         lines.append(String(format: "Host/other measured time: %.1f s", hostWaitTime))
         lines.append("")
         if linearGEMMTiles > 0 || attentionQueryTiles > 0 {
@@ -228,6 +232,11 @@ struct GenerationMetrics: Equatable {
             if crossKVHits > 0 || crossKVMisses > 0 {
                 lines.append("cross-KV cache hits/misses: \(crossKVHits)/\(crossKVMisses)")
             }
+            let noCopySum = stepMetrics.reduce(UInt64(0)) { $0 + $1.mmapNoCopyBytes }
+            if noCopySum > 0 {
+                lines.append(String(format: "weight bytes mmap no-copy: %.0f MB (memcpy eliminated)",
+                                    Double(noCopySum) / 1_048_576))
+            }
             lines.append("")
         }
         lines.append(String(format: "Peak Metal allocation: %.2f GB",
@@ -256,6 +265,7 @@ struct GenerationMetrics: Equatable {
             lines.append("Direct MPS linear I/O: \(config.directLinearMPSIO ? "on" : "off")")
             lines.append("Ping-pong weight streaming: \(config.pingPongWeightStreaming ? "on" : "off")")
             lines.append("Numerical monitor: \(config.numericalMonitoring ? "on" : "off")")
+            lines.append("Mmap no-copy weight source: \(config.noCopyWeightSource ? "on" : "off")")
         }
         lines.append("Checkpointing: \(checkpointingEnabled ? "on" : "off")")
         lines.append("")
@@ -437,6 +447,18 @@ final class MetricsCollector {
         metrics.crossKVHits += 1
         if let index = activeStepIndex {
             metrics.stepMetrics[index].crossKVHits += 1
+        }
+    }
+
+    /// P6: weight bytes served directly from the mmap'd pack via a
+    /// `bytesNoCopy` MTLBuffer instead of a CPU memcpy into the slot ring.
+    /// Recorded on the no-copy path only (the copied path records 0 and keeps
+    /// charging `recordWeightCopy`), so device logs can prove the memcpy was
+    /// eliminated for page-aligned ranges.
+    func recordMmapNoCopyBytes(_ bytes: UInt64) {
+        metrics.mmapNoCopyBytes += bytes
+        if let index = activeStepIndex {
+            metrics.stepMetrics[index].mmapNoCopyBytes += bytes
         }
     }
 
