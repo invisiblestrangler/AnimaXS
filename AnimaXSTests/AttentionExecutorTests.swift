@@ -278,7 +278,15 @@ final class AttentionExecutorTests: XCTestCase {
         try await AttentionExecutor(context: context).execute(
             query: qHead, key: kHead, value: vHead, output: referenceOut,
             heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim)
-        let reference = readHalf(referenceOut, count: queryCount * modelDim)
+        // The legacy path writes HEAD-MAJOR [heads, rows, headDim]; the strided
+        // path writes TOKEN-MAJOR [rows, modelDim]. Transpose the reference back
+        // to token-major so the two layouts are directly comparable.
+        let referenceTokenMajor = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * modelDim * 2, options: .storageModeShared))
+        try encodeHeadMajor(
+            context: context, input: referenceOut, output: referenceTokenMajor,
+            rows: queryCount, heads: heads, headDim: headDim, direction: 0)
+        let reference = readHalf(referenceTokenMajor, count: queryCount * modelDim)
 
         // Strided token-major path (P4): same buffers, no transposes.
         let stridedOut = try XCTUnwrap(context.device.makeBuffer(
@@ -439,20 +447,20 @@ final class AttentionExecutorTests: XCTestCase {
     /// head-major [heads, rows, headDim] using the production kernel.
     private func encodeHeadMajor(
         context: MetalContext, input: MTLBuffer, output: MTLBuffer,
-        rows: Int, heads: Int, headDim: Int
+        rows: Int, heads: Int, headDim: Int, direction: UInt32 = 1
     ) throws {
         let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
         let pipeline = try context.pipeline(named: "transpose_token_head_half")
         let encoder = try XCTUnwrap(command.makeComputeCommandEncoder())
         var t = UInt32(rows), h = UInt32(heads), d = UInt32(headDim)
-        var direction: UInt32 = 1
+        var dir = direction
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(input, offset: 0, index: 0)
         encoder.setBuffer(output, offset: 0, index: 1)
         encoder.setBytes(&t, length: 4, index: 2)
         encoder.setBytes(&h, length: 4, index: 3)
         encoder.setBytes(&d, length: 4, index: 4)
-        encoder.setBytes(&direction, length: 4, index: 5)
+        encoder.setBytes(&dir, length: 4, index: 5)
         encoder.dispatchThreads(MTLSize(width: rows * heads * headDim, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
         encoder.endEncoding()
