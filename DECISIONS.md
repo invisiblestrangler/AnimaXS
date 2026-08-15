@@ -84,6 +84,20 @@ No thermal logic. No silent clamping. No global FP32. Small, reversible commits.
 - Tests: slot independence, in-flight overwrite refusal, lifecycle tracking,
   slot-count validation.
 
+### D204 — Phase 2/4: stress harness
+- `FullInferenceTests.testNumericalStressAcrossSeeds`: production diffusion
+  sampler over N ordinary seeds (diverse SeededRNG noise on golden
+  conditioning), detailed probes enabled, aggregates first-unsafe-boundary
+  distribution (by probe and step) + max magnitudes per boundary. Prints
+  `FULL_STRESS_*` markers; gates ONLY on non-finite latents (correctness), never
+  on warnings (that is the investigation's question). Seed count via
+  `ANIMAXS_STRESS_SEEDS` (default 4).
+- Metrics summary now includes per-probe numerical details
+  ("Numerical warnings: 2 (self-attention scores: Inf detected; …)") so the
+  in-app report is actionable without a cable.
+- `DiffusionSampler.numericalReport` / `earliestNumericalIssue` accessors for
+  the harness.
+
 ## Open questions
 - Which boundary is the actual first-unsafe site on A12? (Instrument → stress →
   attribute; do not guess.)

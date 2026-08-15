@@ -37,6 +37,8 @@ struct GenerationMetrics: Equatable {
 
     // Numerical health
     var numericalWarnings: Int = 0
+    /// Per-probe detail, e.g. "self-attention scores: Inf detected; MLP output: NaN detected".
+    var numericalDetails: String = ""
 
     var averageBlockWall: Double {
         guard !blockTimes.isEmpty else { return 0 }
@@ -63,7 +65,8 @@ struct GenerationMetrics: Equatable {
             lines.append(String(format: "Minimum available process memory: %.0f MB",
                                 Double(minAvailableMemory) / 1_048_576))
         }
-        lines.append("Numerical warnings: \(numericalWarnings)")
+        lines.append("Numerical warnings: \(numericalWarnings)"
+            + (numericalDetails.isEmpty ? "" : " (\(numericalDetails))"))
         return lines.joined(separator: "\n")
     }
 }
@@ -160,6 +163,10 @@ final class MetricsCollector {
 
     func setNumericalWarnings(_ count: Int) {
         metrics.numericalWarnings = count
+    }
+
+    func setNumericalDetails(_ text: String) {
+        metrics.numericalDetails = text
     }
 
     func finalize(totalWall: Double) {

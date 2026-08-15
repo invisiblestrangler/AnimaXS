@@ -181,7 +181,23 @@ final class DiffusionSampler {
             swap(&latent, &next)
         }
         metrics?.setNumericalWarnings(monitor.report().values.filter(\.hasIssue).count)
+        let flaggedDetails = monitor.report().compactMap { probe, stats in
+            stats.hasIssue ? "\(probe.stageLabel): \(stats.condition)" : nil
+        }
+        metrics?.setNumericalDetails(flaggedDetails.joined(separator: "; "))
         try await copy(latent, to: outputLatent, bytes: bytes)
+    }
+
+    // MARK: - Diagnostic accessors (stress harness / tests)
+
+    /// Full probe report after a completed (or failed) run.
+    var numericalReport: [NumericalMonitor.Probe: NumericalMonitor.Stats] {
+        monitor.report()
+    }
+
+    /// First unsafe (step, block, probe) attribution, if any.
+    var earliestNumericalIssue: NumericalMonitor.FirstIssue? {
+        monitor.earliestIssue
     }
 
     static func cpuDenoised(latent: [Float], velocity: [Float], sigma: Float) throws -> [Float] {
