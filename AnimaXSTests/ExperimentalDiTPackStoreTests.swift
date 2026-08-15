@@ -33,7 +33,7 @@ final class ExperimentalDiTPackStoreTests: XCTestCase {
     /// A 256-byte deterministic fixture file.
     private func makeSource(dir: URL, salt: UInt8 = 1) throws -> URL {
         let url = dir.appendingPathComponent("source-\(UUID().uuidString).animapk")
-        let data = Data((0..<256).map { ($0 &* salt &+ 7) & 0xFF })
+        let data = Data((0..<256).map { UInt8(($0 &* Int(salt) &+ 7) & 0xFF) })
         try data.write(to: url)
         return url
     }
@@ -58,7 +58,7 @@ final class ExperimentalDiTPackStoreTests: XCTestCase {
     func testMissingWhenNothingInstalled() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let data = Data((0..<256).map { $0 & 0xFF })
+        let data = Data((0..<256).map { UInt8($0 & 0xFF) })
         let store = try makeStore(dir: dir, spec: makeSpec(for: data))
         let state = await store.discover()
         XCTAssertEqual(state, .missing)
@@ -158,7 +158,7 @@ final class ExperimentalDiTPackStoreTests: XCTestCase {
 
         // Corrupt the installed file (same size, different bytes): the cheap
         // receipt must no longer trust it → unverified.
-        let corrupted = Data((0..<256).map { ($0 &* 3 &+ 1) & 0xFF })
+        let corrupted = Data((0..<256).map { UInt8(($0 &* 3 &+ 1) & 0xFF) })
         try corrupted.write(to: url)
         let stateAfterCorruption = await store.discover()
         XCTAssertEqual(stateAfterCorruption, .unverified)
