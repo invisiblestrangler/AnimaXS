@@ -107,6 +107,9 @@ final class LinearExecutor {
             MTLSize(width: k, height: n, depth: 1),
             threadsPerThreadgroup: MTLSize(width: width, height: height, depth: 1))
         encoder.endEncoding()
+        // P2-C: logical traffic counter — bytes the dequant kernel materializes
+        // (n×k fp16, counted once). Arithmetic counter, not a GPU readback.
+        metrics?.recordDequantizedWeightBytesWritten(UInt64(n * rightRowBytes))
 
         let scalarBytes = MemoryLayout<Float16>.stride
         let rightDescriptor = MPSMatrixDescriptor(
@@ -199,6 +202,14 @@ final class LinearExecutor {
             }
             metrics?.recordLinearGEMMTile(
                 directInput: inputEligible, directOutput: outputEligible)
+            if !inputEligible {
+                // P2-C: per-tile input materialization (fp16, counted once).
+                metrics?.recordConversionBytes(UInt64(rowsThisTile * k * scalarBytes))
+            }
+            if !outputEligible {
+                // P2-C: per-tile result materialization (fp16, counted once).
+                metrics?.recordConversionBytes(UInt64(rowsThisTile * n * scalarBytes))
+            }
             rowStart += rowsThisTile
         }
     }

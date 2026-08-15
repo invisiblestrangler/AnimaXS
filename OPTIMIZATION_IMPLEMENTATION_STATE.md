@@ -12,7 +12,7 @@ Working tree: clean (at P0 commit; local edits to state file not yet committed)
 - P1 COMPLETE (HEAD f42230d): P1-A..P1-H implemented + tested. Normal CI green (31904926712: project-consistency ✓, simulator-tests ✓ 273/0-fail, iphone-build ✓).
 
 ## Current exact objective
-- P1 gate met. Next: P2 — trustworthy per-step sustained-performance telemetry (runbook §7).
+- P1 gate met. Next: P2 — trustworthy per-step sustained-performance telemetry (runbook §7). Delegating to one subagent (delegation provider verified working: deepseek-v4-flash @ /v1).
 
 ## Current files being modified
 - P1 complete: working tree clean at f42230d.

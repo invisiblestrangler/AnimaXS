@@ -168,6 +168,9 @@ final class AttentionExecutor {
                                         output: output, count: rows * headDim,
                                         offset: outputOffset + (head * queryCount + queryBase) * headRowBytes)
                 }
+                // P2-C: fp16 score tile + PV result materialized (counted once each).
+                metrics?.recordConversionBytes(UInt64(rows * keyCount * halfBytes))
+                metrics?.recordConversionBytes(UInt64(rows * headDim * halfBytes))
                 metrics?.recordAttentionQueryTile()
                 queryBase += rows
             }
@@ -191,6 +194,8 @@ final class AttentionExecutor {
         encoder.dispatchThreads(MTLSize(width: Int(count), height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
         encoder.endEncoding()
+        // P2-C: fp16 elements materialized by the BF16 round-trip (counted once).
+        metrics?.recordConversionBytes(UInt64(count * MemoryLayout<Float16>.stride))
     }
 
     private func encodeFP32(
@@ -265,6 +270,10 @@ final class AttentionExecutor {
                 pvEncoder.dispatchThreads(MTLSize(width: headDim, height: rows, depth: 1),
                                           threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
                 pvEncoder.endEncoding()
+                // P2-C: fp32 score tile materialized (f16→f32) + fp16 PV result
+                // (f32→f16), each counted once.
+                metrics?.recordConversionBytes(UInt64(rows * keyCount * MemoryLayout<Float>.stride))
+                metrics?.recordConversionBytes(UInt64(rows * headDim * MemoryLayout<Float16>.stride))
                 metrics?.recordAttentionQueryTile()
                 queryBase += rows
             }

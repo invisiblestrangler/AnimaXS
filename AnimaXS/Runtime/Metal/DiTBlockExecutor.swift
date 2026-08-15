@@ -336,6 +336,8 @@ final class DiTBlockExecutor {
         try encodeHalfComputeBoundary(command, hiddenHalf, count: Self.tokens * Self.hidden)
         try encodeConvert(command, kernel: "half_to_float", input: hiddenHalf,
                           output: hiddenFloat, count: Self.tokens * Self.hidden)
+        // P2-C: f16→f32 conversion traffic (bytes written, counted once).
+        metrics?.recordConversionBytes(UInt64(Self.tokens * Self.hidden * MemoryLayout<Float>.stride))
         try encodeUnary(command, kernel: "gelu", input: hiddenFloat,
                         output: hiddenFloat, count: Self.tokens * Self.hidden)
         try encodeComputeBoundary(command, hiddenFloat, count: Self.tokens * Self.hidden)
@@ -347,6 +349,8 @@ final class DiTBlockExecutor {
             try encodeConvert(command, kernel: "float_to_half", input: hiddenFloat,
                               output: hiddenHalf, count: Self.tokens * Self.hidden)
         }
+        // P2-C: f32→f16 conversion traffic (bytes written, counted once).
+        metrics?.recordConversionBytes(UInt64(Self.tokens * Self.hidden * MemoryLayout<Float16>.stride))
         let branch = buffer("dit.branch.f16", Self.tokens * Self.dim, Float16.self)
         try linear.encode(commandBuffer: command, input: hiddenHalf,
                           weight: weights.mlp2, output: branch, inputRows: Self.tokens)
@@ -392,6 +396,8 @@ final class DiTBlockExecutor {
             try encodeConvert(command, kernel: "float_to_half", input: input,
                               output: output, count: count)
         }
+        // P2-C: f32→f16 conversion traffic (bytes written, counted once).
+        metrics?.recordConversionBytes(UInt64(count * MemoryLayout<Float16>.stride))
     }
 
     /// float_to_half with in-kernel numerical-health recording. The probe
@@ -588,6 +594,9 @@ final class DiTBlockExecutor {
         encoder.setBytes(&direction, length: 4, index: 5)
         dispatch1D(encoder, pipeline: pipeline, count: count)
         encoder.endEncoding()
+        // P2-C: logical transpose traffic — fp16 elements materialized,
+        // counted once (bytes written). Arithmetic counter, not a GPU readback.
+        metrics?.recordTransposeBytes(UInt64(count * MemoryLayout<Float16>.stride))
     }
 
     private func encodeGateAdd(

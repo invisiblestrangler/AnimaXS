@@ -96,6 +96,8 @@ final class DiTFinalLayerExecutor {
                                    Self.tokens * Self.dim, probe: .finalResidualToHalf)
             try encodeUnary(command, "half_to_float", residualHalf, boundaryFloat,
                             Self.tokens * Self.dim)
+            // P2-C: f16→f32 conversion traffic (bytes written, counted once).
+            metrics?.recordConversionBytes(UInt64(Self.tokens * Self.dim * MemoryLayout<Float>.stride))
             try encodeLayerNorm(command, input: boundaryFloat, output: normalized)
         }
         // torch.layer_norm preserves its fp16 input dtype. AdaLN then promotes the
@@ -105,6 +107,8 @@ final class DiTFinalLayerExecutor {
         try encodeHalfComputeBoundary(command, normalizedHalf, count: Self.tokens * Self.dim)
         try encodeUnary(command, "half_to_float", normalizedHalf, normalizedBoundary,
                         Self.tokens * Self.dim)
+        // P2-C: f16→f32 conversion traffic (bytes written, counted once).
+        metrics?.recordConversionBytes(UInt64(Self.tokens * Self.dim * MemoryLayout<Float>.stride))
         try encodeModulate(command, normalized: normalizedBoundary,
                            modulation: modulation, output: modulated)
         try encodeComputeBoundary(command, modulated, count: Self.tokens * Self.dim)
@@ -123,6 +127,8 @@ final class DiTFinalLayerExecutor {
         }
         try encodeUnary(command, "half_to_float", projectedHalf, projectedFloat,
                         Self.tokens * Self.projected)
+        // P2-C: f16→f32 conversion traffic (bytes written, counted once).
+        metrics?.recordConversionBytes(UInt64(Self.tokens * Self.projected * MemoryLayout<Float>.stride))
         try encodeUnpatchify(command, input: projectedFloat, output: velocity)
         if let monitor {
             try monitor.encodeProbeF32(command, values: velocity,
@@ -246,6 +252,7 @@ final class DiTFinalLayerExecutor {
     ) throws {
         guard let monitor else {
             try encodeUnary(command, name, input, output, count)
+            metrics?.recordConversionBytes(UInt64(count * MemoryLayout<Float16>.stride))
             return
         }
         let pipeline = try context.pipeline(named: "float_to_half_probe")
@@ -263,6 +270,8 @@ final class DiTFinalLayerExecutor {
             MTLSize(width: groups, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         encoder.endEncoding()
+        // P2-C: f32→f16 conversion traffic (bytes written, counted once).
+        metrics?.recordConversionBytes(UInt64(count * MemoryLayout<Float16>.stride))
     }
 
     private func encodeComputeBoundary(
