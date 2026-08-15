@@ -52,7 +52,7 @@ final class NumericalFailureTests: XCTestCase {
             stage: "final-layer residual conversion", condition: "Inf detected")
         XCTAssertEqual(
             failure.message,
-            "Numerical failure at diffusion step 1/8, final layer (after block 28/28): Inf detected.")
+            "Numerical failure at diffusion step 1/8, final layer (after block 28/28), final-layer residual conversion: Inf detected.")
         XCTAssertFalse(failure.message.contains("block 1/28"))
         XCTAssertFalse(failure.message.contains("block 1/"))
     }

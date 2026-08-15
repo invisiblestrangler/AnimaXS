@@ -52,7 +52,7 @@ struct NumericalFailure: Error, LocalizedError, CustomStringConvertible, Equatab
             }
         case .finalLayer:
             if let stage, let condition {
-                return "\(prefix), final layer (after block \(totalBlocks)/\(totalBlocks)): \(condition)."
+                return "\(prefix), final layer (after block \(totalBlocks)/\(totalBlocks)), \(stage): \(condition)."
             }
         case .eulerUpdate:
             break
