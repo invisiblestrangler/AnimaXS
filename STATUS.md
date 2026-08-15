@@ -45,3 +45,22 @@ The first physical-device run exposed bugs that simulator/CI did not catch:
 - **Full-inference macOS E2E PASS** (run `31724606040`, branch `investigate/animapk-cuda-parity`):
   all 8 Euler steps + 224 block callbacks, latent cosine 0.971, evidence durable on HF.
 - See `GRID_ROOT_CAUSE_FINAL_REPORT.md` and `HERMES_ANIMAPK_CUDA_PARITY.md`.
+
+---
+
+## Runtime inference-optimization experiments (D207)
+
+- **Branch:** `perf/runtime-experiments`
+- **Base SHA:** `c424427` (origin/main `3bf7297` + the D206 completed-8/8
+  checkpoint fix, which is NOT on origin/main and must be preserved)
+- **Implementation:** all runtime experiments landed in one batch (config,
+  settings, metrics, linear/attention tiles, direct MPS I/O, ping-pong OFF,
+  monitor OFF, experimental W8 store, Diagnostics UI, tests). The D206
+  completed-run checkpoint cleanup and the existing two-slot ping-pong remain
+  the baseline.
+- **Xcode project:** regenerated via `bootstrap-project.yml` (bot commit
+  `64c11e0`).
+- **Normal CI:** run/pending — project-consistency, iphone-build,
+  simulator-tests.
+- **Real-device results:** PENDING — no device speedup is claimed from
+  simulator/macOS tests. The seven-run matrix is in DEVICE_TESTS.md.

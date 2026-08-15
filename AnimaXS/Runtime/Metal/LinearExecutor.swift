@@ -155,6 +155,7 @@ final class LinearExecutor {
             // Direct output wrap: MPS writes into the existing output buffer at
             // the tile's row offset when the tight stride matches.
             let result: MPSMatrix
+            let resultBuffer: MTLBuffer
             if outputEligible {
                 result = MPSMatrix(
                     buffer: output,
@@ -162,14 +163,16 @@ final class LinearExecutor {
                     descriptor: MPSMatrixDescriptor(
                         rows: rowsThisTile, columns: n,
                         rowBytes: resultRowBytes, dataType: .float16))
+                resultBuffer = output
             } else {
-                let resultScratch = buffers.buffer(
+                let scratch = buffers.buffer(
                     key: "linear.result.fp16", bytes: try checkedProduct(rowsThisTile, resultRowBytes))
                 result = MPSMatrix(
-                    buffer: resultScratch,
+                    buffer: scratch,
                     descriptor: MPSMatrixDescriptor(
                         rows: rowsThisTile, columns: n,
                         rowBytes: resultRowBytes, dataType: .float16))
+                resultBuffer = scratch
             }
             let multiplication = MPSMatrixMultiplication(
                 device: context.device,
@@ -188,7 +191,7 @@ final class LinearExecutor {
             if !outputEligible {
                 // Copy the MPS result scratch back into the tight destination.
                 try encodeCopy(commandBuffer: commandBuffer,
-                               source: result.buffer, sourceOffset: 0,
+                               source: resultBuffer, sourceOffset: 0,
                                destination: output,
                                destinationOffset: outputOffset + rowStart * n * scalarBytes,
                                columns: n, rows: rowsThisTile,

@@ -144,3 +144,29 @@ No thermal logic. No silent clamping. No global FP32. Small, reversible commits.
 ## Open questions
 - Which boundary is the actual first-unsafe site on A12? (Instrument → stress →
   attribute; do not guess.)
+
+---
+
+## Runtime inference-optimization experiments (D207) — decisions (append-only)
+
+- **Performance experiments are runtime-configurable in one build.** Linear
+  and attention tile rows (128/256/512/1024), direct MPS linear I/O, ping-pong
+  weight streaming, numerical monitoring, and DiT pack (W4/W8) are selectable
+  at runtime in Diagnostics. No environment variables or compile flags: one
+  installed binary can run every experiment, so GitHub Actions is not the
+  per-variation inner loop.
+- **Current behavior remains the baseline.** `InferenceOptimizationConfig.currentBaseline`
+  (L128, A128, direct OFF, ping-pong ON, monitor ON, W4) exactly reproduces
+  current HEAD. "Reset to current baseline" restores it.
+- **W8 is Diagnostics-only.** The experimental W8 v2 pack is isolated from the
+  production `ModelManifest.entries` topology; it is imported/removed manually
+  and selected per-run in Diagnostics. No auto-download, no HF credentials in
+  the app, and no production-role collision.
+- **W8 checkpointing is disabled in this batch.** The production W4 hash set
+  does not describe the W8 pack, and a W8 checkpoint must not resurrect
+  unrelated production Resume state. Production W4 keeps the current
+  completed-8/8 cleanup behavior exactly.
+- **Thermal/power values are observational telemetry and never generation
+  gates.** Start/end power, battery, thermal, and Low Power Mode are recorded
+  in the summary so runs under different conditions are discarded, never used
+  to throttle or block generation.
