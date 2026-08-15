@@ -138,6 +138,19 @@ final class DiffusionSampler {
         try beginRun()
         defer { endRun() }
         monitor?.beginRun()
+        // Publish numerical-monitor bookkeeping in a defer so it is recorded on
+        // FAILURE as well as success (a thrown step must still surface its
+        // collected warnings). We only publish state the monitor has already
+        // completed — no GPU readback of an unfinished command buffer here.
+        defer {
+            if let monitor {
+                metrics?.setNumericalWarnings(monitor.warningCount())
+                metrics?.setNumericalDetails(monitor.warningDetails())
+            } else {
+                // Monitor OFF: warnings were not collected — never report "0".
+                metrics?.setNumericalMonitoringDisabled(true)
+            }
+        }
         guard (0...ModelConstants.samplerSteps).contains(startStep) else {
             throw AnimapkError.validation(
                 "startStep \(startStep) out of range 0...\(ModelConstants.samplerSteps)")
@@ -208,13 +221,6 @@ final class DiffusionSampler {
             try stepCompleted?(step, sigma, nextSigma, denoised, next)
             swap(&latent, &next)
         }
-        if let monitor {
-            metrics?.setNumericalWarnings(monitor.warningCount())
-            metrics?.setNumericalDetails(monitor.warningDetails())
-        } else {
-            // Monitor OFF: warnings were not collected — never report "0".
-            metrics?.setNumericalMonitoringDisabled(true)
-        }
         try await copy(latent, to: outputLatent, bytes: bytes)
     }
 
@@ -254,13 +260,33 @@ final class DiffusionSampler {
 
     private func numericalFailure(step: Int) -> NumericalFailure {
         if let monitor, let issue = monitor.earliestIssue {
-            return NumericalFailure.attributed(
-                step: issue.step, totalSteps: ModelConstants.samplerSteps,
-                block: issue.block ?? 1, totalBlocks: DiTBlockLocator.blockCount,
-                stage: issue.probe.stageLabel, condition: issue.stats.condition)
+            return Self.attributedFailure(from: issue)
         }
         return NumericalFailure.eulerOutput(
             step: step + 1, totalSteps: ModelConstants.samplerSteps)
+    }
+
+    /// Maps a numerical-monitor first-issue to a failure with the correct
+    /// location. Final-layer probes are attributed as "final layer" (never a
+    /// fabricated block); block probes use the attributed block; otherwise the
+    /// post-Euler guard is the location.
+    private static func attributedFailure(
+        from issue: NumericalMonitor.FirstIssue
+    ) -> NumericalFailure {
+        if issue.probe.isFinalLayer {
+            return NumericalFailure.finalLayer(
+                step: issue.step, totalSteps: ModelConstants.samplerSteps,
+                totalBlocks: DiTBlockLocator.blockCount,
+                stage: issue.probe.stageLabel, condition: issue.stats.condition)
+        }
+        if let block = issue.block {
+            return NumericalFailure.attributed(
+                step: issue.step, totalSteps: ModelConstants.samplerSteps,
+                block: block, totalBlocks: DiTBlockLocator.blockCount,
+                stage: issue.probe.stageLabel, condition: issue.stats.condition)
+        }
+        return NumericalFailure.eulerOutput(
+            step: issue.step, totalSteps: ModelConstants.samplerSteps)
     }
 
     /// Test seam: the failure produced when the Euler finite guard fires with
@@ -270,10 +296,7 @@ final class DiffusionSampler {
         step: Int, monitor: NumericalMonitor?
     ) -> NumericalFailure {
         if let monitor, let issue = monitor.earliestIssue {
-            return NumericalFailure.attributed(
-                step: issue.step, totalSteps: ModelConstants.samplerSteps,
-                block: issue.block ?? 1, totalBlocks: DiTBlockLocator.blockCount,
-                stage: issue.probe.stageLabel, condition: issue.stats.condition)
+            return attributedFailure(from: issue)
         }
         return NumericalFailure.eulerOutput(
             step: step + 1, totalSteps: ModelConstants.samplerSteps)

@@ -43,4 +43,26 @@ final class NumericalFailureTests: XCTestCase {
             XCTAssertTrue(failure.message.contains(condition))
         }
     }
+
+    // P1-E: a final-layer failure must never fabricate "block 1/28". It is
+    // attributed explicitly as the final layer after all blocks.
+    func testFinalLayerFailureNeverFabricatesBlockOne() {
+        let failure = NumericalFailure.finalLayer(
+            step: 1, totalSteps: 8, totalBlocks: 28,
+            stage: "final-layer residual conversion", condition: "Inf detected")
+        XCTAssertEqual(
+            failure.message,
+            "Numerical failure at diffusion step 1/8, final layer (after block 28/28): Inf detected.")
+        XCTAssertFalse(failure.message.contains("block 1/28"))
+        XCTAssertFalse(failure.message.contains("block 1/"))
+    }
+
+    func testFinalLayerFailureMessageShape() {
+        let failure = NumericalFailure.finalLayer(
+            step: 5, totalSteps: 8, totalBlocks: 28,
+            stage: "final-layer projection input", condition: "NaN detected")
+        XCTAssertTrue(failure.message.contains("diffusion step 5/8"))
+        XCTAssertTrue(failure.message.contains("final layer (after block 28/28)"))
+        XCTAssertTrue(failure.message.contains("final-layer projection input"))
+    }
 }

@@ -81,6 +81,19 @@ final class NumericalMonitor {
             }
         }
 
+        /// Final-layer probes run AFTER all DiT blocks, so a first-issue
+        /// attribution for these has no block index. The failure message must
+        /// say "final layer (after block N/N)" — never fabricate a block.
+        var isFinalLayer: Bool {
+            switch self {
+            case .finalResidualToHalf, .finalNormalizedToHalf,
+                 .finalProjectionInput, .finalProjected:
+                return true
+            default:
+                return false
+            }
+        }
+
         /// Human-readable stage label for failure attribution.
         var stageLabel: String {
             switch self {

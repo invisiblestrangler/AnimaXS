@@ -77,6 +77,9 @@ struct GenerationMetrics: Equatable {
     /// Size in bytes of the DiT pack actually used by this run.
     var ditPackBytes: UInt64 = 0
 
+    /// Why the run was cancelled, when it was cancelled. Telemetry only.
+    var cancellationReason: GenerationCancellationReason?
+
     // Cheap executor counters (simple integer increments; no GPU readbacks).
     var linearGEMMTiles: Int = 0
     var linearDirectInputTiles: Int = 0
@@ -105,6 +108,9 @@ struct GenerationMetrics: Equatable {
     var summaryText: String {
         var lines: [String] = []
         lines.append(String(format: "Generation: %.1f s", totalWall))
+        if let reason = cancellationReason {
+            lines.append("Cancellation: \(reason.rawValue)")
+        }
         lines.append(String(format: "Text encode: %.1f s", textEncode))
         lines.append(String(format: "Adapter: %.1f s", adapter))
         lines.append(String(format: "DiT: %.1f s", diffusion))
@@ -281,6 +287,12 @@ final class MetricsCollector {
         metrics.ditPackVariantID = id
         metrics.ditPackSHA256 = sha256
         metrics.ditPackBytes = bytes
+    }
+
+    /// Records why a generation run was cancelled (user / background /
+    /// memory-warning / …). Telemetry only.
+    func recordCancellationReason(_ reason: GenerationCancellationReason) {
+        metrics.cancellationReason = reason
     }
 
     func recordEnvironmentStart(_ snapshot: EnvironmentSnapshot) {

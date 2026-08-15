@@ -66,6 +66,10 @@ final class GenerationCoordinator: ObservableObject {
     private let checkpointStore: CheckpointStore?
     private var generationTask: Task<Void, Never>?
     private var latestCheckpoint: GenerationCheckpoint?
+    /// The reason the most recent cooperative cancel was requested. Telemetry
+    /// only — published into final metrics / the cancelled state to distinguish
+    /// user-initiated from automatic (background / memory-warning) cancellation.
+    private var pendingCancellationReason: GenerationCancellationReason?
     /// Monotonic run identifier. Checkpoint-save tasks capture the epoch at
     /// callback time and only apply if the run is still current — a save
     /// queued before completion (or before a new Generate) can never
@@ -239,8 +243,10 @@ final class GenerationCoordinator: ObservableObject {
 
     /// Cooperative cancellation (K003 core): the engine stops at the next safe
     /// boundary; the last completed diffusion step checkpoint is retained.
-    func cancel() {
+    /// The reason is telemetry only (user/background/memory-warning/…).
+    func cancel(reason: GenerationCancellationReason = .user) {
         guard isGenerating else { return }
+        pendingCancellationReason = reason
         generationTask?.cancel()
     }
 
@@ -261,7 +267,7 @@ final class GenerationCoordinator: ObservableObject {
         // Cooperative cancellation: the engine stops at the next safe block
         // boundary; when the cancel lands, state becomes .cancelled and the
         // checkpoint remains available for Resume.
-        cancel()
+        cancel(reason: .background)
     }
 
     /// App returned to foreground: nothing to do — a compatible checkpoint is
@@ -282,7 +288,7 @@ final class GenerationCoordinator: ObservableObject {
     /// transitions to `.cancelled`; we only request the cooperative cancel.
     func handleMemoryWarning() {
         guard isGenerating else { return }
-        cancel()
+        cancel(reason: .memoryWarning)
     }
 
     // MARK: - Private
@@ -311,6 +317,9 @@ final class GenerationCoordinator: ObservableObject {
             guard let self else { return }
             defer {
                 metrics.recordEnvironmentEnd(Self.environmentSnapshot())
+                if let reason = self.pendingCancellationReason {
+                    metrics.recordCancellationReason(reason)
+                }
                 self.publishMetrics(metrics)
             }
             do {

@@ -56,6 +56,18 @@ enum GenerationCancellation {
     case requested
 }
 
+/// Why a generation run was cancelled. Telemetry only — it lets final metrics
+/// and the cancelled UI state distinguish user-initiated cancellation from
+/// automatic app-lifecycle / resource-driven cancellation. It is not a
+/// resource policy and introduces no thermal cancellation.
+enum GenerationCancellationReason: String, Codable {
+    case user
+    case background
+    case memoryWarning
+    case taskCancellation
+    case unknown
+}
+
 // MARK: - Stage seams (narrow dependency injection for orchestration tests)
 
 /// Protocol for the Qwen text-encoder stage. Production: `QwenEncoderMetal`.
@@ -198,9 +210,9 @@ struct GenerationEngine {
         // ---- 1. Tokenization (production TokenizerLoader semantics) ----
         progress?(.tokenizing)
         try Task.checkCancellation()
-        metrics.beginStage(.tokenizing)
-        let tokenized = try tokenize(prompt: prompt)
-        metrics.endStage(.tokenizing)
+        let tokenized = try measuredSync(.tokenizing, metrics: metrics) {
+            try tokenize(prompt: prompt)
+        }
         let qwenTokenIDs = tokenized.qwen
         let t5IDs = tokenized.t5
         let t5Weights = tokenized.t5Weights
@@ -209,31 +221,30 @@ struct GenerationEngine {
         // escape this helper) ----
         progress?(.encodingPrompt)
         try Task.checkCancellation()
-        metrics.beginStage(.textEncode)
-        let qwenOutput = try await encodePrompt(
-            models: models, tokenIDs: qwenTokenIDs)
-        metrics.endStage(.textEncode)
+        let qwenOutput = try await measured(.textEncode, metrics: metrics) {
+            try await encodePrompt(models: models, tokenIDs: qwenTokenIDs)
+        }
 
         // ---- 3. Adapter → crossContext [512, 1024] fp32 (adapter + its mmap
         // cannot escape this helper) ----
         progress?(.adapting)
         try Task.checkCancellation()
-        metrics.beginStage(.adapter)
-        let cross = try await adaptPrompt(
-            models: models, qwenContext: qwenOutput,
-            contextTokens: qwenTokenIDs.count, t5IDs: t5IDs, t5Weights: t5Weights)
-        metrics.endStage(.adapter)
+        let cross = try await measured(.adapter, metrics: metrics) {
+            try await adaptPrompt(
+                models: models, qwenContext: qwenOutput,
+                contextTokens: qwenTokenIDs.count, t5IDs: t5IDs, t5Weights: t5Weights)
+        }
 
         // ---- 4. Diffusion: seeded noise → final latent (sampler-space) ----
         let totalSteps = ModelConstants.samplerSteps
         let initialLatent = try makeInitialLatent(seed: seed, noise: noise)
-        metrics.beginStage(.diffusion)
-        let finalLatent = try await diffuse(
-            models: models, initialLatent: initialLatent, cross: cross,
-            startStep: startStep, totalSteps: totalSteps,
-            progress: progress, checkpoint: checkpoint, metrics: metrics,
-            optimization: optimization)
-        metrics.endStage(.diffusion)
+        let finalLatent = try await measured(.diffusion, metrics: metrics) {
+            try await diffuse(
+                models: models, initialLatent: initialLatent, cross: cross,
+                startStep: startStep, totalSteps: totalSteps,
+                progress: progress, checkpoint: checkpoint, metrics: metrics,
+                optimization: optimization)
+        }
 
         // ---- 4b. Wan21 latent-format boundary (sampler-space → VAE-space) ----
         // Root-cause fix (2026-08-14): ComfyUI applies latent_format.process_out
@@ -247,13 +258,36 @@ struct GenerationEngine {
         // ---- 5. VAE decode (VAE + its mmap cannot escape this helper) ----
         progress?(.decoding)
         try Task.checkCancellation()
-        metrics.beginStage(.vae)
-        let decoded = try await decodeVAE(models: models, latent: finalLatent)
-        metrics.endStage(.vae)
+        let decoded = try await measured(.vae, metrics: metrics) {
+            try await decodeVAE(models: models, latent: finalLatent)
+        }
         return decoded
     }
 
     // MARK: - Stage helpers (lexical lifetime boundaries)
+
+    /// Measures a synchronous stage, ALWAYS closing its timer even when `body`
+    /// throws (so a failed stage is not silently folded into "Other").
+    private func measuredSync<T>(
+        _ stage: MetricsCollector.Stage, metrics: MetricsCollector,
+        _ body: () throws -> T
+    ) rethrows -> T {
+        metrics.beginStage(stage)
+        defer { metrics.endStage(stage) }
+        return try body()
+    }
+
+    /// Measures an async stage, ALWAYS closing its timer even when `body`
+    /// throws. This is the failure-safe replacement for scattered begin/end
+    /// pairs: e.g. a thrown `diffuse()` must still record nonzero diffusion time.
+    private func measured<T>(
+        _ stage: MetricsCollector.Stage, metrics: MetricsCollector,
+        _ body: () async throws -> T
+    ) async rethrows -> T {
+        metrics.beginStage(stage)
+        defer { metrics.endStage(stage) }
+        return try await body()
+    }
 
     private func tokenize(prompt: String) throws -> (qwen: [Int], t5: [Int], t5Weights: [Float]) {
         // Qwen: encode(prompt, no specials) — no start/end token.
