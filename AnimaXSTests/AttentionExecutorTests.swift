@@ -1,5 +1,6 @@
 import XCTest
 import Metal
+import MetalPerformanceShaders
 @testable import AnimaXS
 
 final class AttentionExecutorTests: XCTestCase {
