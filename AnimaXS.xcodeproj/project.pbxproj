@@ -66,6 +66,7 @@
 		7CE95FAEE0E0A75FF56037BD /* fixtures.json in Resources */ = {isa = PBXBuildFile; fileRef = EBC8955A74CF5DF053312BD5 /* fixtures.json */; };
 		7DB2CBB89F9ABC72D09B6089 /* LLMAdapterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C509546307CB21BE0D1A9146 /* LLMAdapterTests.swift */; };
 		7E991650CBABF20B20E112AE /* AnimapkTensor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C416E0528D650EED48130A92 /* AnimapkTensor.swift */; };
+		7F54FFE5981FB56EC3283075 /* CheckpointIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2EDAC4CDB4C59968C36A62B /* CheckpointIdentityTests.swift */; };
 		7FC6CADDB18E526EAB4CA04E /* case1_t5_ids.i64 in Resources */ = {isa = PBXBuildFile; fileRef = C95BB4598F972757555839F3 /* case1_t5_ids.i64 */; };
 		81DF10FC8BD278FEC6C92E2A /* FullInferenceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 82B32CF88BF83EC3BF4BB22B /* FullInferenceTests.swift */; };
 		869CE73742B23D7225305BC1 /* ModelConstants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 684C63379028C718819607CA /* ModelConstants.swift */; };
@@ -224,6 +225,7 @@
 		CCD024BBBC7CB75E037214B8 /* tokenizer_reference_ids.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = tokenizer_reference_ids.json; sourceTree = "<group>"; };
 		D08BB48D952EAD6537D49B5E /* TimestepEmbedderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimestepEmbedderTests.swift; sourceTree = "<group>"; };
 		D2D891A141A49EBC60BDB3DA /* GqaHeadMappingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GqaHeadMappingTests.swift; sourceTree = "<group>"; };
+		D2EDAC4CDB4C59968C36A62B /* CheckpointIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CheckpointIdentityTests.swift; sourceTree = "<group>"; };
 		D576867ECC53CBF14CC30F79 /* AnimapkFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkFile.swift; sourceTree = "<group>"; };
 		D72261C40210A36E49DDDEA3 /* DiagnosticRunMarker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticRunMarker.swift; sourceTree = "<group>"; };
 		D8D449E301EA6883835AE7CC /* DiagnosticsEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsEngine.swift; sourceTree = "<group>"; };
@@ -493,6 +495,7 @@
 				1506F4F789C146E6B646F18C /* AnimapkParsingTests.swift */,
 				7EEF412C70729BC71E9544B8 /* AnimapkRangeLocatorTests.swift */,
 				347EF3EF52DB8E567909B2D3 /* AttentionExecutorTests.swift */,
+				D2EDAC4CDB4C59968C36A62B /* CheckpointIdentityTests.swift */,
 				77BB4786C558162A2D3800CE /* CommandBufferGateTests.swift */,
 				3BF58306EFCA1B15CC8F2C30 /* DiagnosticsRunMarkerTests.swift */,
 				A7E9F272444BEB44115AC498 /* DiagnosticsTests.swift */,
@@ -656,6 +659,7 @@
 				5A84CFBB6B28FE55EBE82D86 /* AnimapkParsingTests.swift in Sources */,
 				B31B0A2D248ABF6D51FE0F55 /* AnimapkRangeLocatorTests.swift in Sources */,
 				C34BFD1164209CD709A5A9F8 /* AttentionExecutorTests.swift in Sources */,
+				7F54FFE5981FB56EC3283075 /* CheckpointIdentityTests.swift in Sources */,
 				0B7A780CA8A2976199E58781 /* CommandBufferGateTests.swift in Sources */,
 				E4237CF411C2158613158D83 /* DiTBlockExecutorTests.swift in Sources */,
 				CFD7E41C92A70D6B5ED05B8A /* DiTBlockTests.swift in Sources */,
