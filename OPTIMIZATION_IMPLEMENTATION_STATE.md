@@ -8,15 +8,15 @@ Current phase gate: P0 — branch created from origin/main f89b1d8, state files 
 Working tree: clean (at P0 commit; local edits to state file not yet committed)
 
 ## Completed phases
-- P0 COMPLETE: branch `opt/a12-sustained-io` created from `origin/main` `f89b1d8`; three state files committed and pushed; draft PR #17; normal CI green (run 31896517851: project-consistency ✓, iphone-build ✓, simulator-tests ✓).
+- P0 COMPLETE: branch `opt/a12-sustained-io` created from `origin/main` `f89b1d8`; three state files committed and pushed; draft PR #17; normal CI green (run 31896517851).
+- P1 IN PROGRESS: P1-A foundation committed as WIP `48cf0a7` (ModelVariantDescriptor, ditW4/ditW8V2, descriptor(for:), ResolvedModels→ResolvedModelPack reshape with .hashes, GenerationMetrics.recordDiTPackIdentity). First subagent attempt (deleg_f4593fac9) interrupted mid-inference (no changes); second attempt (deleg_f6307e41) hit iteration budget after P1-A foundation.
 
 ## Current exact objective
-- P1 (next): W8-v2 identity + numerical correctness + error accounting. Delegate to one subagent. Start with P1-A (resolved-pack identity types in ModelManifest.swift / ModelStore.swift).
+- Continue P1 from commit `48cf0a7`. Complete P1-A consumers (ModelStore.resolveInstalledModels builds ResolvedModelPack from receipts; GenerationCoordinator variant telemetry), then P1-B checkpoint identity, P1-C numerics policy, P1-D final-layer BF16 boundary, P1-E error attribution, P1-F stage timing, P1-G numerical bookkeeping, P1-H cancellation reasons. Then CI + P1 gate.
 
 ## Current files being modified
-- OPTIMIZATION_IMPLEMENTATION_STATE.md (this file, new)
-- OPTIMIZATION_EVIDENCE.md (new)
-- OPTIMIZATION_DECISIONS.md (new)
+- Committed: ModelManifest.swift, GenerationEngine.swift, GenerationMetrics.swift (48cf0a7).
+- Next: ModelStore.swift (build ResolvedModelPack from receipt), GenerationCoordinator.swift (telemetry + checkpoint identity + cancellation), DiffusionSampler.swift, DiTFinalLayerExecutor.swift, DitForward.swift, DiTBlockExecutor.swift, NumericalFailure.swift, AnimaXSTests/*, scripts/dit_source_oracle.py.
 
 ## Invariants that must not regress
 - W4 known-good path
@@ -44,5 +44,5 @@ Working tree: clean (at P0 commit; local edits to state file not yet committed)
 - Then push branch and trigger normal CI (ci.yml / bootstrap-project.yml not needed since no .swift added).
 
 ## Last safe continuation point
-commit: P0 bootstrap commit (docs: bootstrap A12 sustained-performance optimization state) on opt/a12-sustained-io
-notes: P0 complete. Next: delegate P1 to one subagent. Repository at baseline f89b1d8. Do NOT branch from old local fix/w8-import-refactor.
+commit: 48cf0a7 (wip P1-A foundation) on opt/a12-sustained-io — HEAD at 48cf0a7
+notes: P1-A foundation committed but build is BROKEN at 48cf0a7 until consumers updated (ModelStore.swift:173, GenerationCoordinator.swift:212/304/350). Next dispatch continues P1 from here. Two subagent interruptions observed (model inference stalls + iteration budget); work in small steps, commit frequently.
