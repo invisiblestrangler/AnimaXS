@@ -98,6 +98,19 @@ kernel void half_to_float(
 
 // Round-to-nearest-even BF16 boundary while retaining fp32 storage. Preserve
 // infinities and NaNs rather than allowing the integer bias to alter them.
+// Shared by round_f32_to_bf16 and every fused kernel that must reproduce the
+// exact same boundary (P3-A/P3-B): one definition, no duplicated logic.
+inline float round_f32_to_bf16_value(float value)
+{
+    uint bits = as_type<uint>(value);
+    uint exponent = bits & 0x7f800000u;
+    if (exponent != 0x7f800000u) {
+        bits += 0x00007fffu + ((bits >> 16) & 1u);
+        bits &= 0xffff0000u;
+    }
+    return as_type<float>(bits);
+}
+
 kernel void round_f32_to_bf16(
     device const float *source [[buffer(0)]],
     device float *destination [[buffer(1)]],
@@ -105,13 +118,7 @@ kernel void round_f32_to_bf16(
     uint gid [[thread_position_in_grid]])
 {
     if (gid >= count) return;
-    uint bits = as_type<uint>(source[gid]);
-    uint exponent = bits & 0x7f800000u;
-    if (exponent != 0x7f800000u) {
-        bits += 0x00007fffu + ((bits >> 16) & 1u);
-        bits &= 0xffff0000u;
-    }
-    destination[gid] = as_type<float>(bits);
+    destination[gid] = round_f32_to_bf16_value(source[gid]);
 }
 
 // Round a fp16 value through BF16 while retaining the Apple5-friendly fp16
@@ -275,6 +282,109 @@ kernel void gelu(
     out[gid] = 0.5f * x * (1.0f + erf_f32(x * 0.7071067811865475f));
 }
 
+// Exact GELU expression shared by every GELU kernel (fp32 in/out) so the
+// fused half kernels cannot drift from the reference `gelu` math.
+inline float gelu_f32(float x)
+{
+    return 0.5f * x * (1.0f + erf_f32(x * 0.7071067811865475f));
+}
+
+// Stats ABI shared by every probe kernel in this file (see the probe section
+// for the full layout). Declared here, before their first use, so all fused
+// P3-A/P3-B probe kernels and the classic probe kernels can reference them.
+constant uint NUM_FLAG_NAN          = 1u << 0;
+constant uint NUM_FLAG_POS_INF      = 1u << 1;
+constant uint NUM_FLAG_NEG_INF      = 1u << 2;
+constant uint NUM_FLAG_HALF_OVERFLOW = 1u << 3;
+constant uint NUM_FLAG_RESULT_NAN   = 1u << 4;
+constant uint NUM_FLAG_RESULT_INF   = 1u << 5;
+constant uint NUM_SLOT_UINTS        = 4u;
+
+// ---------------------------------------------------------------------------
+// P3-B: in-place GELU on fp16 MLP hidden activations with fp32 register
+// arithmetic. Replaces the legacy sequence half_to_float → gelu(f32) →
+// round_f32_to_bf16 → float_to_half with a single pass:
+//   y = gelu_f32(float(values[i]))
+//   y = round_f32_to_bf16_value(y)          (only when bf16Boundary)
+//   values[i] = half(y)
+// Safe in-place: each thread reads exactly one element before writing it.
+// ---------------------------------------------------------------------------
+kernel void dit_gelu_half_inplace(
+    device half *values [[buffer(0)]],
+    constant uint &count [[buffer(1)]],
+    constant uint &bf16Boundary [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) return;
+    float y = gelu_f32(float(values[gid]));
+    if (bf16Boundary != 0) y = round_f32_to_bf16_value(y);
+    values[gid] = half(y);
+}
+
+// P3-B probe variant: identical math plus float_to_half_probe health stats on
+// the value fed to half() (i.e. after the BF16 boundary, matching the legacy
+// probed conversion path).
+kernel void dit_gelu_half_inplace_probe(
+    device half *values [[buffer(0)]],
+    constant uint &count [[buffer(1)]],
+    constant uint &bf16Boundary [[buffer(2)]],
+    device uint *stats [[buffer(3)]],
+    constant uint &probeSlot [[buffer(4)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    threadgroup uint partialFlags[256];
+    threadgroup uint partialMax[256];
+    threadgroup uint partialIndex[256];
+    uint base = group.x * 256;
+    uint i = base + tid;
+    uint localFlags = 0;
+    uint localMax = 0;
+    uint localIndex = 0xFFFFFFFFu;
+    if (i < count) {
+        float y = gelu_f32(float(values[i]));
+        if (bf16Boundary != 0) y = round_f32_to_bf16_value(y);
+        values[i] = half(y);
+        if (isnan(y)) {
+            localFlags |= NUM_FLAG_NAN;
+            localIndex = min(localIndex, i);
+        } else if (isinf(y)) {
+            localFlags |= (y > 0.0f) ? NUM_FLAG_POS_INF : NUM_FLAG_NEG_INF;
+            localIndex = min(localIndex, i);
+        } else {
+            float a = fabs(y);
+            if (a > 65504.0f) {
+                localFlags |= NUM_FLAG_HALF_OVERFLOW;
+                localIndex = min(localIndex, i);
+            }
+            uint bits = as_type<uint>(a);
+            if (bits > localMax) localMax = bits;
+        }
+    }
+    partialFlags[tid] = localFlags;
+    partialMax[tid] = localMax;
+    partialIndex[tid] = localIndex;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            partialFlags[tid] |= partialFlags[tid + stride];
+            partialMax[tid] = max(partialMax[tid], partialMax[tid + stride]);
+            partialIndex[tid] = min(partialIndex[tid], partialIndex[tid + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0 && partialFlags[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        uint slotBase = probeSlot * NUM_SLOT_UINTS;
+        atomic_fetch_or_explicit(&atom[slotBase + 0], partialFlags[0], memory_order_relaxed);
+        atomic_fetch_min_explicit(&atom[slotBase + 2], partialIndex[0], memory_order_relaxed);
+    }
+    if (tid == 0 && partialMax[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        atomic_fetch_max_explicit(&atom[probeSlot * NUM_SLOT_UINTS + 1], partialMax[0], memory_order_relaxed);
+    }
+}
+
 kernel void silu(
     device const float *in  [[buffer(0)]],
     device float       *out [[buffer(1)]],
@@ -348,6 +458,166 @@ kernel void modulate_f32(
     if (gid >= count) return;
     uint column = gid % N;
     out[gid] = normalized[gid] * (1.0f + scale[column]) + shift[column];
+}
+
+// ---------------------------------------------------------------------------
+// P3-A: fused LayerNorm + AdaLN modulation + optional BF16 compute boundary +
+// fp16 conversion in ONE pass. Replaces the legacy three-pass sequence
+// layernorm_f32_to_f32 → modulate_f32 → (round_f32_to_bf16 + float_to_half)
+// while preserving its exact reduction structure, modulation indexing
+// (scale at offset modulationOffset, shift at offset 0), boundary placement,
+// and conversion semantics.
+//
+// Legacy equivalence (all fp32):
+//   norm    = (residual - mean) * rsqrt(var + eps)
+//   mod     = norm * (1 + scale) + shift
+//   bf16    = round_f32_to_bf16_value(mod)            (only when bf16Boundary)
+//   output  = half(bf16)
+// ---------------------------------------------------------------------------
+kernel void dit_layernorm_modulate_to_half(
+    device const float *residual      [[buffer(0)]],
+    device const float *modulation    [[buffer(1)]],
+    device half       *output         [[buffer(2)]],
+    constant uint     &N              [[buffer(3)]],
+    constant float    &eps            [[buffer(4)]],
+    constant uint     &rows           [[buffer(5)]],
+    constant uint     &modulationOffset [[buffer(6)]],
+    constant uint     &bf16Boundary   [[buffer(7)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint3 threads [[threads_per_threadgroup]])
+{
+    uint row = group.x;
+    if (row >= rows) return;
+    uint threadCount = threads.x;
+    threadgroup float partial[256];
+    float sum = 0.0f;
+    for (uint i = tid; i < N; i += threadCount) sum += residual[row * N + i];
+    partial[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float mean = partial[0] / float(N);
+    float squareSum = 0.0f;
+    for (uint i = tid; i < N; i += threadCount) {
+        float centered = residual[row * N + i] - mean;
+        squareSum = fma(centered, centered, squareSum);
+    }
+    partial[tid] = squareSum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inv = rsqrt(partial[0] / float(N) + eps);
+    // EXACT modulate_f32 indexing: scale at modulationOffset, shift at 0.
+    device const float *scale = modulation + modulationOffset;
+    device const float *shift = modulation;
+    for (uint i = tid; i < N; i += threadCount) {
+        float normalized = (residual[row * N + i] - mean) * inv;
+        float modulated = normalized * (1.0f + scale[i]) + shift[i];
+        if (bf16Boundary != 0) modulated = round_f32_to_bf16_value(modulated);
+        output[row * N + i] = half(modulated);
+    }
+}
+
+// P3-A probe variant: identical math plus the float_to_half_probe health
+// stats (NaN/±Inf/|v| > 65504) accumulated into the shared stats buffer.
+// The health check runs on the value fed to half(), i.e. after the BF16
+// boundary, matching the legacy probed path.
+kernel void dit_layernorm_modulate_to_half_probe(
+    device const float *residual      [[buffer(0)]],
+    device const float *modulation    [[buffer(1)]],
+    device half       *output         [[buffer(2)]],
+    constant uint     &N              [[buffer(3)]],
+    constant float    &eps            [[buffer(4)]],
+    constant uint     &rows           [[buffer(5)]],
+    constant uint     &modulationOffset [[buffer(6)]],
+    constant uint     &bf16Boundary   [[buffer(7)]],
+    device uint       *stats          [[buffer(8)]],
+    constant uint     &probeSlot      [[buffer(9)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint3 threads [[threads_per_threadgroup]])
+{
+    uint row = group.x;
+    if (row >= rows) return;
+    uint threadCount = threads.x;
+    threadgroup float partial[256];
+    float sum = 0.0f;
+    for (uint i = tid; i < N; i += threadCount) sum += residual[row * N + i];
+    partial[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float mean = partial[0] / float(N);
+    float squareSum = 0.0f;
+    for (uint i = tid; i < N; i += threadCount) {
+        float centered = residual[row * N + i] - mean;
+        squareSum = fma(centered, centered, squareSum);
+    }
+    partial[tid] = squareSum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inv = rsqrt(partial[0] / float(N) + eps);
+    threadgroup uint partialFlags[256];
+    threadgroup uint partialMax[256];
+    threadgroup uint partialIndex[256];
+    device const float *scale = modulation + modulationOffset;
+    device const float *shift = modulation;
+    uint localFlags = 0;
+    uint localMax = 0;
+    uint localIndex = 0xFFFFFFFFu;
+    for (uint i = tid; i < N; i += threadCount) {
+        float normalized = (residual[row * N + i] - mean) * inv;
+        float modulated = normalized * (1.0f + scale[i]) + shift[i];
+        if (bf16Boundary != 0) modulated = round_f32_to_bf16_value(modulated);
+        output[row * N + i] = half(modulated);
+        if (isnan(modulated)) {
+            localFlags |= NUM_FLAG_NAN;
+            localIndex = min(localIndex, row * N + i);
+        } else if (isinf(modulated)) {
+            localFlags |= (modulated > 0.0f) ? NUM_FLAG_POS_INF : NUM_FLAG_NEG_INF;
+            localIndex = min(localIndex, row * N + i);
+        } else {
+            float a = fabs(modulated);
+            if (a > 65504.0f) {
+                localFlags |= NUM_FLAG_HALF_OVERFLOW;
+                localIndex = min(localIndex, row * N + i);
+            }
+            uint bits = as_type<uint>(a);
+            if (bits > localMax) localMax = bits;
+        }
+    }
+    partialFlags[tid] = localFlags;
+    partialMax[tid] = localMax;
+    partialIndex[tid] = localIndex;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            partialFlags[tid] |= partialFlags[tid + stride];
+            partialMax[tid] = max(partialMax[tid], partialMax[tid + stride]);
+            partialIndex[tid] = min(partialIndex[tid], partialIndex[tid + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0 && partialFlags[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        uint slotBase = probeSlot * NUM_SLOT_UINTS;
+        atomic_fetch_or_explicit(&atom[slotBase + 0], partialFlags[0], memory_order_relaxed);
+        atomic_fetch_min_explicit(&atom[slotBase + 2], partialIndex[0], memory_order_relaxed);
+    }
+    if (tid == 0 && partialMax[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        atomic_fetch_max_explicit(&atom[probeSlot * NUM_SLOT_UINTS + 1], partialMax[0], memory_order_relaxed);
+    }
 }
 
 // MPS branches are fp16, but gates and residual arithmetic remain fp32.
@@ -1182,14 +1452,8 @@ kernel void vae_position_to_rgba8(
 // gate_add probe adds:
 //   bit4 result (residual) became NaN
 //   bit5 result (residual) became +/-Inf
-// ---------------------------------------------------------------------------
-constant uint NUM_FLAG_NAN          = 1u << 0;
-constant uint NUM_FLAG_POS_INF      = 1u << 1;
-constant uint NUM_FLAG_NEG_INF      = 1u << 2;
-constant uint NUM_FLAG_HALF_OVERFLOW = 1u << 3;
-constant uint NUM_FLAG_RESULT_NAN   = 1u << 4;
-constant uint NUM_FLAG_RESULT_INF   = 1u << 5;
-constant uint NUM_SLOT_UINTS        = 4u;
+// (The NUM_FLAG_* constants themselves are declared near the P3-A kernels,
+// before their first use.)
 
 // fp32 -> fp16 conversion that also records input-health stats. Replaces
 // float_to_half at probed call sites; identical conversion semantics.
