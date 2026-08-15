@@ -1,4 +1,5 @@
 import XCTest
+import Metal
 @testable import AnimaXS
 
 /// Ping-pong ON/OFF seam tests (§18.4). The loop-shape decision is pure
