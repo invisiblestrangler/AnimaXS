@@ -49,8 +49,7 @@ final class WeightStreamerTests: XCTestCase {
         let device = try XCTUnwrap(MTLCreateSystemDefaultDevice())
         let streamer = try WeightStreamer(device: device, capacity: 1024, slotCount: 2)
         XCTAssertEqual(streamer.slotCount, 2)
-        XCTAssertNotEqual(
-            streamer.buffer(for: 0), streamer.buffer(for: 1))
+        XCTAssertFalse(streamer.buffer(for: 0) === streamer.buffer(for: 1))
         XCTAssertNotEqual(
             streamer.buffer(for: 0).contents(),
             streamer.buffer(for: 1).contents())
