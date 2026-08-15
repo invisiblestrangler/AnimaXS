@@ -69,6 +69,18 @@ final class NumericalMonitor {
             }
         }
 
+        /// FP32 residual-pass probes: the residual stream legitimately exceeds
+        /// FP16 range (it is FP32 by design), so |v| > 65504 there is
+        /// informational, never a first-issue attribution or a warning.
+        var halfOverflowIsInformational: Bool {
+            switch self {
+            case .selfResidual, .crossResidual, .mlpResidual:
+                return true
+            default:
+                return false
+            }
+        }
+
         /// Human-readable stage label for failure attribution.
         var stageLabel: String {
             switch self {
@@ -200,6 +212,39 @@ final class NumericalMonitor {
         return result
     }
 
+    /// Number of probes with serious flags (NaN/±Inf/residual-NaN/Inf), where
+    /// the probe's halfOverflow flag is informational when the probe says so.
+    func warningCount() -> Int {
+        let raw = readRaw()
+        var count = 0
+        for probe in Probe.allCases where seriousFlags(at: probe.rawValue, raw: raw, probe: probe) != 0 {
+            count += 1
+        }
+        return count
+    }
+
+    /// Per-probe serious-condition detail strings for the metrics summary.
+    func warningDetails() -> String {
+        let raw = readRaw()
+        var details: [String] = []
+        for probe in Probe.allCases {
+            let flags = seriousFlags(at: probe.rawValue, raw: raw, probe: probe)
+            guard flags != 0 else { continue }
+            var stats = Stats()
+            stats.flags = flags
+            details.append("\(probe.stageLabel): \(stats.condition)")
+        }
+        return details.joined(separator: "; ")
+    }
+
+    private func seriousFlags(at slot: Int, raw: [UInt32], probe: Probe) -> UInt32 {
+        var flags = raw[slot * 4]
+        if probe.halfOverflowIsInformational {
+            flags &= ~Flag.halfOverflow.rawValue
+        }
+        return flags
+    }
+
     // MARK: - Per-block / per-step attribution checkpoints (cheap CPU reads)
 
     /// Must be called after each DiT block's command buffer completes.
@@ -218,8 +263,8 @@ final class NumericalMonitor {
         guard firstIssue == nil else { return }
         let raw = readRaw()
         for (index, probe) in Probe.allCases.enumerated() {
-            let flags = raw[index * 4]
-            let delta = flags & ~previousFlags[index]
+            let effective = seriousFlags(at: index, raw: raw, probe: probe)
+            let delta = effective & ~previousFlags[index]
             if delta != 0 {
                 firstIssue = FirstIssue(
                     step: step + 1, block: block.map { $0 + 1 },
@@ -231,7 +276,7 @@ final class NumericalMonitor {
         // can still delta against the true baseline.
         if firstIssue == nil {
             for index in 0..<Probe.allCases.count {
-                previousFlags[index] = raw[index * 4]
+                previousFlags[index] = seriousFlags(at: index, raw: raw, probe: Probe.allCases[index])
             }
         }
     }

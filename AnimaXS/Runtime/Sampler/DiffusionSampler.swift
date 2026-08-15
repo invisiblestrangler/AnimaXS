@@ -180,11 +180,8 @@ final class DiffusionSampler {
             try stepCompleted?(step, sigma, nextSigma, denoised, next)
             swap(&latent, &next)
         }
-        metrics?.setNumericalWarnings(monitor.report().values.filter(\.hasIssue).count)
-        let flaggedDetails = monitor.report().compactMap { probe, stats in
-            stats.hasIssue ? "\(probe.stageLabel): \(stats.condition)" : nil
-        }
-        metrics?.setNumericalDetails(flaggedDetails.joined(separator: "; "))
+        metrics?.setNumericalWarnings(monitor.warningCount())
+        metrics?.setNumericalDetails(monitor.warningDetails())
         try await copy(latent, to: outputLatent, bytes: bytes)
     }
 
