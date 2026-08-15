@@ -100,6 +100,10 @@ struct GenerationMetrics: Equatable {
     /// = 28 hits. See `DiffusionStepMetrics.crossKVHits/crossKVMisses`.
     var crossKVHits: Int = 0
     var crossKVMisses: Int = 0
+    /// P6: weight bytes served via the mmap-backed no-copy MTLBuffer source
+    /// (memcpy eliminated). Recorded on the no-copy path only; the copied path
+    /// records 0 and keeps charging `weightCopyBytes`.
+    var mmapNoCopyBytes: UInt64 = 0
 
     // Weight streaming + Metal accounting (seconds)
     var weightCopyTime: Double = 0
