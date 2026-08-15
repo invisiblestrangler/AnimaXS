@@ -37,3 +37,12 @@ result: AttentionInputLayout enum (.headMajor/.tokenMajor(tokenStride:)); encode
 key metrics: transposeBytes → 0 on the strided path per block (legacy records 4×2 MiB per attention branch); legacy path untouched.
 artifact/run id: CI run pending
 interpretation: P4 gate candidate. Numerical parity of the strided path is proven by the parity test on real MPS; physical-device perf measurement (and any auto-fallback) deferred per runbook §9 (P4-F).
+
+## 2026-08-15 (P4) — Normal CI green on P4 (strided token-major MPS attention)
+HEAD: 34ba332 (P4 complete on opt/a12-sustained-io)
+command: gh run watch 31911189760 (workflow_dispatch on f811e38, includes all P4 code + tolerance fix)
+configuration: normal CI (ci.yml): project-consistency, simulator-tests, iphone-build
+result: ALL PASS. project-consistency ✓, simulator-tests ✓ (287 tests, 14 expected skips, 0 failures), iphone-build ✓.
+key metrics: 0 failures. Adds stridedTokenMajorAttention toggle (default OFF), AttentionInputLayout, strided MPS per-head matrix views eliminating DiT head transposes; strict rejection of GQA/fp32/bf16 on strided path; tests (strided-vs-legacy parity, full DiT shapes, no head mixing, zero transpose bytes, unsupported rejection). Fixed strided MPS parity by transposing legacy head-major reference to token-major before comparison.
+artifact/run id: 31911189760 (PR #17 draft)
+interpretation: P4 gate met. Strided path gated behind toggle (W4 default unchanged). Next: P5.
