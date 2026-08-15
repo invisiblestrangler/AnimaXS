@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#endif
 
 /// A start/end environment fact recorded around a generation (unplugged is
 /// authoritative for benchmarking). Values are observational telemetry — they
@@ -15,6 +18,41 @@ struct EnvironmentSnapshot: Equatable {
     var batteryText: String {
         batteryLevel < 0 ? "n/a" : "\(batteryLevel)%"
     }
+}
+
+/// One diffusion step's telemetry (optimization runbook Phase 7 / P2).
+///
+/// All values are accumulated by `MetricsCollector` from the SAME record calls
+/// that feed the global counters, so per-step sums reconcile with the global
+/// totals (P2 gate). `completed == false` marks a step that threw mid-way
+/// (e.g. the W8 failure case): its partial durations/counters are still
+/// published so a device log can attribute the slowdown to the failing step.
+struct DiffusionStepMetrics: Equatable {
+    let step: Int
+    var completed: Bool = false
+    var wallSeconds: Double = 0
+    var blockWallSeconds: Double = 0
+    var gpuCommandSeconds: Double = 0
+    var weightCopySeconds: Double = 0
+    var weightCopyBytes: UInt64 = 0
+    var metalEncodeSeconds: Double = 0
+    var hostWaitSeconds: Double = 0
+    var minimumAvailableProcessMemory: UInt64 = .max
+    var peakMetalAllocated: UInt64 = 0
+    var linearGEMMTiles: Int = 0
+    var attentionQueryTiles: Int = 0
+    var dequantizedWeightBytesWritten: UInt64 = 0
+    var transposeBytes: UInt64 = 0
+    var conversionBytes: UInt64 = 0
+    var crossKVHits: Int = 0
+    var crossKVMisses: Int = 0
+    var mmapNoCopyBytes: UInt64 = 0
+    var qgemmCalls: Int = 0
+    // Observational per-step environment facts (cheap OS queries only —
+    // never gate or throttle generation).
+    var thermalState: String = "n/a"
+    var availableProcessMemory: UInt64 = 0
+    var metalAllocated: UInt64 = 0
 }
 
 /// Timing + memory telemetry for one generation run (optimization runbook
@@ -38,6 +76,17 @@ struct GenerationMetrics: Equatable {
     var stepTimes: [Double] = []
     var blockTimes: [Double] = []
     var blockCount: Int = 0
+
+    /// Per-step telemetry (P2). Append-only: one entry per executed step, in
+    /// step order, INCLUDING partial (uncompleted) steps recorded when a step
+    /// throws mid-way. Per-step sums reconcile with the global counters.
+    var stepMetrics: [DiffusionStepMetrics] = []
+
+    // Logical traffic counters (arithmetic byte counters, not GPU readbacks).
+    // Counted once ("bytes materialized") — consistent across all sites.
+    var dequantizedWeightBytesWritten: UInt64 = 0
+    var transposeBytes: UInt64 = 0
+    var conversionBytes: UInt64 = 0
 
     // Weight streaming + Metal accounting (seconds)
     var weightCopyTime: Double = 0
@@ -132,6 +181,35 @@ struct GenerationMetrics: Equatable {
             lines.append("Attention query tiles: \(attentionQueryTiles)")
             lines.append("")
         }
+        if !stepMetrics.isEmpty {
+            lines.append("Per-step")
+            lines.append("step  done  wall    block   gpu     copy    encode  host    avail-min  thermal")
+            for entry in stepMetrics {
+                let availableText = entry.minimumAvailableProcessMemory == .max
+                    ? "n/a" : String(format: "%.0f MB", Double(entry.minimumAvailableProcessMemory) / 1_048_576)
+                lines.append(String(
+                    format: "%-5d %-5@ %-7.1f %-7.1f %-7.1f %-7.1f %-7.1f %-7.1f %-10@ %@",
+                    entry.step,
+                    entry.completed ? "yes" : "no",
+                    entry.wallSeconds,
+                    entry.blockWallSeconds,
+                    entry.gpuCommandSeconds,
+                    entry.weightCopySeconds,
+                    entry.metalEncodeSeconds,
+                    entry.hostWaitSeconds,
+                    availableText,
+                    entry.thermalState))
+            }
+            lines.append("")
+            lines.append("Traffic/backend")
+            lines.append(String(format: "dequantized weight bytes written: %.0f MB",
+                                Double(dequantizedWeightBytesWritten) / 1_048_576))
+            lines.append(String(format: "transpose bytes: %.0f MB",
+                                Double(transposeBytes) / 1_048_576))
+            lines.append(String(format: "conversion bytes: %.0f MB",
+                                Double(conversionBytes) / 1_048_576))
+            lines.append("")
+        }
         lines.append(String(format: "Peak Metal allocation: %.2f GB",
                             Double(peakMetalAllocation) / 1_073_741_824))
         if minAvailableMemory != UInt64.max {
@@ -183,6 +261,10 @@ final class MetricsCollector {
     private var blockStartTime: Double?
     private(set) var currentStep = -1
     private(set) var currentBlock = -1
+    /// Index into `metrics.stepMetrics` of the ACTIVE step, or nil when no
+    /// diffusion step is in progress. Every record method also accumulates
+    /// into this step so per-step totals reconcile with the globals (P2).
+    private var activeStepIndex: Int?
 
     private func now() -> Double { ProcessInfo.processInfo.systemUptime }
 
@@ -209,12 +291,41 @@ final class MetricsCollector {
     func beginStep(_ step: Int) {
         currentStep = step
         stepStartTime = now()
+        metrics.stepMetrics.append(DiffusionStepMetrics(step: step))
+        activeStepIndex = metrics.stepMetrics.count - 1
+        // Observational per-step environment snapshot at step START (cheap OS
+        // queries; never gates inference). Memory facts refresh again at
+        // endStep, where the step's blocks have completed.
+        recordEnvironmentIntoActiveStep()
     }
 
-    func endStep() {
+    /// Finalizes the active step. `completed` is false when the step threw
+    /// mid-way — its partial durations/counters are still published so a
+    /// device log can attribute a slowdown to the failing step (P2-B).
+    func endStep(completed: Bool = true) {
         guard let start = stepStartTime else { return }
-        metrics.stepTimes.append(now() - start)
+        let wall = now() - start
+        metrics.stepTimes.append(wall)
         stepStartTime = nil
+        guard let index = activeStepIndex, metrics.stepMetrics.indices.contains(index) else {
+            activeStepIndex = nil
+            return
+        }
+        metrics.stepMetrics[index].completed = completed
+        metrics.stepMetrics[index].wallSeconds = wall
+        if wall > 0 {
+            metrics.stepMetrics[index].blockWallSeconds = max(0, wall - metrics.stepMetrics[index].weightCopySeconds)
+        }
+        recordEnvironmentIntoActiveStep()
+        activeStepIndex = nil
+    }
+
+    private func recordEnvironmentIntoActiveStep() {
+        guard let index = activeStepIndex, metrics.stepMetrics.indices.contains(index) else { return }
+        metrics.stepMetrics[index].thermalState = String(describing: ProcessInfo.processInfo.thermalState)
+        let available = UInt64(os_proc_available_memory())
+        metrics.stepMetrics[index].availableProcessMemory = available
+        metrics.stepMetrics[index].metalAllocated = metrics.currentMetalAllocation
     }
 
     func beginBlock(_ block: Int) {
@@ -234,18 +345,58 @@ final class MetricsCollector {
     func recordWeightCopy(bytes: Int, seconds: Double) {
         metrics.weightCopyTime += seconds
         metrics.weightCopyBytes += Int64(bytes)
+        if let index = activeStepIndex {
+            metrics.stepMetrics[index].weightCopySeconds += seconds
+            metrics.stepMetrics[index].weightCopyBytes += UInt64(max(0, bytes))
+        }
     }
 
     func recordEncode(seconds: Double) {
         metrics.encodeTime += seconds
+        if let index = activeStepIndex {
+            metrics.stepMetrics[index].metalEncodeSeconds += seconds
+        }
     }
 
     func recordGPUCommand(seconds: Double) {
         metrics.gpuCommandTime += seconds
+        if let index = activeStepIndex {
+            metrics.stepMetrics[index].gpuCommandSeconds += seconds
+        }
     }
 
     func recordHostWait(seconds: Double) {
         metrics.hostWaitTime += max(0, seconds)
+        if let index = activeStepIndex {
+            metrics.stepMetrics[index].hostWaitSeconds += max(0, seconds)
+        }
+    }
+
+    // MARK: - Logical traffic counters (P2-C)
+
+    /// Full-weight dequantization materialized bytes (counted once).
+    func recordDequantizedWeightBytesWritten(_ bytes: UInt64) {
+        metrics.dequantizedWeightBytesWritten += bytes
+        if let index = activeStepIndex {
+            metrics.stepMetrics[index].dequantizedWeightBytesWritten += bytes
+        }
+    }
+
+    /// Transpose traffic (counted once — "bytes materialized", consistent
+    /// with conversions).
+    func recordTransposeBytes(_ bytes: UInt64) {
+        metrics.transposeBytes += bytes
+        if let index = activeStepIndex {
+            metrics.stepMetrics[index].transposeBytes += bytes
+        }
+    }
+
+    /// FP16/FP32 conversion traffic (counted once — "bytes materialized").
+    func recordConversionBytes(_ bytes: UInt64) {
+        metrics.conversionBytes += bytes
+        if let index = activeStepIndex {
+            metrics.stepMetrics[index].conversionBytes += bytes
+        }
     }
 
     // MARK: - Memory / thermal
@@ -254,6 +405,12 @@ final class MetricsCollector {
         metrics.peakMetalAllocation = max(metrics.peakMetalAllocation, allocated)
         metrics.currentMetalAllocation = allocated
         if available < metrics.minAvailableMemory { metrics.minAvailableMemory = available }
+        if let index = activeStepIndex {
+            metrics.stepMetrics[index].peakMetalAllocated = max(metrics.stepMetrics[index].peakMetalAllocated, allocated)
+            if available < metrics.stepMetrics[index].minimumAvailableProcessMemory {
+                metrics.stepMetrics[index].minimumAvailableProcessMemory = available
+            }
+        }
     }
 
     func recordThermal(_ state: ProcessInfo.ThermalState) {

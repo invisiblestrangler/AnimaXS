@@ -184,6 +184,16 @@ final class DiffusionSampler {
         // [0, startStep); only execute the remaining sigma transitions.
         for step in startStep..<EulerSampler.sigmas.count - 1 {
             metrics?.beginStep(step)
+            // P2: a step that throws is still recorded as a PARTIAL step
+            // (completed == false) with its partial durations/counters, so a
+            // device log can attribute a slowdown to the failing step (e.g.
+            // the W8 failure case). On success the explicit endStep below
+            // keeps the historical timing point (before the checkpoint
+            // callback); the defer only fires on failure.
+            var completedForMetrics = false
+            defer {
+                if !completedForMetrics { metrics?.endStep(completed: false) }
+            }
             let sigma = EulerSampler.sigmas[step]
             let nextSigma = EulerSampler.sigmas[step + 1]
             try await preparation.execute(
@@ -217,7 +227,8 @@ final class DiffusionSampler {
                 // (block/stage/condition) is added by the numerical monitor.
                 throw numericalFailure(step: step)
             }
-            metrics?.endStep()
+            metrics?.endStep(completed: true)
+            completedForMetrics = true
             try stepCompleted?(step, sigma, nextSigma, denoised, next)
             swap(&latent, &next)
         }
