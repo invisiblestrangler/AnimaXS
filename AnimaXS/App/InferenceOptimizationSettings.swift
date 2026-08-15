@@ -17,6 +17,7 @@ final class InferenceOptimizationSettings: ObservableObject {
         static let numericalMonitoring = "inference.numericalMonitoring"
         static let fusedNormModulation = "inference.fusedNormModulation"
         static let fusedMLPActivation = "inference.fusedMLPActivation"
+        static let stridedTokenMajorAttention = "inference.stridedTokenMajorAttention"
     }
 
     private let defaults: UserDefaults
@@ -28,6 +29,7 @@ final class InferenceOptimizationSettings: ObservableObject {
     @Published private(set) var numericalMonitoring: Bool
     @Published private(set) var fusedNormModulation: Bool
     @Published private(set) var fusedMLPActivation: Bool
+    @Published private(set) var stridedTokenMajorAttention: Bool
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -48,6 +50,8 @@ final class InferenceOptimizationSettings: ObservableObject {
             ?? baseline.fusedNormModulation
         fusedMLPActivation = defaults.object(forKey: Keys.fusedMLPActivation) as? Bool
             ?? baseline.fusedMLPActivation
+        stridedTokenMajorAttention = defaults.object(forKey: Keys.stridedTokenMajorAttention) as? Bool
+            ?? baseline.stridedTokenMajorAttention
     }
 
     // MARK: - Mutations (validate before persist)
@@ -87,6 +91,11 @@ final class InferenceOptimizationSettings: ObservableObject {
         defaults.set(value, forKey: Keys.fusedMLPActivation)
     }
 
+    func setStridedTokenMajorAttention(_ value: Bool) {
+        stridedTokenMajorAttention = value
+        defaults.set(value, forKey: Keys.stridedTokenMajorAttention)
+    }
+
     /// Immutable snapshot of the current settings, used by a single
     /// generation. Never mutated mid-run.
     var snapshot: InferenceOptimizationConfig {
@@ -97,7 +106,8 @@ final class InferenceOptimizationSettings: ObservableObject {
             pingPongWeightStreaming: pingPongWeightStreaming,
             numericalMonitoring: numericalMonitoring,
             fusedNormModulation: fusedNormModulation,
-            fusedMLPActivation: fusedMLPActivation
+            fusedMLPActivation: fusedMLPActivation,
+            stridedTokenMajorAttention: stridedTokenMajorAttention
         )
     }
 
@@ -112,6 +122,7 @@ final class InferenceOptimizationSettings: ObservableObject {
         numericalMonitoring = baseline.numericalMonitoring
         fusedNormModulation = baseline.fusedNormModulation
         fusedMLPActivation = baseline.fusedMLPActivation
+        stridedTokenMajorAttention = baseline.stridedTokenMajorAttention
         defaults.set(baseline.linearTileRows, forKey: Keys.linearTileRows)
         defaults.set(baseline.attentionTileRows, forKey: Keys.attentionTileRows)
         defaults.set(baseline.directLinearMPSIO, forKey: Keys.directLinearMPSIO)
@@ -119,6 +130,7 @@ final class InferenceOptimizationSettings: ObservableObject {
         defaults.set(baseline.numericalMonitoring, forKey: Keys.numericalMonitoring)
         defaults.set(baseline.fusedNormModulation, forKey: Keys.fusedNormModulation)
         defaults.set(baseline.fusedMLPActivation, forKey: Keys.fusedMLPActivation)
+        defaults.set(baseline.stridedTokenMajorAttention, forKey: Keys.stridedTokenMajorAttention)
     }
 
     // MARK: - Loading

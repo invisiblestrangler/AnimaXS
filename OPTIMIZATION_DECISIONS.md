@@ -10,3 +10,10 @@ Reason: The runbook P0 mandates branching from the newer `origin/main`. The loca
 Evidence: `git merge-base --is-ancestor a646a12 origin/main` → NO (divergent). `git diff --stat 6e8623d f89b1d8` shows f89b1d8 carries +25 lines in ModelStore.swift and extra DECISIONS/STATUS docs not in the local line.
 Alternatives rejected: Branching from local `fix/w8-import-refactor` (stale, divergent, would inherit pre-squash artifacts and lose the f89b1d8 ModelStore fixes).
 Revisit only if: origin/main is force-pushed or the baseline SHA changes.
+## D002 — P4 strided token-major attention: extend AttentionExecutor, do not rewrite
+Date: 2026-08-15
+HEAD: b3aeb14 (P4 code committed)
+Decision: Add an `AttentionInputLayout` enum (.headMajor / .tokenMajor(tokenStride:)) with the legacy `encode(...)` defaulting to head-major; add a parallel `encodeTokenMajor` path + `tokenMajorHeadMatrix` strided-view helper inside AttentionExecutor rather than touching Qwen/VAE/adapter call sites (they keep default head-major exactly). DiTBlockExecutor gates its 4 transpose kernels on a new `stridedTokenMajorAttention` config toggle (default OFF).
+Reason: Runbook §9 requires (a) legacy head-major behavior identical for A/B, (b) no blind mutation of generic attention users, (c) score scratch stays tight (rows×keyCount, not token-dim stride), (d) cross-attention handled via the same row-stride helper with differing row counts (1024 vs 512). A layout parameter keeps the executor single-source without changing the legacy path.
+Alternatives rejected: (1) New DiT-only attention class — duplicates softmax/QK/PV plumbing and metrics counting. (2) Rewriting the main encode loop unconditionally — would risk Qwen/VAE/adapter layouts.
+Revisit only if: MPS on a physical device rejects strided descriptors (then implement auto-fallback per P4-F after device tests).

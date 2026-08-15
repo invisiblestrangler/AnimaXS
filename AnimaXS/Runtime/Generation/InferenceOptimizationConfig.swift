@@ -37,6 +37,12 @@ struct InferenceOptimizationConfig: Equatable {
     /// ~32 MiB `dit.hidden.f32` intermediate and its four passes. False
     /// keeps the legacy half→float→GELU→round→to-half path.
     var fusedMLPActivation: Bool
+    /// P4: remove the DiT attention token↔head transposes (3 in + 1 out per
+    /// block) by feeding MPS strided token-major matrix views directly to the
+    /// attention executor. False keeps the legacy head-major transpose path
+    /// exactly for A/B. Only affects DiT attention; Qwen/VAE/adapter attention
+    /// is always head-major.
+    var stridedTokenMajorAttention: Bool
 
     static let currentBaseline = InferenceOptimizationConfig(
         linearTileRows: 128,
@@ -45,7 +51,8 @@ struct InferenceOptimizationConfig: Equatable {
         pingPongWeightStreaming: true,
         numericalMonitoring: true,
         fusedNormModulation: false,
-        fusedMLPActivation: false
+        fusedMLPActivation: false,
+        stridedTokenMajorAttention: false
     )
 
     /// Sanitizes a tile-row value down to the nearest allowed value (or the

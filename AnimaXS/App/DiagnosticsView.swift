@@ -162,6 +162,8 @@ struct DiagnosticsView: View {
                 .disabled(isGenerating)
             Toggle("Fused MLP in-place GELU", isOn: fusedMLPActivationBinding)
                 .disabled(isGenerating)
+            Toggle("Strided token-major attention (P4)", isOn: stridedTokenMajorAttentionBinding)
+                .disabled(isGenerating)
             Button("Reset to current baseline") {
                 optimizationSettings.resetToBaseline()
             }
@@ -214,6 +216,12 @@ struct DiagnosticsView: View {
         Binding(
             get: { optimizationSettings.fusedMLPActivation },
             set: { optimizationSettings.setFusedMLPActivation($0) })
+    }
+
+    private var stridedTokenMajorAttentionBinding: Binding<Bool> {
+        Binding(
+            get: { optimizationSettings.stridedTokenMajorAttention },
+            set: { optimizationSettings.setStridedTokenMajorAttention($0) })
     }
 
     @ViewBuilder

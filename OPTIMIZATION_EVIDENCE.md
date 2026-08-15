@@ -20,3 +20,11 @@ key metrics: 0 failures. Adds dit_layernorm_modulate_to_half(+probe) and dit_gel
 artifact/run id: 31908033162 (PR #17 draft)
 interpretation: P3 gate met. Fused paths gated behind toggles (W4 default unchanged); device measures speed benefit later. Next: P4.
 
+## 2026-08-15 (P4) — Strided token-major MPS attention implemented (transpose elimination)
+HEAD: b3aeb14 (P4 code + tests committed on opt/a12-sustained-io)
+command: edits to AttentionExecutor/DiTBlockExecutor/InferenceOptimizationConfig(+Settings+DiagnosticsView)/AttentionExecutorTests/InferenceOptimizationConfigTests; commit + push; CI run triggered (id pending)
+configuration: stridedTokenMajorAttention toggle (default OFF) — legacy head-major path byte-for-byte unchanged for A/B
+result: AttentionInputLayout enum (.headMajor/.tokenMajor(tokenStride:)); encodeTokenMajor + tokenMajorHeadMatrix build strided per-head MPSMatrix views (row stride = tokenStride*2, head offset = head*headDim*2) so Q/K/V + attended output stay token-major — 3-in + 1-out transpose kernels and the 4 head buffers are skipped when ON; score scratch stays tight rows×keyCount (no 2048-dim stride); strict validation rejects GQA (keyValueHeads != heads), fp32ScoresAndSoftmax, and bf16Compute on the strided path (P4-F loud failure); 16-byte alignment validated. DiTBlockExecutor gates the 4 transposes on the toggle. Tests: strided-vs-legacy parity (4 heads, distinguishable per-token/head values), full DiT shapes self 1024/1024 + cross 1024/512 (tokenStride 2048), no head mixing, transpose bytes == 0 + query tiles == 4, unsupported-combo rejection, config toggle default-off/independence/reset.
+key metrics: transposeBytes → 0 on the strided path per block (legacy records 4×2 MiB per attention branch); legacy path untouched.
+artifact/run id: CI run pending
+interpretation: P4 gate candidate. Numerical parity of the strided path is proven by the parity test on real MPS; physical-device perf measurement (and any auto-fallback) deferred per runbook §9 (P4-F).

@@ -252,12 +252,14 @@ final class DiTBlockExecutor {
         }
 
         let qToken = buffer("dit.q.token.f16", Self.tokens * Self.dim, Float16.self)
-        let qHead = buffer("dit.q.head.f16", Self.tokens * Self.dim, Float16.self)
         let kTokenCount = (cross ? Self.contextTokens : Self.tokens) * Self.dim
         let kToken = buffer("dit.k.token.f16", kTokenCount, Float16.self)
-        let kHead = buffer("dit.k.head.f16", kTokenCount, Float16.self)
         let vToken = buffer("dit.v.token.f16", kTokenCount, Float16.self)
-        let vHead = buffer("dit.v.head.f16", kTokenCount, Float16.self)
+        // P4: the strided token-major backend feeds the token-major Q/K/V
+        // buffers DIRECTLY to MPS via strided per-head views, so the four
+        // head-major transpose buffers/kernels are not allocated or encoded.
+        // The legacy head-major path stays byte-for-byte for A/B.
+        let strided = optimization.stridedTokenMajorAttention
         let queryWeight = cross ? weights.crossQ : weights.selfQ
         let keyWeight = cross ? weights.crossK : weights.selfK
         let valueWeight = cross ? weights.crossV : weights.selfV
@@ -294,25 +296,51 @@ final class DiTBlockExecutor {
         }
         try encodeHalfComputeBoundary(command, qToken, count: Self.tokens * Self.dim)
         try encodeHalfComputeBoundary(command, kToken, count: kTokenCount)
-        try encodeTranspose(command, input: qToken, output: qHead,
-                            tokens: Self.tokens, toHeadMajor: true)
-        try encodeTranspose(command, input: kToken, output: kHead,
-                            tokens: keyRows, toHeadMajor: true)
-        try encodeTranspose(command, input: vToken, output: vHead,
-                            tokens: keyRows, toHeadMajor: true)
-        let attendedHead = buffer("dit.attended.head.f16", Self.tokens * Self.dim, Float16.self)
-        let attendedToken = buffer("dit.attended.token.f16", Self.tokens * Self.dim, Float16.self)
-        try attention.encode(commandBuffer: command, query: qHead, key: kHead, value: vHead,
-                             output: attendedHead, heads: Self.heads, queryCount: Self.tokens,
-                             keyCount: keyRows, headDim: Self.headDim,
-                             probe: cross ? .crossScores : .selfScores)
-        try encodeHalfComputeBoundary(command, attendedHead, count: Self.tokens * Self.dim)
-        if NumericalMonitor.detailedProbesEnabled, let monitor {
-            try monitor.encodeProbe(command, values: attendedHead, count: Self.tokens * Self.dim,
-                                    probe: cross ? .crossAttended : .selfAttended)
+
+        let attendedToken: MTLBuffer
+        if strided {
+            // P4: MPS strided token-major attention — Q/K/V and the attended
+            // output all stay in the token-major layout; no transposes.
+            let attended = buffer("dit.attended.token.f16", Self.tokens * Self.dim, Float16.self)
+            try attention.encode(
+                commandBuffer: command, query: qToken, key: kToken, value: vToken,
+                output: attended, heads: Self.heads, queryCount: Self.tokens,
+                keyCount: keyRows, headDim: Self.headDim,
+                probe: cross ? .crossScores : .selfScores,
+                layout: .tokenMajor(tokenStride: Self.dim))
+            // The strided backend materializes the attended token-major output
+            // directly, so the boundary/probe land on it (the legacy path keeps
+            // them on the head-major buffer, exactly as before, for A/B).
+            try encodeHalfComputeBoundary(command, attended, count: Self.tokens * Self.dim)
+            if NumericalMonitor.detailedProbesEnabled, let monitor {
+                try monitor.encodeProbe(command, values: attended, count: Self.tokens * Self.dim,
+                                        probe: cross ? .crossAttended : .selfAttended)
+            }
+            attendedToken = attended
+        } else {
+            // Legacy head-major path: transpose in, attend, transpose out.
+            let qHead = buffer("dit.q.head.f16", Self.tokens * Self.dim, Float16.self)
+            let kHead = buffer("dit.k.head.f16", kTokenCount, Float16.self)
+            let vHead = buffer("dit.v.head.f16", kTokenCount, Float16.self)
+            try encodeTranspose(command, input: qToken, output: qHead,
+                                tokens: Self.tokens, toHeadMajor: true)
+            try encodeTranspose(command, input: kToken, output: kHead,
+                                tokens: keyRows, toHeadMajor: true)
+            try encodeTranspose(command, input: vToken, output: vHead,
+                                tokens: keyRows, toHeadMajor: true)
+            let attendedHead = buffer("dit.attended.head.f16", Self.tokens * Self.dim, Float16.self)
+            try attention.encode(commandBuffer: command, query: qHead, key: kHead, value: vHead,
+                                 output: attendedHead, heads: Self.heads, queryCount: Self.tokens,
+                                 keyCount: keyRows, headDim: Self.headDim,
+                                 probe: cross ? .crossScores : .selfScores)
+            try encodeHalfComputeBoundary(command, attendedHead, count: Self.tokens * Self.dim)
+            if NumericalMonitor.detailedProbesEnabled, let monitor {
+                try monitor.encodeProbe(command, values: attendedHead, count: Self.tokens * Self.dim,
+                                        probe: cross ? .crossAttended : .selfAttended)
+            }
+            try encodeTranspose(command, input: attendedHead, output: attendedToken,
+                                tokens: Self.tokens, toHeadMajor: false)
         }
-        try encodeTranspose(command, input: attendedHead, output: attendedToken,
-                            tokens: Self.tokens, toHeadMajor: false)
         let branch = buffer("dit.branch.f16", Self.tokens * Self.dim, Float16.self)
         try linear.encode(commandBuffer: command, input: attendedToken,
                           weight: cross ? weights.crossO : weights.selfO,

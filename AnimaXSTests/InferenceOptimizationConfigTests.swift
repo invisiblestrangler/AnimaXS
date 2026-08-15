@@ -29,6 +29,21 @@ final class InferenceOptimizationConfigTests: XCTestCase {
         XCTAssertFalse(baseline.fusedMLPActivation)
     }
 
+    // P4: the strided token-major attention toggle defaults OFF, so the
+    // legacy head-major transpose path remains the baseline behavior.
+    func testP4StridedTokenMajorAttentionDefaultsOff() {
+        let baseline = InferenceOptimizationConfig.currentBaseline
+        XCTAssertFalse(baseline.stridedTokenMajorAttention)
+    }
+
+    func testP4StridedTokenMajorAttentionIsIndependent() {
+        var config = InferenceOptimizationConfig.currentBaseline
+        config.stridedTokenMajorAttention = true
+        XCTAssertTrue(config.stridedTokenMajorAttention)
+        XCTAssertFalse(config.fusedNormModulation) // independent
+        XCTAssertFalse(config.fusedMLPActivation)  // independent
+    }
+
     func testP3FusedTogglesAreIndependentAndExplicit() {
         var config = InferenceOptimizationConfig.currentBaseline
         config.fusedNormModulation = true
@@ -129,6 +144,9 @@ final class InferenceOptimizationConfigTests: XCTestCase {
         settings.setDirectLinearMPSIO(true)
         settings.setPingPongWeightStreaming(false)
         settings.setNumericalMonitoring(false)
+        settings.setFusedNormModulation(true)
+        settings.setFusedMLPActivation(true)
+        settings.setStridedTokenMajorAttention(true)
         settings.resetToBaseline()
         XCTAssertEqual(settings.snapshot, InferenceOptimizationConfig.currentBaseline)
         let reloaded = InferenceOptimizationSettings(defaults: defaults)
