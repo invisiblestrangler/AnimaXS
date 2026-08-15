@@ -107,3 +107,66 @@ Use standard hosted Simulator CI for functional Metal/MPS parity. Do not use the
 | total time | — |
 | thermal state during | — |
 | thermal state after | — |
+
+---
+
+## Runtime inference-performance experiments (D207) — device runbook
+
+The app ships ONE binary with runtime-selected experiment controls in
+Diagnostics → "Inference performance experiments". Every generation records its
+immutable configuration and environment in the final metrics summary, so runs
+under materially different conditions are discarded rather than misinterpreted.
+
+### Rules for valid comparisons
+
+- Use **fresh Generate**, never Resume, for all benchmark timings.
+- Keep the iPhone **unplugged** for authoritative performance tests.
+- Same prompt, seed, image dimensions, step count, text encoder, VAE, binary.
+- Check the summary's power/thermal start/end lines: discard runs where one is
+  charging or thermal start state differs materially.
+- The app does NOT auto-run a benchmark suite — running seven generations
+  back-to-back would introduce severe thermal-order bias. Run each config
+  individually from the same installed binary.
+
+### Controls (all runtime; one build)
+
+- Linear tile rows: 128 | 256 | 512 | 1024
+- Attention tile rows: 128 | 256 | 512 | 1024
+- Direct MPS linear I/O: on/off (falls back to copies on stride mismatch; the
+  summary counters report direct vs copied tiles)
+- Ping-pong weight streaming: on/off (existing two-slot optimization vs the
+  1-slot synchronous control)
+- Numerical monitor: on/off (Euler finite guard stays on either way)
+- DiT pack: Production W4 | Experimental W8 v2 (W8 = Diagnostics-only import;
+  checkpointing disabled for W8 runs)
+- Reset to current baseline
+
+### Seven-run minimum matrix
+
+| Run | DiT | Linear tile | Attention tile | Direct I/O | Ping-pong | Monitor |
+|-----|-----|-------------|----------------|------------|-----------|---------|
+| A | W4 | 128 | 128 | off | on | on |
+| B | W4 | 1024 | 128 | off | on | on |
+| C | W4 | 1024 | 1024 | off | on | on |
+| D | W4 | best | best | on | on | on |
+| E | W4 | best | best | best | on | off |
+| F | W4 | best | best | best | off | best |
+| G | W8 v2 | best | best | best | best | best |
+
+Conditional: if 1024 regresses vs baseline, try Linear 512 / Attention 512 with
+the already-built controls (no rebuild). If 1024 wins strongly, 256/512 need
+not be exhaustively tested.
+
+### Fields to copy from each final generation summary
+
+```
+Generation: N s          DiT: N s          Average block wall time: N s
+Measured GPU command time: N s             Metal encode time: N s
+Weight copy/load CPU work: N s, N MB (may overlap GPU time when ping-pong is on)
+Linear GEMM tiles: N      Linear input tiles: X direct / Y copied
+Linear output tiles: X direct / Y copied   Attention query tiles: N
+Peak Metal allocation: N GB                Minimum available process memory: N MB
+Numerical warnings: N | not collected
+Inference configuration block (pack, tiles, direct I/O, ping-pong, monitor, checkpointing)
+Environment block (Power / Battery / Thermal / Low Power Mode start -> end)
+```
