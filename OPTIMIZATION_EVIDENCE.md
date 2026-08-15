@@ -55,3 +55,12 @@ result: ALL PASS. project-consistency ✓, simulator-tests ✓ (292 tests, 14 ex
 key metrics: 0 failures. Adds CrossKVCache (one contiguous ~112 MiB .storageModePrivate buffer, 28 blocks × 4 MiB, per-block ready flags, generation-local). crossKVCache toggle (default OFF). DiTBlockExecutor cross path: hit = blit cache→scratch (skip cross K/V projection + static boundary + K RMSNorm), miss = project + store + markReady; Q always dynamic, self attention never cached. Threaded DiffusionSampler→DitForward→DiTBlockExecutor. recordCrossKVHit/Miss metrics + summary "cross-KV cache hits/misses: X/Y". Graceful alloc-failure fallback to legacy.
 artifact/run id: 31913876755 (PR #17 draft)
 interpretation: P5 gate met. Cache gated behind toggle (W4 default unchanged). Exact reuse by construction (blit cached post-transform K/V); device measures speed benefit later. Next: P6.
+
+## 2026-08-16 (P6) — Normal CI green on P6 (mmap-backed no-copy weight source)
+HEAD: e0b6109 (P6 complete on opt/a12-sustained-io)
+command: gh run watch 31915690478 (workflow_dispatch on e0b6109, includes optimization-property fix)
+configuration: normal CI (ci.yml): project-consistency, simulator-tests, iphone-build
+result: ALL PASS. simulator-tests ✓ (302 tests, 14 expected skips, 0 failures), iphone-build ✓, project-consistency ✓.
+key metrics: 10 new P6 tests (WeightStreamerTests testP6*). Adds noCopyWeightSource toggle (default OFF), WeightStorageMode/WeightNoCopyPolicy, WeightStorageView, mmap no-copy MTLBuffer source with safe fallback; recordMmapNoCopyBytes metric. Fixed: added optimization property to DiTPreparation/DiTFinalLayer executors; added GenerationMetrics.mmapNoCopyBytes global field.
+artifact/run id: 31915690478 (PR #17 draft)
+interpretation: P6 gate met. mmap no-copy is experimental (behind toggle, default OFF); copied ping-pong retained. Next: P7.
