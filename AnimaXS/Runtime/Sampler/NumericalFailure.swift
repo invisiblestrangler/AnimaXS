@@ -7,7 +7,7 @@ import Foundation
 /// diagnostic monitor may attach `block`/`stage`/`condition` attribution when
 /// the first unsafe boundary is known; otherwise the message falls back to a
 /// precise but unattributed description of where the finite check fired.
-struct NumericalFailure: Error, CustomStringConvertible, Equatable {
+struct NumericalFailure: Error, LocalizedError, CustomStringConvertible, Equatable {
     /// Diffusion step, 1-based, in `1...totalSteps`.
     let step: Int
     /// Total Euler steps (production: `ModelConstants.samplerSteps` = 8).
@@ -39,6 +39,8 @@ struct NumericalFailure: Error, CustomStringConvertible, Equatable {
     }
 
     var description: String { message }
+
+    var errorDescription: String? { message }
 
     /// Build an unattributed failure for the post-Euler finite check.
     static func eulerOutput(

@@ -1216,11 +1216,10 @@ kernel void float_to_half_probe(
         if (isnan(v)) {
             localFlags |= NUM_FLAG_NAN;
             localIndex = min(localIndex, i);
+        } else if (isinf(v)) {
+            localFlags |= (v > 0.0f) ? NUM_FLAG_POS_INF : NUM_FLAG_NEG_INF;
+            localIndex = min(localIndex, i);
         } else {
-            if (isinf(v)) {
-                localFlags |= (v > 0.0f) ? NUM_FLAG_POS_INF : NUM_FLAG_NEG_INF;
-                localIndex = min(localIndex, i);
-            }
             float a = fabs(v);
             if (a > 65504.0f) {
                 localFlags |= NUM_FLAG_HALF_OVERFLOW;
@@ -1283,11 +1282,10 @@ kernel void gate_add_half_f32_probe(
         if (isnan(b)) {
             localFlags |= NUM_FLAG_NAN;
             localIndex = min(localIndex, i);
+        } else if (isinf(b)) {
+            localFlags |= (b > 0.0f) ? NUM_FLAG_POS_INF : NUM_FLAG_NEG_INF;
+            localIndex = min(localIndex, i);
         } else {
-            if (isinf(b)) {
-                localFlags |= (b > 0.0f) ? NUM_FLAG_POS_INF : NUM_FLAG_NEG_INF;
-                localIndex = min(localIndex, i);
-            }
             float a = fabs(b);
             if (a > 65504.0f) {
                 localFlags |= NUM_FLAG_HALF_OVERFLOW;

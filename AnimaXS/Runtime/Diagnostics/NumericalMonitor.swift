@@ -175,9 +175,14 @@ final class NumericalMonitor {
         self.previousFlags = [UInt32](repeating: 0, count: slotCount)
     }
 
-    /// Zero the stats buffer and clear attribution state for a new run.
+    /// Zero the stats buffer (firstIndex fields to UINT32_MAX for atomic min)
+    /// and clear attribution state for a new run.
     func beginRun() {
         memset(statsBuffer.contents(), 0, statsBuffer.length)
+        let words = statsBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        for slot in 0..<slotCount {
+            words[slot * 4 + 2] = UInt32.max
+        }
         previousFlags = [UInt32](repeating: 0, count: slotCount)
         firstIssue = nil
     }

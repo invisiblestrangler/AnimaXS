@@ -13,9 +13,10 @@ final class WeightStreamerTests: XCTestCase {
     }
 
     /// Build a minimal valid W4 pack (16KB-aligned blobs) via TestPackFactory.
+    /// The pack file is intentionally NOT removed here — the returned URL must
+    /// stay valid for the duration of the test.
     private func makePack() throws -> URL {
         let dir = try makeTempDir()
-        defer { try? FileManager.default.removeItem(at: dir) }
         let k = 64
         let data = Data(repeating: 0xAB, count: k / 2)
         let scale = Data(repeating: 0, count: (k / 64) * 2)
