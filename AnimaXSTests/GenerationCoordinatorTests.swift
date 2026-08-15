@@ -487,7 +487,7 @@ final class GenerationCoordinatorTests: XCTestCase {
         let context = try makeContext()
         let factory = LifecycleFactory()
         let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
-            .appendingPathComponent("AnimaXS-lifecycle-\\(UUID().uuidString)", isDirectory: true))
+            .appendingPathComponent("AnimaXS-lifecycle-\(UUID().uuidString)", isDirectory: true))
         defer { store.remove() }
         let coordinator = GenerationCoordinator(
             context: context, factory: factory, checkpointStore: store)
@@ -517,7 +517,7 @@ final class GenerationCoordinatorTests: XCTestCase {
         if case .cancelled = coordinator.state {
             // expected
         } else {
-            XCTFail("expected cancelled after background, got \\(coordinator.state)")
+            XCTFail("expected cancelled after background, got \(coordinator.state)")
         }
         // The checkpoint Task persists asynchronously on the main actor; wait
         // for the coordinator to observe it.
@@ -577,7 +577,7 @@ final class GenerationCoordinatorTests: XCTestCase {
         let context = try makeContext()
         let factory = LifecycleFactory()
         let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
-            .appendingPathComponent("AnimaXS-lifecycle-\\(UUID().uuidString)", isDirectory: true))
+            .appendingPathComponent("AnimaXS-lifecycle-\(UUID().uuidString)", isDirectory: true))
         defer { store.remove() }
         let coordinator = GenerationCoordinator(
             context: context, factory: factory, checkpointStore: store)
@@ -612,7 +612,7 @@ final class GenerationCoordinatorTests: XCTestCase {
         if case .completed = coordinator.state {
             // expected
         } else {
-            XCTFail("expected completed after resume, got \\(coordinator.state)")
+            XCTFail("expected completed after resume, got \(coordinator.state)")
         }
     }
 
@@ -621,7 +621,7 @@ final class GenerationCoordinatorTests: XCTestCase {
         let context = try makeContext()
         let factory = LifecycleFactory()
         let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
-            .appendingPathComponent("AnimaXS-lifecycle-\\(UUID().uuidString)", isDirectory: true))
+            .appendingPathComponent("AnimaXS-lifecycle-\(UUID().uuidString)", isDirectory: true))
         defer { store.remove() }
         let coordinator = GenerationCoordinator(
             context: context, factory: factory, checkpointStore: store)
@@ -641,9 +641,9 @@ final class GenerationCoordinatorTests: XCTestCase {
         // Different seed → checkpoint must be rejected and discarded.
         coordinator.resume(prompt: "lifecycle", seed: 99, models: testModels())
         if case .failed(let message) = coordinator.state {
-            XCTAssertTrue(message.contains("seed"), "expected seed mismatch, got \\(message)")
+            XCTAssertTrue(message.contains("seed"), "expected seed mismatch, got \(message)")
         } else {
-            XCTFail("expected failed state, got \\(coordinator.state)")
+            XCTFail("expected failed state, got \(coordinator.state)")
         }
         XCTAssertFalse(coordinator.canResume, "incompatible checkpoint discarded")
         XCTAssertFalse(store.hasCheckpoint, "incompatible checkpoint removed from disk")
@@ -656,7 +656,7 @@ final class GenerationCoordinatorTests: XCTestCase {
         let context = try makeContext()
         let factory = LifecycleFactory()
         let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
-            .appendingPathComponent("AnimaXS-k004-\\(UUID().uuidString)", isDirectory: true))
+            .appendingPathComponent("AnimaXS-k004-\(UUID().uuidString)", isDirectory: true))
         defer { store.remove() }
         let coordinator = GenerationCoordinator(
             context: context, factory: factory, checkpointStore: store)
@@ -694,6 +694,103 @@ final class GenerationCoordinatorTests: XCTestCase {
             context: nil, factory: ProbeFactory(), attemptMetalFallback: false)
         coordinator.handleMemoryWarning()
         XCTAssertEqual(coordinator.state, .idle, "no generation → no state change")
+    }
+
+    // MARK: - Terminal checkpoint (8/8) must never offer Resume
+
+    /// A checkpoint at step == samplerSteps means diffusion fully completed —
+    /// there is nothing to resume, so it must not replace the Generate button
+    /// with a no-op "8/8 Resume", and it must be cleared after a completed
+    /// generation (the user-facing "cache" must not linger).
+    @MainActor
+    func testCompletedGenerationClearsCheckpointAndOffersGenerateNotResume() async throws {
+        let context = try makeContext()
+        let factory = LifecycleFactory()
+        let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-terminal-\(UUID().uuidString)", isDirectory: true))
+        defer { store.remove() }
+        let coordinator = GenerationCoordinator(
+            context: context, factory: factory, checkpointStore: store)
+
+        coordinator.generate(prompt: "full", seed: 3, models: testModels())
+        for _ in 0..<250 {
+            if factory.sampler?.completedSteps ?? 0 >= 1 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        coordinator.cancel()
+        for _ in 0..<250 {
+            if !coordinator.isGenerating { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(coordinator.canResume, "1/8 partial run is resumable")
+        XCTAssertEqual(coordinator.completedSteps, 1)
+
+        // Resume: LifecycleSampler runs the remaining steps 1...7 to
+        // completion, firing the checkpoint callback up to step 8.
+        coordinator.resume(prompt: "full", seed: 3, models: testModels())
+        for _ in 0..<250 {
+            if !coordinator.isGenerating { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertFalse(coordinator.isGenerating)
+        if case .completed = coordinator.state {
+            // expected
+        } else {
+            XCTFail("expected completed after resume, got \(coordinator.state)")
+        }
+
+        // The terminal checkpoint must be gone: no Resume offer, no retained
+        // step count, no persisted file.
+        XCTAssertFalse(coordinator.canResume,
+                       "a completed generation must not offer Resume")
+        XCTAssertNil(coordinator.completedSteps,
+                     "no retained checkpoint after a completed generation")
+        XCTAssertFalse(store.hasCheckpoint,
+                       "checkpoint cache must be cleared after a completed generation")
+    }
+
+    /// A terminal (8/8) checkpoint left on disk by an older build must be
+    /// cleared at cold launch so it can never suppress the Generate button.
+    @MainActor
+    func testTerminalCheckpointOnDiskIsClearedAtColdLaunch() throws {
+        let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-terminal-\(UUID().uuidString)", isDirectory: true))
+        defer { store.remove() }
+        try store.save(try makeCheckpoint(step: ModelConstants.samplerSteps))
+        XCTAssertTrue(store.hasCheckpoint, "precondition: terminal checkpoint on disk")
+
+        let coordinator = GenerationCoordinator(
+            context: try makeContext(), factory: LifecycleFactory(), checkpointStore: store)
+        XCTAssertFalse(coordinator.canResume,
+                       "terminal 8/8 checkpoint must not offer Resume")
+        XCTAssertNil(coordinator.completedSteps)
+        XCTAssertFalse(store.hasCheckpoint,
+                       "terminal checkpoint cleared from disk at launch")
+    }
+
+    /// Boundary guard: a checkpoint at the final PARTIAL step (7/8) is still
+    /// a real resume and must keep being offered.
+    @MainActor
+    func testCheckpointAtFinalPartialStepStillOffersResume() throws {
+        let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-terminal-\(UUID().uuidString)", isDirectory: true))
+        defer { store.remove() }
+        try store.save(try makeCheckpoint(step: ModelConstants.samplerSteps - 1))
+
+        let coordinator = GenerationCoordinator(
+            context: try makeContext(), factory: LifecycleFactory(), checkpointStore: store)
+        XCTAssertTrue(coordinator.canResume, "7/8 is a partial run — Resume must be offered")
+        XCTAssertEqual(coordinator.completedSteps, ModelConstants.samplerSteps - 1)
+        XCTAssertTrue(store.hasCheckpoint, "non-terminal checkpoint must be retained")
+    }
+
+    private func makeCheckpoint(step: Int) throws -> GenerationCheckpoint {
+        let latent = [Float](repeating: 0.5,
+                             count: ModelConstants.ditLatentChannels * 64 * 64)
+        return try GenerationCheckpoint(
+            latent: latent, step: step, prompt: "lifecycle", seed: 11,
+            width: ModelConstants.imageSize, height: ModelConstants.imageSize,
+            modelHashes: ModelHashes(dit: "d", textEncoder: "t", vae: "v"))
     }
 
     /// Sampler that completes one step then suspends until cancellation, so a

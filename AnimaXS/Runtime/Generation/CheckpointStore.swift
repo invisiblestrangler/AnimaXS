@@ -61,9 +61,9 @@ final class CheckpointStore {
         resolution: (width: Int, height: Int),
         modelHashes: ModelHashes
     ) throws -> Int {
-        guard checkpoint.step >= 1, checkpoint.step <= ModelConstants.samplerSteps else {
+        guard checkpoint.step >= 1, checkpoint.step < ModelConstants.samplerSteps else {
             throw GenerationError.sampler(
-                "checkpoint step \(checkpoint.step) out of range 1...\(ModelConstants.samplerSteps)")
+                "checkpoint step \(checkpoint.step) out of range 1...\(ModelConstants.samplerSteps - 1) (a fully completed run is not resumable)")
         }
         guard checkpoint.prompt == prompt else {
             throw GenerationError.sampler(

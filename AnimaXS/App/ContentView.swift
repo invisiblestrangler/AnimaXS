@@ -207,8 +207,8 @@ struct ContentView: View {
                     Text(reason).font(.caption).foregroundStyle(.orange)
                 }
             }
-            if coordinator.canResume {
-                Text("Checkpoint: \(coordinator.completedSteps ?? 0)/8 steps — Resume available.")
+            if coordinator.canResume, let steps = coordinator.completedSteps {
+                Text("Checkpoint: \(steps)/\(ModelConstants.samplerSteps) steps — Resume available.")
                     .font(.caption).foregroundStyle(.orange)
             }
             progressView

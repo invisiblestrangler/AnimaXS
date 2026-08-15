@@ -66,6 +66,11 @@ final class GenerationCoordinator: ObservableObject {
     private let checkpointStore: CheckpointStore?
     private var generationTask: Task<Void, Never>?
     private var latestCheckpoint: GenerationCheckpoint?
+    /// Monotonic run identifier. Checkpoint-save tasks capture the epoch at
+    /// callback time and only apply if the run is still current — a save
+    /// queued before completion (or before a new Generate) can never
+    /// resurrect a stale checkpoint afterwards.
+    private var generationEpoch = 0
 
     /// Test seam (mirrors `ModelStore.secureInstalls`): when set, the *default*
     /// persistent store (used when a coordinator is wired with no explicit
@@ -106,9 +111,18 @@ final class GenerationCoordinator: ObservableObject {
             // Test seam: simulate an environment with no Metal device.
             self.context = nil
         }
-        // Cold launch: a valid persisted checkpoint is offered for resume.
-        if let checkpointStore = self.checkpointStore {
-            latestCheckpoint = checkpointStore.load()
+        // Cold launch: a valid, non-terminal persisted checkpoint is offered
+        // for resume. A terminal checkpoint (step == samplerSteps) means the
+        // previous diffusion run fully completed — it must be cleared, not
+        // retained, so it can never replace the Generate button with a
+        // meaningless "8/8 Resume" (and cannot linger as dead cache).
+        if let checkpointStore = self.checkpointStore,
+           let loaded = checkpointStore.load() {
+            if loaded.step >= ModelConstants.samplerSteps {
+                checkpointStore.remove()
+            } else {
+                latestCheckpoint = loaded
+            }
         }
     }
 
@@ -134,7 +148,11 @@ final class GenerationCoordinator: ObservableObject {
         guard let checkpoint = latestCheckpoint else { return false }
         switch state {
         case .idle, .cancelled:
-            return checkpoint.step >= 1 && checkpoint.step <= ModelConstants.samplerSteps
+            // Only a PARTIALLY completed diffusion run is resumable. A
+            // checkpoint at step == samplerSteps is terminal (all diffusion
+            // steps done) — there is nothing to resume, and offering it would
+            // suppress the Generate button with a no-op "8/8 Resume".
+            return checkpoint.step >= 1 && checkpoint.step < ModelConstants.samplerSteps
         default:
             return false
         }
@@ -160,6 +178,7 @@ final class GenerationCoordinator: ObservableObject {
         // A fresh generation supersedes any previous checkpoint.
         latestCheckpoint = nil
         checkpointStore?.remove()
+        generationEpoch += 1
         // Enter the generating state synchronously so a second `generate`
         // call (even on the same runloop tick) is rejected.
         state = .tokenizing
@@ -205,6 +224,7 @@ final class GenerationCoordinator: ObservableObject {
             length: latent.count * 4, options: .storageModeShared)!
         buffer.contents().copyMemory(
             from: latent, byteCount: latent.count * 4)
+        generationEpoch += 1
         state = .tokenizing
         run(engine: GenerationEngine(context: context, factory: factory),
             prompt: prompt, seed: seed, models: models,
@@ -290,6 +310,11 @@ final class GenerationCoordinator: ObservableObject {
                         // cancel/background/memory-warning can always resume
                         // from the last fully completed step (I004 §6.3).
                         let nextStep = completedStep + 1
+                        // A terminal checkpoint (all steps complete) has no
+                        // diffusion left to resume: never retain or persist it,
+                        // or it would replace Generate with "8/8 Resume" and
+                        // linger as dead cache.
+                        guard nextStep < ModelConstants.samplerSteps else { return }
                         guard let checkpoint = try? GenerationCheckpoint(
                             latent: latent, step: nextStep,
                             prompt: prompt, seed: seed,
@@ -298,9 +323,17 @@ final class GenerationCoordinator: ObservableObject {
                             modelHashes: try ModelManifest.productionHashes()) else {
                             return
                         }
+                        // Apply on the main actor, but only while this run is
+                        // still current (epoch) and still generating: a save
+                        // queued just before completion or a fresh Generate
+                        // must never resurrect a stale checkpoint afterwards.
+                        let epoch = generationEpoch
                         Task { @MainActor [weak self] in
-                            self?.latestCheckpoint = checkpoint
-                            if let store = self?.checkpointStore {
+                            guard let self,
+                                  self.generationEpoch == epoch,
+                                  self.isGenerating else { return }
+                            self.latestCheckpoint = checkpoint
+                            if let store = self.checkpointStore {
                                 try? store.save(checkpoint)
                             }
                         }
@@ -313,6 +346,10 @@ final class GenerationCoordinator: ObservableObject {
                 }
                 self.image = GenerationCoordinator.makeUIImage(from: decoded)
                 self.state = .completed
+                // A finished generation has nothing to resume: clear the
+                // retained/persisted checkpoint so the next action is a fresh
+                // Generate, never a stale "N/8 Resume".
+                self.clearCheckpoint()
             } catch is CancellationError {
                 self.state = .cancelled
             } catch {
@@ -320,6 +357,16 @@ final class GenerationCoordinator: ObservableObject {
             }
             self.publishMetrics(metrics)
         }
+    }
+
+    /// Drops the retained and persisted checkpoint without touching state
+    /// (used when a generation completes: nothing is left to resume).
+    /// Bumps the epoch so any in-flight checkpoint-save from the just-ended
+    /// run is invalidated and can never resurrect the terminal checkpoint.
+    private func clearCheckpoint() {
+        generationEpoch += 1
+        latestCheckpoint = nil
+        checkpointStore?.remove()
     }
 
     /// Publish the run's telemetry summary (works for completed, failed, and
