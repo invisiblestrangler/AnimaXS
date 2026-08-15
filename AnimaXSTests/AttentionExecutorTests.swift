@@ -235,8 +235,12 @@ final class AttentionExecutorTests: XCTestCase {
     /// offset) shows up as a large error.
     func testStridedTokenMajorMatchesLegacyHeadMajor() async throws {
         let context = try requireContext()
-        let heads = 4, headDim = 8, modelDim = heads * headDim
-        let queryCount = 33, keyCount = 17
+        // Use a production-realistic headDim=128 so the strided per-head MPS
+        // matrix offsets (head * headDim * 2 bytes) and rowBytes are 256-byte
+        // aligned, exactly as in the DiT shape. A smaller headDim would produce
+        // unaligned offsets that MPSMatrix rejects/corrupts.
+        let heads = 2, headDim = 128, modelDim = heads * headDim
+        let queryCount = 7, keyCount = 5
         func tokenMajorValues(rows: Int) -> [Float16] {
             (0..<(rows * modelDim)).map { index in
                 let token = index / modelDim
