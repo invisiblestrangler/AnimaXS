@@ -93,25 +93,27 @@ FP32. All CI green; golden-case correctness preserved.
 - simulator-tests PASS (incl. NumericalFailureTests, NumericalMonitorTests,
   GenerationMetricsTests, CommandBufferGateTests, WeightStreamerTests)
 
-### full-inference run 31863687670 (golden case + stress)
+### full-inference run 31865063797 (final, golden case + stress, clean attribution)
 - FULL_INFERENCE=PASS; latent cos 0.866, RGB cos 0.8198 (regression floor 0.65)
-- FULL_TOTAL_SECONDS=88.53 (macOS simulator, not device)
-- FULL_DIFFUSION_SECONDS=73.08, FULL_VAE_SECONDS=7.50, FULL_QWEN_SECONDS=3.62
+- FULL_TOTAL_SECONDS=100.78 (macOS simulator, not device)
+- FULL_DIFFUSION_SECONDS=83.60, FULL_VAE_SECONDS=8.36, FULL_QWEN_SECONDS=4.13
+- (Run 31863687670 before the residual-flag refinement: identical correctness,
+  FULL_INFERENCE=PASS, RGB cos 0.8198.)
 
 ### Numerical stress (4 seeds, golden conditioning, detailed probes)
-- FULL_STRESS_TOTAL=4 SUCCESS=4 FAILURES=0
-- Max magnitudes at boundaries (representative):
+- FULL_STRESS_TOTAL=4 SUCCESS=4 FAILURES=0; FULL_STRESS=PASS
+- First-issue attribution: NONE fired (clean — the fp32 residual
+  halfOverflow-informational refinement removed the false attribution).
+- Max magnitudes at boundaries (representative, deterministic across runs):
   - self-attention residual 281774, cross-attention residual 281748,
     MLP residual 281935 (fp32 by design)
   - cross-attention projection input 751, cross-attention scores 9.38,
     self-attention Q projection 356
   - MLP hidden conversion 238, MLP output 731
-  - final-layer residual conversion 43102 (this is the FP16 boundary feeding
-    final-layer LayerNorm — the largest FP32→FP16 crossing observed)
+  - final-layer residual conversion 43102 (the largest FP32→FP16 crossing;
+    feeds final-layer LayerNorm)
   - velocity conversion 5.74, Euler update 4.74, FLOW denoised 2.63
-- No NaN/Inf was observed at any boundary across all 4 seeds; all 4 generations
-  finished finite. No first-issue attribution fired (informational overflow
-  only), consistent with the intermittent nature of the original failures.
+- No NaN/Inf at any boundary across all 4 seeds; all 4 generations finite.
 
 ## Remaining opportunities (evidence-based)
 
