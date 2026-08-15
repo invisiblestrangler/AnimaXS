@@ -272,4 +272,32 @@ final class GenerationMetricsTests: XCTestCase {
         XCTAssertEqual(metrics.stepMetrics[0].fusedTrafficSavedBytes, expected)
         XCTAssertTrue(metrics.summaryText.contains("fused activation traffic saved"))
     }
+
+    // P5: cross-KV cache hits/misses accumulate globally AND into the active
+    // step; the summary reports them when nonzero. Models the production
+    // pattern: step 0 = 28 misses (first executed step fills the cache), each
+    // later step = 28 hits.
+    func testCrossKVHitMissAccumulatePerStepAndGlobally() {
+        let collector = MetricsCollector()
+        // First executed step: 28 misses (one per DiT block).
+        collector.beginStep(0)
+        for _ in 0..<28 { collector.recordCrossKVMiss() }
+        collector.endStep(completed: true)
+        // A later step: 28 hits.
+        collector.beginStep(1)
+        for _ in 0..<28 { collector.recordCrossKVHit() }
+        collector.endStep(completed: true)
+        collector.finalize(totalWall: 10)
+        let metrics = collector.snapshot()
+        XCTAssertEqual(metrics.crossKVMisses, 28)
+        XCTAssertEqual(metrics.crossKVHits, 28)
+        XCTAssertEqual(metrics.stepMetrics[0].crossKVMisses, 28)
+        XCTAssertEqual(metrics.stepMetrics[0].crossKVHits, 0)
+        XCTAssertEqual(metrics.stepMetrics[1].crossKVHits, 28)
+        XCTAssertEqual(metrics.stepMetrics[1].crossKVMisses, 0)
+        // Per-step sums reconcile with the globals (P2 gate).
+        XCTAssertEqual(metrics.stepMetrics.map(\.crossKVHits).reduce(0, +), metrics.crossKVHits)
+        XCTAssertEqual(metrics.stepMetrics.map(\.crossKVMisses).reduce(0, +), metrics.crossKVMisses)
+        XCTAssertTrue(metrics.summaryText.contains("cross-KV cache hits/misses: 28/28"))
+    }
 }
