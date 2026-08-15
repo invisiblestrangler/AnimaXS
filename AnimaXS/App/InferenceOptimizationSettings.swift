@@ -15,7 +15,6 @@ final class InferenceOptimizationSettings: ObservableObject {
         static let directLinearMPSIO = "inference.directLinearMPSIO"
         static let pingPongWeightStreaming = "inference.pingPongWeightStreaming"
         static let numericalMonitoring = "inference.numericalMonitoring"
-        static let ditPackVariant = "inference.ditPackVariant"
     }
 
     private let defaults: UserDefaults
@@ -25,7 +24,6 @@ final class InferenceOptimizationSettings: ObservableObject {
     @Published private(set) var directLinearMPSIO: Bool
     @Published private(set) var pingPongWeightStreaming: Bool
     @Published private(set) var numericalMonitoring: Bool
-    @Published private(set) var ditPackVariant: DiTPackVariant
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -42,12 +40,6 @@ final class InferenceOptimizationSettings: ObservableObject {
             ?? baseline.pingPongWeightStreaming
         numericalMonitoring = defaults.object(forKey: Keys.numericalMonitoring) as? Bool
             ?? baseline.numericalMonitoring
-        if let raw = defaults.string(forKey: Keys.ditPackVariant),
-           let variant = DiTPackVariant(rawValue: raw) {
-            ditPackVariant = variant
-        } else {
-            ditPackVariant = baseline.ditPackVariant
-        }
     }
 
     // MARK: - Mutations (validate before persist)
@@ -77,11 +69,6 @@ final class InferenceOptimizationSettings: ObservableObject {
         defaults.set(value, forKey: Keys.numericalMonitoring)
     }
 
-    func setDiTPackVariant(_ value: DiTPackVariant) {
-        ditPackVariant = value
-        defaults.set(value.rawValue, forKey: Keys.ditPackVariant)
-    }
-
     /// Immutable snapshot of the current settings, used by a single
     /// generation. Never mutated mid-run.
     var snapshot: InferenceOptimizationConfig {
@@ -90,8 +77,7 @@ final class InferenceOptimizationSettings: ObservableObject {
             attentionTileRows: attentionTileRows,
             directLinearMPSIO: directLinearMPSIO,
             pingPongWeightStreaming: pingPongWeightStreaming,
-            numericalMonitoring: numericalMonitoring,
-            ditPackVariant: ditPackVariant
+            numericalMonitoring: numericalMonitoring
         )
     }
 
@@ -104,13 +90,11 @@ final class InferenceOptimizationSettings: ObservableObject {
         directLinearMPSIO = baseline.directLinearMPSIO
         pingPongWeightStreaming = baseline.pingPongWeightStreaming
         numericalMonitoring = baseline.numericalMonitoring
-        ditPackVariant = baseline.ditPackVariant
         defaults.set(baseline.linearTileRows, forKey: Keys.linearTileRows)
         defaults.set(baseline.attentionTileRows, forKey: Keys.attentionTileRows)
         defaults.set(baseline.directLinearMPSIO, forKey: Keys.directLinearMPSIO)
         defaults.set(baseline.pingPongWeightStreaming, forKey: Keys.pingPongWeightStreaming)
         defaults.set(baseline.numericalMonitoring, forKey: Keys.numericalMonitoring)
-        defaults.set(baseline.ditPackVariant.rawValue, forKey: Keys.ditPackVariant)
     }
 
     // MARK: - Loading

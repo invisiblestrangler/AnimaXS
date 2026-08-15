@@ -30,13 +30,15 @@ final class ModelStoreTests: XCTestCase {
         root: URL,
         downloader: @escaping ModelStore.Downloader,
         capacity: @escaping ModelStore.CapacityProvider = { _ in Int64.max },
-        verifier: ModelStore.ModelVerifier? = nil
+        verifier: ModelStore.ModelVerifier? = nil,
+        chunkBytes: Int = 1 << 20
     ) throws -> ModelStore {
         try ModelStore(
             directory: root.appendingPathComponent("models", isDirectory: true),
             downloader: downloader, availableCapacity: capacity, secureInstalls: false,
             verifier: verifier,
-            receiptsDirectory: root.appendingPathComponent("Receipts", isDirectory: true))
+            receiptsDirectory: root.appendingPathComponent("Receipts", isDirectory: true),
+            chunkBytes: chunkBytes)
     }
 
     /// Counts invocations of the injected verifier (i.e. full pack hashes).
@@ -49,7 +51,7 @@ final class ModelStoreTests: XCTestCase {
     private func countingVerifier(_ counter: VerifierCounter) -> ModelStore.ModelVerifier {
         { url, entry in
             counter.increment()
-            try ModelManifest.verify(url, against: entry)
+            return try ModelManifest.matchedVariant(of: url, against: entry)
         }
     }
 
@@ -389,12 +391,11 @@ final class ModelStoreTests: XCTestCase {
         let source = root.appendingPathComponent("user-import.animapk")
         try content.write(to: source)
 
-        let counterA = VerifierCounter()
-        let storeA = try makeStore(root: root, downloader: { _ in fatalError() },
-                                   verifier: countingVerifier(counterA))
+        // Import verifies while streaming (single pass); it does not route
+        // through the injected full-file `verifier` hook.
+        let storeA = try makeStore(root: root, downloader: { _ in fatalError() })
         let installed = try await storeA.importPack(entry, from: source)
         XCTAssertEqual(try Data(contentsOf: installed), content)
-        XCTAssertEqual(counterA.count, 1, "import verifies the source exactly once")
 
         // A fresh store over the same directory = a relaunch: receipt must make
         // discovery hashing-free.
@@ -632,6 +633,153 @@ final class ModelStoreTests: XCTestCase {
             XCTFail("failed import must never leave a ready state")
         }
         XCTAssertTrue(stagingFiles(in: modelsDir).isEmpty, "staging cleaned after failed import")
+    }
+
+    // MARK: - Single-pass streaming import (bounded memory)
+
+    /// A deterministic fixture of `count` bytes (larger than a single test
+    /// chunk, so the streaming installer must iterate many times).
+    private func makeLargeSource(dir: URL, count: Int, salt: UInt8 = 3) throws -> URL {
+        let url = dir.appendingPathComponent("large-source-\(UUID().uuidString).animapk")
+        var data = Data(capacity: count)
+        for i in 0..<count {
+            data.append(UInt8((i &* Int(salt) &+ 11) & 0xFF))
+        }
+        try data.write(to: url)
+        return url
+    }
+
+    /// An entry whose primary is W4-like and whose alternate is W8-v2-like
+    /// (synthetic tiny values — the pinned real values are pinned by
+    /// SmokeTests.testDiTSlotAcceptsPinnedW8V2Variant).
+    private func makeDitEntry(
+        filename: String = "anima-turbo-v1.0-xsmax-w4.animapk",
+        primary: Data,
+        alternate: Data
+    ) -> ModelManifestEntry {
+        ModelManifestEntry(
+            filename: filename,
+            size: UInt64(primary.count),
+            sha256: primary.sha256Hex,
+            url: URL(string: "https://example.invalid/\(filename)")!,
+            component: .dit,
+            alternates: [ModelVariant(size: UInt64(alternate.count), sha256: alternate.sha256Hex)])
+    }
+
+    /// 5.1 — A source comfortably larger than the chunk size must stream
+    /// across many read/hash/write iterations and produce a byte-identical,
+    /// digest-verified install with no staging leftovers.
+    func testImportStreamsAcrossManyChunksAndMatchesSource() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { Self.cleanup(root) }
+        // 1 MiB source with 4 KiB chunks -> 256 stream iterations.
+        let sourceSize = 1 << 20
+        let chunkBytes = 4 << 10
+        let source = try makeLargeSource(dir: root, count: sourceSize, salt: 5)
+        let data = try Data(contentsOf: source)
+        let entry = makeEntry(filename: "tiny.animapk", content: data)
+        let store = try makeStore(root: root, downloader: { _ in fatalError() }, chunkBytes: chunkBytes)
+
+        let installed = try await store.importPack(entry, from: source)
+        XCTAssertEqual(try Data(contentsOf: installed), data)
+        let state = await store.discover(entry)
+        XCTAssertEqual(state, .ready(installed))
+        let modelsDir = root.appendingPathComponent("models", isDirectory: true)
+        XCTAssertTrue(stagingFiles(in: modelsDir).isEmpty, "staging cleaned after streaming import")
+    }
+
+    /// 5.2 — Importing the ALTERNATE variant (W8-v2-like) into the .dit slot
+    /// must verify against the alternate, install, and be discovered as ready
+    /// via a receipt that records the alternate digest.
+    func testImportAlternateVariantIntoDiTSlot() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { Self.cleanup(root) }
+        let w4 = Data("w4-like primary bytes".utf8)
+        let w8 = Data("w8-v2-like alternate bytes, longer for distinction".utf8)
+        let entry = makeDitEntry(primary: w4, alternate: w8)
+        let source = root.appendingPathComponent("user-import-w8.animapk")
+        try w8.write(to: source)
+        let store = try makeStore(root: root, downloader: { _ in fatalError() })
+
+        let installed = try await store.importPack(entry, from: source)
+        XCTAssertEqual(try Data(contentsOf: installed), w8,
+                       "the alternate variant must be installed into the .dit slot")
+        // A fresh store = relaunch: the receipt records the W8-v2 alternate
+        // digest, so discovery must be ready WITHOUT re-hashing.
+        let relaunch = try makeStore(root: root, downloader: { _ in fatalError() })
+        let state = await relaunch.discover(entry)
+        XCTAssertEqual(state, .ready(installed),
+                       "receipt recorded the alternate variant; discovery must trust it")
+        let modelsDir = root.appendingPathComponent("models", isDirectory: true)
+        XCTAssertTrue(stagingFiles(in: modelsDir).isEmpty)
+    }
+
+    /// 5.2b — Importing the alternate variant REPLACES the primary when one is
+    /// already installed, and vice versa (K: import w8 -> use w8, import w4 ->
+    /// use w4).
+    func testImportAlternateReplacesPrimaryInDiTSlot() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { Self.cleanup(root) }
+        let w4 = Data("w4 primary bytes".utf8)
+        let w8 = Data("w8-v2 alternate bytes".utf8)
+        let entry = makeDitEntry(primary: w4, alternate: w8)
+        let store = try makeStore(root: root, downloader: { _ in fatalError() })
+
+        // Import W4 first.
+        let w4Source = root.appendingPathComponent("w4.animapk")
+        try w4.write(to: w4Source)
+        let w4Installed = try await store.importPack(entry, from: w4Source)
+        XCTAssertEqual(try Data(contentsOf: w4Installed), w4)
+
+        // Import W8-v2 over it: replace, not fail.
+        let w8Source = root.appendingPathComponent("w8.animapk")
+        try w8.write(to: w8Source)
+        let w8Installed = try await store.importPack(entry, from: w8Source)
+        XCTAssertEqual(try Data(contentsOf: w8Installed), w8)
+        let state = await store.discover(entry)
+        XCTAssertEqual(state, .ready(w8Installed))
+        let modelsDir = root.appendingPathComponent("models", isDirectory: true)
+        XCTAssertTrue(stagingFiles(in: modelsDir).isEmpty, "staging cleaned after replace")
+    }
+
+    /// 5.2c — A SHA mismatch (source size matches a variant but digest does
+    /// not) must leave NO installed pack and NO staging file.
+    func testStreamingImportSHAMismatchLeavesNoInstalledOrStagingFile() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { Self.cleanup(root) }
+        let sourceSize = 512 << 10
+        let chunkBytes = 4 << 10
+        let source = try makeLargeSource(dir: root, count: sourceSize, salt: 7)
+        // Wrong digest: all zeros. Size gate passes; stream reaches EOF and
+        // the digest check must fail.
+        let entry = ModelManifestEntry(
+            filename: "tiny.animapk", size: UInt64(sourceSize),
+            sha256: String(repeating: "0", count: 64),
+            url: URL(string: "https://example.invalid/tiny.animapk")!, component: .dit)
+        let store = try makeStore(root: root, downloader: { _ in fatalError() }, chunkBytes: chunkBytes)
+
+        do {
+            _ = try await store.importPack(entry, from: source)
+            XCTFail("wrong SHA-256 must be rejected after streaming reaches EOF")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.localizedCaseInsensitiveContains("sha"))
+        }
+        let modelsDir = root.appendingPathComponent("models", isDirectory: true)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: modelsDir.appendingPathComponent(entry.filename).path),
+            "no pack may be installed after a digest mismatch")
+        XCTAssertTrue(stagingFiles(in: modelsDir).isEmpty,
+                      "no staging file may remain after a digest mismatch")
+        let state = await store.discover(entry)
+        XCTAssertEqual(state, .missing)
     }
 
     // MARK: - Localized errors (real-device fix D)

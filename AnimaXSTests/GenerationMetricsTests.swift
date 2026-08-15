@@ -126,15 +126,14 @@ final class GenerationMetricsTests: XCTestCase {
         XCTAssertTrue(text.contains("Low Power Mode: off -> off"))
     }
 
-    /// W8 runs report checkpointing disabled in the summary (§13).
-    func testSummaryReportsCheckpointingDisabledForW8() {
+    /// The summary reports which DiT pack file ran and that checkpointing is
+    /// always on (the DiT slot holds one verified pack).
+    func testSummaryReportsDiTPackFilenameAndCheckpointing() {
         let collector = MetricsCollector()
-        var config = InferenceOptimizationConfig.currentBaseline
-        config.ditPackVariant = .experimentalW8V2
-        collector.recordOptimizationConfig(config)
+        collector.recordDiTPackFilename("anima-turbo-v1.0-xsmax-w8-v2.animapk")
         collector.finalize(totalWall: 100)
         let text = collector.snapshot().summaryText
-        XCTAssertTrue(text.contains("DiT pack: W8 v2 experimental"))
-        XCTAssertTrue(text.contains("Checkpointing: off (experimental W8)"))
+        XCTAssertTrue(text.contains("DiT pack: anima-turbo-v1.0-xsmax-w8-v2.animapk"))
+        XCTAssertTrue(text.contains("Checkpointing: on"))
     }
 }

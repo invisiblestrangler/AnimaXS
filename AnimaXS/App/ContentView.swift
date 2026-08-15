@@ -23,8 +23,6 @@ struct ContentView: View {
     // Runtime inference-optimization settings (Diagnostics). Captured into an
     // immutable snapshot at Generate time; never mutated mid-run.
     @StateObject private var optimizationSettings = InferenceOptimizationSettings()
-    // Experimental W8 DiT pack state (Diagnostics-only; not a production pack).
-    @StateObject private var experimentalPack = ExperimentalDiTPackCatalog()
     @State private var prompt = "masterpiece, best quality, score_7, safe, 1girl"
     @State private var seedText = "1337"
     @State private var generationStart = Date()
@@ -60,7 +58,6 @@ struct ContentView: View {
                 DiagnosticsView(
                     lastMetricsText: coordinator.lastMetricsText,
                     optimizationSettings: optimizationSettings,
-                    experimentalPack: experimentalPack,
                     isGenerating: coordinator.isGenerating)
             }
             .scrollDismissesKeyboard(.interactively)
@@ -75,7 +72,6 @@ struct ContentView: View {
             }
             .task {
                 await catalog.refresh()
-                await experimentalPack.refresh()
             }
             .onReceive(
                 NotificationCenter.default.publisher(for: .animaXSAppDidEnterBackground)
@@ -294,9 +290,7 @@ struct ContentView: View {
             canResume: coordinator.canResume,
             prompt: prompt,
             seedText: seedText,
-            metalAvailable: coordinator.isMetalAvailable,
-            w8Selected: optimizationSettings.snapshot.ditPackVariant == .experimentalW8V2,
-            w8Ready: experimentalPack.isReady)
+            metalAvailable: coordinator.isMetalAvailable)
     }
 
     /// Stops the repeating elapsed timer. When `updateFinalElapsed` is true the
@@ -340,32 +334,16 @@ struct ContentView: View {
             coordinator.resume(prompt: prompt, seed: seed, models: models)
         } else {
             // Capture the immutable config snapshot at Generate time so a
-            // mid-run toggle change can never affect this run.
+            // mid-run toggle change can never affect this run. The DiT pack is
+            // whatever variant (W4 or W8-v2) was imported into the .dit slot;
+            // `models.dit` already points at it.
             let config = optimizationSettings.snapshot
-            guard let runModels = modelsBySubstitutingExperimentalDiT(config: config, base: models) else {
-                Self.generationLog.error(
-                    "generation rejected: W8 selected but experimental pack unavailable")
-                return
-            }
             coordinator.generate(
-                prompt: prompt, seed: seed, models: runModels,
+                prompt: prompt, seed: seed, models: models,
                 optimization: config)
         }
         Self.generationLog.info(
             "generation state after start: \(String(describing: coordinator.state), privacy: .public)")
-    }
-
-    /// Resolves the run-specific model snapshot, substituting the verified
-    /// experimental W8 pack for ONLY the DiT URL when the config selects it.
-    /// Text encoder and VAE remain production packs. Returns nil (rejecting
-    /// the start) when W8 is selected but the pack is not verified/ready —
-    /// never a silent W4 fallback with a misleading W8-labeled summary.
-    private func modelsBySubstitutingExperimentalDiT(
-        config: InferenceOptimizationConfig, base: ResolvedModels
-    ) -> ResolvedModels? {
-        guard config.ditPackVariant == .experimentalW8V2 else { return base }
-        guard let w8URL = experimentalPack.readyURL else { return nil }
-        return ResolvedModels(textEncoder: base.textEncoder, dit: w8URL, vae: base.vae)
     }
 
     /// Physical-device instrumentation: records the facts needed to tell a

@@ -3,9 +3,8 @@ import Metal
 @testable import AnimaXS
 
 /// Coordinator integration for the runtime optimization config (§18.7):
-/// the immutable snapshot must be forwarded unchanged, and experimental W8
-/// must disable checkpoint persistence while production W4 keeps the current
-/// checkpoint path.
+/// the immutable snapshot must be forwarded unchanged, and the checkpoint
+/// path must be independent of the optimization settings.
 final class InferenceOptimizationCoordinatorTests: XCTestCase {
 
     override func setUpWithError() throws {
@@ -132,19 +131,21 @@ final class InferenceOptimizationCoordinatorTests: XCTestCase {
                       "production W4 partial run must retain the checkpoint path")
     }
 
-    /// Experimental W8: even a partial run must NEVER persist a checkpoint.
+    /// Checkpointing is not config-dependent: any run (including one with
+    /// non-baseline optimization settings) persists a partial-run checkpoint.
     @MainActor
-    func testExperimentalW8DisablesCheckpointPersistence() async throws {
+    func testNonBaselineConfigStillPersistsCheckpoint() async throws {
         let context = try makeContext()
         let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
-            .appendingPathComponent("AnimaXS-w8cp-\(UUID().uuidString)", isDirectory: true))
+            .appendingPathComponent("AnimaXS-optcp-\(UUID().uuidString)", isDirectory: true))
         defer { store.remove() }
         let factory = SuspendSamplerFactory()
         let coordinator = GenerationCoordinator(
             context: context, factory: factory,
             attemptMetalFallback: false, checkpointStore: store)
         var config = InferenceOptimizationConfig.currentBaseline
-        config.ditPackVariant = .experimentalW8V2
+        config.linearTileRows = 1024
+        config.numericalMonitoring = false
 
         coordinator.generate(prompt: "p", seed: 1, models: testModels(), optimization: config)
         for _ in 0..<250 {
@@ -156,9 +157,9 @@ final class InferenceOptimizationCoordinatorTests: XCTestCase {
             if !coordinator.isGenerating { break }
             try await Task.sleep(nanoseconds: 20_000_000)
         }
-        XCTAssertFalse(store.hasCheckpoint,
-                       "experimental W8 must never persist a checkpoint")
-        XCTAssertNil(coordinator.completedSteps)
+        // The DiT slot holds one verified pack; checkpointing is always on.
+        XCTAssertTrue(store.hasCheckpoint,
+                      "non-baseline optimization config must still persist the checkpoint")
     }
 
     /// Fires one step-completed callback then suspends until cancelled, so the
