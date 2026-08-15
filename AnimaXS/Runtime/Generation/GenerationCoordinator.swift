@@ -164,11 +164,16 @@ final class GenerationCoordinator: ObservableObject {
 
     /// Starts one generation. Does nothing when a generation is already
     /// running (K002: only one generation may execute at once).
+    ///
+    /// - Parameter optimization: Immutable per-run inference configuration,
+    ///   captured at Generate time. When it selects an experimental W8 pack,
+    ///   checkpoint persistence/resume is disabled for the run.
     func generate(
         prompt: String,
         seed: UInt64,
         models: ResolvedModels,
-        noise: MTLBuffer? = nil
+        noise: MTLBuffer? = nil,
+        optimization: InferenceOptimizationConfig = .currentBaseline
     ) {
         guard !isGenerating else { return }
         guard let context else {
@@ -184,7 +189,7 @@ final class GenerationCoordinator: ObservableObject {
         state = .tokenizing
         run(engine: GenerationEngine(context: context, factory: factory),
             prompt: prompt, seed: seed, models: models,
-            noise: noise, startStep: 0)
+            noise: noise, startStep: 0, optimization: optimization)
     }
 
     /// Resumes from the latest completed diffusion step checkpoint.
@@ -226,9 +231,13 @@ final class GenerationCoordinator: ObservableObject {
             from: latent, byteCount: latent.count * 4)
         generationEpoch += 1
         state = .tokenizing
+        // Resume is production-W4 only: it reconstructs the same checkpoint
+        // state and is not a performance-comparison vehicle (per the runtime
+        // experiment runbook, use fresh Generate for benchmarks).
         run(engine: GenerationEngine(context: context, factory: factory),
             prompt: prompt, seed: seed, models: models,
-            noise: noise ?? buffer, startStep: checkpoint.step)
+            noise: noise ?? buffer, startStep: checkpoint.step,
+            optimization: .currentBaseline)
     }
 
     /// Cooperative cancellation (K003 core): the engine stops at the next safe
@@ -287,11 +296,21 @@ final class GenerationCoordinator: ObservableObject {
         seed: UInt64,
         models: ResolvedModels,
         noise: MTLBuffer?,
-        startStep: Int
+        startStep: Int,
+        optimization: InferenceOptimizationConfig
     ) {
         let metrics = MetricsCollector()
+        metrics.recordOptimizationConfig(optimization)
+        // Observational environment telemetry (never a generation gate):
+        // recorded from the coordinator/UI-safe layer, not inside Metal.
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        metrics.recordEnvironmentStart(Self.environmentSnapshot())
         generationTask = Task { [weak self] in
             guard let self else { return }
+            defer {
+                metrics.recordEnvironmentEnd(Self.environmentSnapshot())
+                self.publishMetrics(metrics)
+            }
             do {
                 let decoded = try await engine.generate(
                     prompt: prompt,
@@ -305,7 +324,14 @@ final class GenerationCoordinator: ObservableObject {
                             self?.state = snapshot
                         }
                     },
-                    checkpoint: { completedStep, latent in
+                    checkpoint: { [weak self] completedStep, latent in
+                        // Experimental W8 runs never persist checkpoints: the
+                        // production W4 hash set does not describe the W8 pack,
+                        // and a W8 checkpoint must not resurrect unrelated
+                        // production Resume state. Production W4 keeps the
+                        // current-HEAD checkpoint behavior exactly.
+                        guard optimization.checkpointingEnabled,
+                              let self else { return }
                         // Persist the full-metadata checkpoint immediately so
                         // cancel/background/memory-warning can always resume
                         // from the last fully completed step (I004 §6.3).
@@ -327,7 +353,7 @@ final class GenerationCoordinator: ObservableObject {
                         // still current (epoch) and still generating: a save
                         // queued just before completion or a fresh Generate
                         // must never resurrect a stale checkpoint afterwards.
-                        let epoch = generationEpoch
+                        let epoch = self.generationEpoch
                         Task { @MainActor [weak self] in
                             guard let self,
                                   self.generationEpoch == epoch,
@@ -338,10 +364,10 @@ final class GenerationCoordinator: ObservableObject {
                             }
                         }
                     },
-                    metrics: metrics)
+                    metrics: metrics,
+                    optimization: optimization)
                 guard !Task.isCancelled else {
                     self.state = .cancelled
-                    self.publishMetrics(metrics)
                     return
                 }
                 self.image = GenerationCoordinator.makeUIImage(from: decoded)
@@ -355,8 +381,41 @@ final class GenerationCoordinator: ObservableObject {
             } catch {
                 self.state = .failed(error.localizedDescription)
             }
-            self.publishMetrics(metrics)
         }
+    }
+
+    /// Captures power/battery/thermal/low-power facts for the run summary.
+    /// Observational only — never gates or throttles generation.
+    @MainActor
+    private static func environmentSnapshot() -> EnvironmentSnapshot {
+        let battery = UIDevice.current
+        let batteryLevel: Int
+        if battery.batteryState == .unknown || battery.batteryLevel < 0 {
+            batteryLevel = -1
+        } else {
+            batteryLevel = Int((battery.batteryLevel * 100).rounded())
+        }
+        let powerState: String
+        switch battery.batteryState {
+        case .charging: powerState = "charging"
+        case .full: powerState = "full"
+        case .unplugged: powerState = "unplugged"
+        default: powerState = "unknown"
+        }
+        let thermal: String
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: thermal = "nominal"
+        case .fair: thermal = "fair"
+        case .serious: thermal = "serious"
+        case .critical: thermal = "critical"
+        @unknown default: thermal = "unknown"
+        }
+        return EnvironmentSnapshot(
+            powerState: powerState,
+            batteryLevel: batteryLevel,
+            thermalState: thermal,
+            lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled
+        )
     }
 
     /// Drops the retained and persisted checkpoint without touching state

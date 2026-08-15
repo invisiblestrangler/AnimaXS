@@ -133,8 +133,9 @@ final class AttentionExecutorTests: XCTestCase {
             query: q, key: k, value: v, output: legacyOut,
             heads: 1, queryCount: queryCount, keyCount: keyCount, headDim: dim)
         let fp32Executor = AttentionExecutor(context: context, numerics: .fp32ScoresAndSoftmax)
-        XCTAssertEqual(try fp32Executor.maximumScoreScratchBytes(keyCount: keyCount),
-                       128 * keyCount * 4)
+        XCTAssertEqual(try fp32Executor.maximumScoreScratchBytes(keyCount: keyCount, queryCount: queryCount),
+                       queryCount * keyCount * 4,
+                       "FP32 scratch should be bounded by the real query count")
         try await fp32Executor.execute(
             query: q, key: k, value: v, output: fp32Out,
             heads: 1, queryCount: queryCount, keyCount: keyCount, headDim: dim)
@@ -151,6 +152,75 @@ final class AttentionExecutorTests: XCTestCase {
         print("ATTN_MODE=fp32_scores_softmax ATTN_COSINE=\(fp32Metrics.cosine) ATTN_RMSE=\(fp32Metrics.rmse) ATTN_MAX_ABS=\(fp32Metrics.maxAbs)")
         XCTAssertLessThan(fp32Metrics.rmse, legacyMetrics.rmse)
         XCTAssertLessThanOrEqual(fp32Metrics.maxAbs, legacyMetrics.maxAbs)
+    }
+
+    // MARK: - Runtime attention tile-size experiments (§18.3)
+
+    /// Every allowed attention tile row must reproduce the baseline (128)
+    /// result within the existing tolerance, because only the query-row
+    /// dispatch granularity changes — the attention math is unchanged.
+    func testAllTileRowsMatchBaseline() async throws {
+        let context = try requireContext()
+        let queryCount = 1_024, keyCount = 1_024, dim = 64
+        let query = (0..<(queryCount * dim)).map {
+            Float16(sin(Float($0 * 13 % 997) * 0.017) * 0.25)
+        }
+        let key = (0..<(queryCount * dim)).map {
+            Float16(cos(Float($0 * 7 % 991) * 0.019) * 0.25)
+        }
+        let value = (0..<(queryCount * dim)).map {
+            Float16(Float(($0 * 17 % 101) - 50) / 50)
+        }
+        let q = makeHalfBuffer(query, context: context)
+        let k = makeHalfBuffer(key, context: context)
+        let v = makeHalfBuffer(value, context: context)
+
+        let referenceOut = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * dim * 2, options: .storageModeShared))
+        try await AttentionExecutor(context: context, tileRows: 128).execute(
+            query: q, key: k, value: v, output: referenceOut,
+            heads: 1, queryCount: queryCount, keyCount: keyCount, headDim: dim)
+        let reference = readHalf(referenceOut, count: queryCount * dim)
+
+        for tileRows in [256, 512, 1024] {
+            let collector = MetricsCollector()
+            let output = try XCTUnwrap(context.device.makeBuffer(
+                length: queryCount * dim * 2, options: .storageModeShared))
+            let executor = AttentionExecutor(context: context, tileRows: tileRows)
+            executor.metrics = collector
+            try await executor.execute(
+                query: q, key: k, value: v, output: output,
+                heads: 1, queryCount: queryCount, keyCount: keyCount, headDim: dim)
+            let actual = readHalf(output, count: queryCount * dim)
+            for index in actual.indices {
+                XCTAssertEqual(actual[index], reference[index], accuracy: 0.012,
+                               "tile \(tileRows) diverges at \(index)")
+            }
+            let expectedTiles = (queryCount + tileRows - 1) / tileRows
+            XCTAssertEqual(collector.snapshot().attentionQueryTiles, expectedTiles,
+                           "attention query-tile counter for tile \(tileRows)")
+        }
+    }
+
+    /// The attention query-tile counter counts every (head, tile) execution.
+    func testAttentionQueryTileCounterCountsHeadsAndTiles() async throws {
+        let context = try requireContext()
+        let heads = 2, queryCount = 130, keyCount = 64, dim = 8
+        let zeros = [Float16](repeating: 0, count: queryCount * dim)
+        let zeroKey = [Float16](repeating: 0, count: keyCount * dim)
+        let value = [Float16](repeating: 1, count: keyCount * dim)
+        let output = try XCTUnwrap(context.device.makeBuffer(
+            length: heads * queryCount * dim * 2, options: .storageModeShared))
+        let collector = MetricsCollector()
+        let executor = AttentionExecutor(context: context, tileRows: 128)
+        executor.metrics = collector
+        try await executor.execute(
+            query: makeHalfBuffer(zeros, context: context),
+            key: makeHalfBuffer(zeroKey, context: context),
+            value: makeHalfBuffer(value, context: context), output: output,
+            heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: dim)
+        // 2 heads × ceil(130/128) = 2 × 2 = 4 tiles.
+        XCTAssertEqual(collector.snapshot().attentionQueryTiles, 4)
     }
 
     private func attentionRow(

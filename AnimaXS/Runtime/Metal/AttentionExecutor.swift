@@ -33,6 +33,9 @@ final class AttentionExecutor {
     private let monitor: NumericalMonitor?
     let tileRows: Int
     let numerics: AttentionNumerics
+    /// Run telemetry collector (nil in tests / diagnostic-only construction).
+    /// Receives the cheap query-tile counter (simple integer increment).
+    var metrics: MetricsCollector?
 
     init(context: MetalContext, tileRows: Int = defaultTileRows,
          numerics: AttentionNumerics = .legacy,
@@ -45,11 +48,14 @@ final class AttentionExecutor {
         self.numerics = numerics
     }
 
-    func maximumScoreScratchBytes(keyCount: Int) throws -> Int {
+    func maximumScoreScratchBytes(keyCount: Int, queryCount: Int? = nil) throws -> Int {
         guard keyCount > 0 else { throw AnimapkError.validation("attention key count must be positive") }
+        // Bound the configured tile by the real query count so scratch sizing
+        // never over-allocates beyond what the row loop will actually touch.
+        let effectiveTile = queryCount.map { min(tileRows, $0) } ?? tileRows
         let elementBytes = numerics == .legacy
             ? MemoryLayout<Float16>.stride : MemoryLayout<Float>.stride
-        return try checkedProduct(tileRows, keyCount, elementBytes)
+        return try checkedProduct(effectiveTile, keyCount, elementBytes)
     }
 
     func encode(
@@ -71,7 +77,7 @@ final class AttentionExecutor {
                      causal: causal)
         let halfBytes = MemoryLayout<Float16>.stride
         let scoreScratch = buffers.buffer(
-            key: "attention.scores.fp16", bytes: try maximumScoreScratchBytes(keyCount: keyCount))
+            key: "attention.scores.fp16", bytes: try maximumScoreScratchBytes(keyCount: keyCount, queryCount: queryCount))
         let softmaxName = (monitor != nil && probe != nil)
             ? "attention_softmax_rows_probe" : "attention_softmax_rows"
         let softmax = try context.pipeline(named: softmaxName)
@@ -162,6 +168,7 @@ final class AttentionExecutor {
                                         output: output, count: rows * headDim,
                                         offset: outputOffset + (head * queryCount + queryBase) * headRowBytes)
                 }
+                metrics?.recordAttentionQueryTile()
                 queryBase += rows
             }
         }
@@ -196,7 +203,7 @@ final class AttentionExecutor {
         let halfBytes = MemoryLayout<Float16>.stride
         let headRowBytes = headDim * halfBytes
         let scoreScratch = buffers.buffer(
-            key: "attention.scores.fp32", bytes: try maximumScoreScratchBytes(keyCount: keyCount))
+            key: "attention.scores.fp32", bytes: try maximumScoreScratchBytes(keyCount: keyCount, queryCount: queryCount))
         let qk = try context.pipeline(named: "attention_qk_f16_to_f32")
         let softmaxName = (monitor != nil && probe != nil)
             ? "attention_softmax_rows_f32_probe" : "attention_softmax_rows_f32"
@@ -258,6 +265,7 @@ final class AttentionExecutor {
                 pvEncoder.dispatchThreads(MTLSize(width: headDim, height: rows, depth: 1),
                                           threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
                 pvEncoder.endEncoding()
+                metrics?.recordAttentionQueryTile()
                 queryBase += rows
             }
         }

@@ -212,4 +212,50 @@ final class NumericalMonitorTests: XCTestCase {
         XCTAssertEqual(issue.probe, .mlpProjectionInput)
         XCTAssertEqual(issue.stats.condition, "value exceeded FP16 finite range")
     }
+
+    // MARK: - Monitoring OFF (§18.5)
+
+    /// When the numerical monitor is disabled, the sampler has no monitor; a
+    /// non-finite final latent must still fail safely through the retained
+    /// Euler finite guard (falling back to an un-attributed Euler failure).
+    /// This proves the guard is independent of monitoring.
+    func testNumericalFailureWithoutMonitorStillFailsSafely() {
+        let failure = DiffusionSampler.numericalFailureForTesting(step: 5, monitor: nil)
+        // A nil monitor means no attribution — the guard surfaces the
+        // 1-based step via the Euler-output failure, never a crash or a
+        // silently-accepted non-finite latent.
+        XCTAssertEqual(failure.step, 6)
+        XCTAssertTrue(failure.errorDescription?.contains("step 6") == true
+                      || failure.errorDescription?.contains("6") == true)
+    }
+
+    /// The summary must NEVER print "Numerical warnings: 0" for a run where
+    /// monitoring was off — it reports "not collected" instead.
+    func testMetricsMonitorOffNeverReportsZeroWarnings() {
+        let metrics = MetricsCollector()
+        metrics.recordOptimizationConfig(Self.monitorOffConfig)
+        let summary = metrics.snapshot().summaryText
+        XCTAssertTrue(summary.contains("Numerical monitor: off (Euler finite guard on)"))
+        XCTAssertTrue(summary.contains("Numerical warnings: not collected"))
+        XCTAssertFalse(summary.contains("Numerical warnings: 0"),
+                       "must not report a collected count of 0 when monitoring was off")
+    }
+
+    /// Monitor ON still records warnings and reports them as a count.
+    func testMetricsMonitorOnReportsCount() {
+        let metrics = MetricsCollector()
+        metrics.recordOptimizationConfig(InferenceOptimizationConfig.currentBaseline)
+        metrics.setNumericalWarnings(3)
+        metrics.setNumericalDetails("self-attention scores: Inf detected")
+        let summary = metrics.snapshot().summaryText
+        XCTAssertTrue(summary.contains("Numerical monitor: on"))
+        XCTAssertTrue(summary.contains("Numerical warnings: 3"))
+        XCTAssertFalse(summary.contains("not collected"))
+    }
+
+    private static var monitorOffConfig: InferenceOptimizationConfig {
+        var config = InferenceOptimizationConfig.currentBaseline
+        config.numericalMonitoring = false
+        return config
+    }
 }

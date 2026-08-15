@@ -71,7 +71,10 @@ final class ResumeEquivalenceTests: XCTestCase {
         func makeContextAdapter(context: MetalContext, fileURL: URL) throws -> ContextAdapterStage {
             ProbeAdapter()
         }
-        func makeDiffusion(context: MetalContext, fileURL: URL) throws -> DiffusionStage {
+        func makeDiffusion(
+            context: MetalContext, fileURL: URL,
+            optimization: InferenceOptimizationConfig
+        ) throws -> DiffusionStage {
             let sampler = RecurrenceSampler(maxSteps: maxSteps, onExecute: samplerOnExecute)
             self.sampler = sampler
             return sampler

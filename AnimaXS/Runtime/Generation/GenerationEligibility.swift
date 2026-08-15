@@ -11,13 +11,21 @@ enum GenerationEligibility: Equatable {
 
     /// Evaluates every condition exactly once, in a stable priority order.
     /// The first blocking condition wins; the returned reason is user-visible.
+    ///
+    /// - Parameters:
+    ///   - w8Selected: True when the run config selects the experimental W8
+    ///     pack. W8 must be verified/ready before Generate is offered.
+    ///   - w8Ready: True when the experimental W8 pack is verified and
+    ///     installed. Ignored when `w8Selected` is false.
     static func evaluate(
         modelsResolved: Bool,
         isGenerating: Bool,
         canResume: Bool,
         prompt: String,
         seedText: String,
-        metalAvailable: Bool
+        metalAvailable: Bool,
+        w8Selected: Bool = false,
+        w8Ready: Bool = false
     ) -> GenerationEligibility {
         if isGenerating {
             return .blocked("A generation is already running.")
@@ -36,6 +44,9 @@ enum GenerationEligibility: Equatable {
         }
         if !metalAvailable {
             return .blocked("Metal is unavailable on this device.")
+        }
+        if w8Selected && !w8Ready {
+            return .blocked("Experimental W8 is selected but not verified. Import it in Diagnostics or switch back to Production W4.")
         }
         return .ready
     }
