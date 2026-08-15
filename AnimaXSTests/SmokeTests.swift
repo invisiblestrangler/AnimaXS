@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 @testable import AnimaXS
 
@@ -103,6 +104,28 @@ final class SmokeTests: XCTestCase {
             url: url, component: .dit)
         XCTAssertNoThrow(try ModelManifest.verify(url, against: synthetic))
         XCTAssertThrowsError(try ModelManifest.sha256(of: url, chunkBytes: 0))
+    }
+
+    /// 5.6 — `ModelManifest.sha256(of:chunkBytes:)` must hash a file correctly
+    /// when a deliberately tiny chunk forces many iterations, and agree with
+    /// CryptoKit's one-shot digest. Uses a deterministic few-KiB fixture, not a
+    /// production pack, so CI stays fast.
+    func testModelManifestSHA256MultiChunkMatchesOneShot() throws {
+        let size = 64 << 10 // 64 KiB fixture
+        var data = Data(capacity: size)
+        for i in 0..<size {
+            data.append(UInt8((i &* 13 &+ 29) & 0xFF))
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-sha-multichunk-\(UUID().uuidString)")
+        try data.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let expected = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        // 7-byte chunks force ~9000 stream iterations.
+        XCTAssertEqual(try ModelManifest.sha256(of: url, chunkBytes: 7), expected)
+        // The default 1 MiB path must agree too.
+        XCTAssertEqual(try ModelManifest.sha256(of: url), expected)
     }
 
     func testModelStoreSyntheticDownloadVerifyAndReadyState() async throws {

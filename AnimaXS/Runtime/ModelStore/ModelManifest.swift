@@ -43,9 +43,19 @@ enum ModelManifest {
         defer { try? handle.close() }
         var digest = SHA256()
         while true {
-            let data = try handle.read(upToCount: chunkBytes) ?? Data()
-            if data.isEmpty { break }
-            digest.update(data: data)
+            // Bound the lifetime of each chunk's temporary `Data` so Foundation
+            // autoreleased temporaries cannot accumulate across thousands of
+            // reads on large (multi-hundred-MB / multi-GB) model files. This is
+            // pure lifetime hardening: behavior, chunk size, and hashes are
+            // unchanged, and the file is never mmap'd nor read via
+            // `Data(contentsOf:)`.
+            let reachedEOF = try autoreleasepool { () throws -> Bool in
+                let data = try handle.read(upToCount: chunkBytes) ?? Data()
+                guard !data.isEmpty else { return true }
+                digest.update(data: data)
+                return false
+            }
+            if reachedEOF { break }
         }
         return digest.finalize().map { String(format: "%02x", $0) }.joined()
     }

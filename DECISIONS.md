@@ -170,3 +170,45 @@ No thermal logic. No silent clamping. No global FP32. Small, reversible commits.
   gates.** Start/end power, battery, thermal, and Low Power Mode are recorded
   in the summary so runs under different conditions are discarded, never used
   to throttle or block generation.
+
+---
+
+## W8 v2 import crash fix — decisions (append-only)
+
+- **W8 import is now a single-pass bounded-memory stream.** The reported
+  real-device crash during `anima-turbo-v1.0-xsmax-w8-v2.animapk` import was
+  traced to the two-pass implementation: a full SHA-256 pass over the 2.233 GB
+  source followed by a second full `FileManager.copyItem` pass, with no
+  per-chunk temporary-lifetime boundary. `ExperimentalDiTPackStore.importPack`
+  now streams the source into staging EXACTLY ONCE (`read → hash → write` per
+  chunk) at a fixed 1 MiB chunk size inside an explicit `autoreleasepool`, then
+  checks the pinned byte count and SHA-256 before atomic install + receipt.
+  This removes ~2.23 GB of redundant source-side I/O and bounds memory.
+- **The production `ModelManifest.sha256(of:chunkBytes:)` helper is hardened**
+  with an `autoreleasepool` boundary per chunk (unchanged hash behavior, chunk
+  size, and semantics — no mmap, no `Data(contentsOf:)`). It is used by the
+  production model integrity / Diagnostics deep-integrity paths, which can also
+  hash multi-hundred-MB / multi-GB files.
+- **`ExperimentalDiTPackStore` no longer has a `Verifier` injection seam** —
+  the pre-copy full-SHA verifier became dead code once the stream performs
+  verify-in-place. Removed cleanly; tests updated. `chunkBytes` is injectable
+  (default 1 MiB) so tests force many stream iterations without a real pack.
+- **Import state/UI races fixed:** the catalog publishes `.verifying` BEFORE
+  awaiting the store; the W8 row hides Import while `.verifying` (a second
+  multi-GB import can't be queued); and W8 Import/Remove are disabled while a
+  generation is active. Security-scoped file access remains held for the entire
+  stream (no earlier `stopAccessingSecurityScopedResource`, no in-memory copy).
+- **Regression tests use synthetic multi-chunk fixtures** (a few KiB–1 MiB with
+  4 KiB chunks), never the 2.23 GB pack: many-iteration success, SHA-mismatch
+  leaves no installed/staging file, stat size gate creates no staging,
+  re-import replaces, catalog `.verifying` in-flight, and a 7-byte-chunk
+  `ModelManifest.sha256` multi-iteration regression. No production pack in CI.
+- **Future cleanup (NOT part of this fix):** the production
+  `ModelStore.importPack` manual-import path has the same broad two-pass pattern
+  (`ModelManifest.verify(source)` → `installVerified(...)` → `copyItem`). It was
+  left unchanged to avoid destabilizing download/repair flows; if it can be
+  reused safely, the new single-pass helper should be shared there later.
+- **The original device crash is not claimed to be mathematically proven as
+  jetsam** until the new build is re-tested on the physical iPhone XS Max (see
+  DEVICE_TESTS.md). This patch removes the concrete high-risk multi-GB import
+  behavior already identified in the code.

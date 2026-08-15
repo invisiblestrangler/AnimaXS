@@ -68,3 +68,24 @@ The first physical-device run exposed bugs that simulator/CI did not catch:
   pre-change baseline), `FULL_STRESS=PASS`, 2/2 tests.
 - **Real-device results:** PENDING — no device speedup is claimed from
   simulator/macOS tests. The seven-run matrix is in DEVICE_TESTS.md.
+
+## W8 v2 import crash fix (2026-08-15)
+
+- **Branch:** `fix/w8-import-stream` (off `origin/main` `f25e257`)
+- **Problem:** importing `anima-turbo-v1.0-xsmax-w8-v2.animapk` (2.233 GB) on the
+  physical iPhone XS Max terminated the app during import.
+- **Fix:** `ExperimentalDiTPackStore.importPack` now streams the source into
+  staging exactly once (read → hash → write per 1 MiB chunk inside an explicit
+  `autoreleasepool`), then verifies pinned byte count + SHA-256 before atomic
+  install + receipt. Removes the prior full SHA pass + full `copyItem` pass
+  (~4.47 GB source I/O → ~2.23 GB) and bounds per-chunk temporary lifetime.
+- **Also hardened:** `ModelManifest.sha256(of:chunkBytes:)` now bounds each
+  chunk's `Data` lifetime with an `autoreleasepool` (behavior unchanged).
+- **UI races fixed:** catalog publishes `.verifying` before awaiting; W8 row
+  hides Import while `.verifying`; W8 Import/Remove disabled during active
+  generation; security-scoped access held for the whole stream.
+- **Tests:** synthetic multi-chunk fixtures (no 2.23 GB pack in CI) — streaming
+  success, SHA-mismatch cleanup, size-gate no-staging, re-import replace,
+  catalog in-flight state, `ModelManifest` multi-chunk SHA regression.
+- **CI:** TBD (run ID filled after verification). Final acceptance = physical
+  device retest (DEVICE_TESTS.md checklist).

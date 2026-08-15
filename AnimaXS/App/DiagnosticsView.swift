@@ -205,6 +205,10 @@ struct DiagnosticsView: View {
     }
 
     /// Experimental W8 pack status + import/remove (user-triggered only).
+    /// While importing (`.verifying`) no Import button is offered, so a second
+    /// multi-gigabyte import cannot be queued. Import/Remove are also disabled
+    /// while a generation is active, so the W8 file can never be replaced or
+    /// deleted mid-inference.
     @ViewBuilder
     private var w8PackRow: some View {
         let packState = experimentalPack.state
@@ -215,13 +219,19 @@ struct DiagnosticsView: View {
                     Task { await experimentalPack.remove() }
                 }
                 .font(.caption)
+                .disabled(isGenerating)
+            } else if case .verifying = packState {
+                ProgressView("Importing and verifying W8 v2…")
+                    .font(.caption)
             } else if case .failed(let message) = packState {
                 Text(message).font(.caption2).foregroundStyle(.red)
                 Button("Import W8 v2") { showingW8Importer = true }
                     .font(.caption)
+                    .disabled(isGenerating)
             } else {
                 Button("Import W8 v2") { showingW8Importer = true }
                     .font(.caption)
+                    .disabled(isGenerating)
             }
         }
     }
