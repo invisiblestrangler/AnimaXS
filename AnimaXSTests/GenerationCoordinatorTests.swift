@@ -875,6 +875,56 @@ final class GenerationCoordinatorTests: XCTestCase {
 
     // MARK: - Stage lifetime release
 
+    // P1-F: a thrown diffusion stage must still record a nonzero diffusion time
+    // (the measured() helper closes the stage timer on throw), instead of being
+    // silently folded into "Other".
+    func testThrownDiffusionStageRecordsNonzeroDiffusionTime() async throws {
+        let context = try makeContext()
+        struct ThrowingSampler: DiffusionStage {
+            func execute(
+                initialLatent: MTLBuffer, crossContext: MTLBuffer, outputLatent: MTLBuffer,
+                startStep: Int,
+                blockProgress: ((Int, Int) throws -> Void)?,
+                stepCompleted: ((Int, Float, Float, MTLBuffer, MTLBuffer) throws -> Void)?
+            ) async throws {
+                throw AnimapkError.validation("synthetic diffusion failure")
+            }
+        }
+        final class ThrowingFactory: GenerationStageFactory {
+            func makePromptEncoder(context: MetalContext, fileURL: URL) throws -> PromptEncoderStage {
+                ProbeEncoder()
+            }
+            func makeContextAdapter(context: MetalContext, fileURL: URL) throws -> ContextAdapterStage {
+                ProbeAdapter()
+            }
+            func makeDiffusion(
+                context: MetalContext, fileURL: URL,
+                optimization: InferenceOptimizationConfig,
+                numerics: DiTNumericsPolicy
+            ) throws -> DiffusionStage {
+                ThrowingSampler()
+            }
+            func makeVAE(context: MetalContext, fileURL: URL) throws -> VAEDecodeStage {
+                ProbeVAE()
+            }
+        }
+        let engine = GenerationEngine(context: context, factory: ThrowingFactory())
+        let metrics = MetricsCollector()
+        do {
+            _ = try await engine.generate(
+                prompt: "test", seed: 1, models: testModels(),
+                metrics: metrics, optimization: .currentBaseline)
+            XCTFail("expected the throwing sampler to fail the generate call")
+        } catch {
+            // Expected: the thrown diffusion failure propagates.
+        }
+        let snapshot = metrics.snapshot()
+        // The diffusion stage timer must have been closed by the measured()
+        // defer, so diffusion time is nonzero even though diffusion threw.
+        XCTAssertGreaterThan(snapshot.diffusion, 0,
+                             "a thrown diffusion stage must record nonzero diffusion time")
+    }
+
     func testHeavyStageObjectsAreReleasedAfterTheirStage() async throws {
         let context = try makeContext()
         let counting = CountingFactory()

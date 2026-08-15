@@ -54,6 +54,52 @@ final class DiTFinalLayerExecutorTests: XCTestCase {
         print("H007_FINAL_LAYER_SYNTHETIC=PASS rangeBytes=\(located.length)")
     }
 
+    // P1-D: with W8 BF16 emulation (.bf16Compute), the large residual is rounded
+    // to BF16 RNE while retained in fp32 storage, so residual magnitudes above
+    // the FP16 max (65,504) must stay finite through the final layer. The
+    // legacy W4 path converts the residual through fp16 and would overflow.
+    func testW8BF16EmulatedFinalLayerKeepsLargeResidualFinite() async throws {
+        guard let context = MetalContext() else {
+            throw XCTSkip("SKIPPED_NO_METAL: default Metal device/library unavailable")
+        }
+        let url = try TestPackFactory.writePack(
+            named: "dit-final-w8", componentCode: 1, quantScheme: "w4", quantGroup: 64,
+            blobs: [
+                zeroW4("model.diffusion_model.final_layer.adaln_modulation.1.weight",
+                       rows: 256, columns: 2_048),
+                zeroW4("model.diffusion_model.final_layer.adaln_modulation.2.weight",
+                       rows: 4_096, columns: 256),
+                zeroW4("model.diffusion_model.final_layer.linear.weight",
+                       rows: 64, columns: 2_048),
+            ], to: tmpDir)
+        let file = try AnimapkFile(url: url)
+
+        let magnitudes: [Float] = [60_000, 70_000, 100_000, 280_000]
+        for magnitude in magnitudes {
+            let residual = try sharedBuffer(bytes: 1_024 * 2_048 * 4, context: context)
+            let emb = try sharedBuffer(bytes: 2_048 * 4, context: context)
+            let adaln = try sharedBuffer(bytes: 4_096 * 4, context: context)
+            let velocity = try sharedBuffer(bytes: 16 * 64 * 64 * 4, context: context)
+            let residualValues = residual.contents().bindMemory(
+                to: Float.self, capacity: 1_024 * 2_048)
+            for index in 0..<(1_024 * 2_048) {
+                residualValues[index] = magnitude * (index.isMultiple(of: 2) ? 1 : -1)
+            }
+            let output = velocity.contents().bindMemory(
+                to: Float.self, capacity: 16 * 64 * 64)
+            for index in 0..<(16 * 64 * 64) { output[index] = 1_234_567 }
+
+            try await DiTFinalLayerExecutor(
+                context: context, file: file,
+                activationNumerics: .bf16Compute).execute(
+                    residual: residual, emb: emb, adalnLora: adaln, velocity: velocity)
+
+            XCTAssertTrue((0..<(16 * 64 * 64)).allSatisfy { output[$0].isFinite },
+                          "W8 BF16-emulated final layer produced non-finite output at residual magnitude \(magnitude)")
+        }
+        print("H007_W8_BF16_LARGE_RESIDUAL=PASS magnitudes=60000,70000,100000,280000")
+    }
+
     func testRealFinalLayerAgainstSameW4Oracle() async throws {
         let environment = ProcessInfo.processInfo.environment
         let bundled = bundledFixture(named: "h007_final.animapk")?.deletingLastPathComponent()

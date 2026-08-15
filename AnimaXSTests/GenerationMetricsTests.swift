@@ -142,4 +142,44 @@ final class GenerationMetricsTests: XCTestCase {
         XCTAssertTrue(text.contains("(w8-v2)"))
         XCTAssertTrue(text.contains("Checkpointing: on"))
     }
+
+    // P1-H: cancellation reason is published into the summary and distinguishes
+    // user/background/memory-warning cancellation.
+    func testCancellationReasonDistinguishable() {
+        let collector = MetricsCollector()
+        collector.recordCancellationReason(.memoryWarning)
+        collector.finalize(totalWall: 10)
+        let text = collector.snapshot().summaryText
+        XCTAssertTrue(text.contains("Cancellation: memoryWarning"))
+
+        let background = MetricsCollector()
+        background.recordCancellationReason(.background)
+        background.finalize(totalWall: 10)
+        XCTAssertTrue(background.snapshot().summaryText.contains("Cancellation: background"))
+
+        let user = MetricsCollector()
+        user.recordCancellationReason(.user)
+        user.finalize(totalWall: 10)
+        XCTAssertTrue(user.snapshot().summaryText.contains("Cancellation: user"))
+    }
+
+    // P1-G: numerical bookkeeping is published via metrics; a non-empty warning
+    // count is recorded (and the summary shows it), while monitor-OFF marks the
+    // run as disabled so it never reports a fake "0".
+    func testNumericalBookkeepingPublished() {
+        let collector = MetricsCollector()
+        collector.setNumericalWarnings(3)
+        collector.setNumericalDetails("block 5 self-attention scores")
+        collector.finalize(totalWall: 10)
+        let text = collector.snapshot().summaryText
+        XCTAssertTrue(text.contains("Numerical warnings: 3 (block 5 self-attention scores)"))
+
+        let disabled = MetricsCollector()
+        disabled.setNumericalMonitoringDisabled(true)
+        disabled.finalize(totalWall: 10)
+        let disabledText = disabled.snapshot().summaryText
+        XCTAssertTrue(disabledText.contains("Numerical monitor: off"))
+        XCTAssertTrue(disabledText.contains("Numerical warnings: not collected"))
+        XCTAssertFalse(disabledText.contains("Numerical warnings: 0"))
+    }
 }
