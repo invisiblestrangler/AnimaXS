@@ -12,13 +12,12 @@ Working tree: clean (at P0 commit; local edits to state file not yet committed)
 - P1 IN PROGRESS: P1-A foundation committed as WIP `48cf0a7` (ModelVariantDescriptor, ditW4/ditW8V2, descriptor(for:), ResolvedModels→ResolvedModelPack reshape with .hashes, GenerationMetrics.recordDiTPackIdentity). First subagent attempt (deleg_f4593fac9) interrupted mid-inference (no changes); second attempt (deleg_f6307e41) hit iteration budget after P1-A foundation.
 
 ## Current exact objective
-- P1 CODE COMPLETE (committed 48cf0a7, 892ffd1, 041eefe, 7597ea4): P1-A..P1-H implemented.
-- P1 TESTS being added: P1-D overflow (DiTFinalLayerExecutorTests), P1-B checkpoint cross-variant (new CheckpointIdentityTests.swift), P1-E final-layer (NumericalFailureTests), P1-F stage-timing (GenerationCoordinatorTests), P1-G/H metrics (GenerationMetricsTests).
-- Next: commit tests; regenerate xcodeproj via bootstrap-project.yml (2 new .swift test files); run normal CI; fix any failures; then P1 gate.
+- P1 CODE + TESTS COMMITTED and PUSHED (HEAD f44c5ee): all P1-A..P1-H implemented with tests. xcodeproj regenerated (bootstrap bot commit f44c5ee) to include new CheckpointIdentityTests.swift.
+- Normal CI in progress on f44c5ee: run 31903678319 (workflow_dispatch).
+- On green: P1 gate met. Then P2 (per-step telemetry).
 
 ## Current files being modified
-- P1 code committed: ModelManifest.swift, GenerationEngine.swift, GenerationMetrics.swift, ModelStore.swift, GenerationCoordinator.swift, DiffusionSampler.swift, DiTFinalLayerExecutor.swift, NumericalFailure.swift, NumericalMonitor.swift, DitForward (via sampler), scripts/dit_final_oracle.py.
-- P1 tests (uncommitted): DiTFinalLayerExecutorTests.swift, CheckpointIdentityTests.swift (NEW), NumericalFailureTests.swift, GenerationMetricsTests.swift, GenerationCoordinatorTests.swift.
+- P1 complete: code + tests + regenerated xcodeproj (HEAD f44c5ee). Working tree clean.
 
 ## Invariants that must not regress
 - W4 known-good path
