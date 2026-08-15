@@ -69,9 +69,20 @@ No thermal logic. No silent clamping. No global FP32. Small, reversible commits.
   the monitor report. UI: "Run metrics" section in ContentView + DiagnosticsView
   with share/copy. `other` = wall − Σ(stages), so counters reconcile with wall.
 
-### D203 — Phase 12: two-slot streamer decision (pending measurement)
-- Memory headroom: +1 slot ≈ +39 MB (max block range), vs observed ~1.4 GB peak —
-  headroom exists; proceed once one-slot copy/GPU/wait timing is recorded.
+### D203 — Phase 12: two-slot ping-pong streamer
+- Memory headroom verified: +1 slot ≈ +39 MB (max block range 38,993,920 B) vs
+  ~1.4 GB peak — headroom exists, implemented exactly two slots.
+- `WeightStreamer` v2: `slotCount` slots, `load(range, from:, slot:)`, hard
+  in-flight guard (`markInFlight`/`complete` — a slot referenced by a committed
+  command buffer refuses overwrite). Backward-compatible `ring` = slot 0.
+- `DiTBlockExecutor.execute` gains `slot` + `prefetchIndex/prefetchSlot`;
+  `DitForward` runs the ping-pong loop: prologue loads block 0 → for each block
+  commit → prefetch next block into the other slot (CPU memcpy overlaps GPU) →
+  await. Block N's previous slot user (block N-1) is always awaited first, so
+  the overlap is race-free; outputs byte-identical (same bytes at same offsets).
+- Prefetch failure still awaits the in-flight buffer before propagating.
+- Tests: slot independence, in-flight overwrite refusal, lifecycle tracking,
+  slot-count validation.
 
 ## Open questions
 - Which boundary is the actual first-unsafe site on A12? (Instrument → stress →

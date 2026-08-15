@@ -47,7 +47,7 @@ final class DiTBlockExecutor {
         self.context = context
         self.file = file
         self.locator = locator
-        self.streamer = try WeightStreamer(device: context.device, capacity: Int(maximum))
+        self.streamer = try WeightStreamer(device: context.device, capacity: Int(maximum), slotCount: 2)
         self.buffers = BufferPool(device: context.device)
         self.linear = LinearExecutor(context: context)
         self.activationNumerics = activationNumerics
@@ -59,6 +59,13 @@ final class DiTBlockExecutor {
 
     /// Mutates `residual` in place. All input buffers are tightly packed and use these types:
     /// residual/emb/adalnLora/rope fp32, crossContext fp16.
+    ///
+    /// `slot` selects the weight slot the block's weights were (or will be)
+    /// loaded into. `prefetchIndex`/`prefetchSlot` request the next block's
+    /// weights to be copied into the other slot AFTER this block's command
+    /// buffer is committed and BEFORE it is awaited, so the CPU memcpy hides
+    /// behind GPU execution (Phase 12 ping-pong). The streamer itself refuses
+    /// to overwrite a slot still in flight.
     func execute(
         blockIndex: Int,
         residual: MTLBuffer,
@@ -66,17 +73,24 @@ final class DiTBlockExecutor {
         adalnLora: MTLBuffer,
         crossContext: MTLBuffer,
         rope: MTLBuffer,
+        slot: Int = 0,
+        prefetchIndex: Int? = nil,
+        prefetchSlot: Int = 0,
         diagnosticBranchCompleted: DiagnosticBranchCompleted? = nil
     ) async throws {
         try validateInputs(residual: residual, emb: emb, adalnLora: adalnLora,
                            crossContext: crossContext, rope: rope)
         let range = try locator.block(blockIndex)
         metrics?.beginBlock(blockIndex)
-        let copyStart = ProcessInfo.processInfo.systemUptime
-        try streamer.load(range, from: file)
-        let copyEnd = ProcessInfo.processInfo.systemUptime
-        metrics?.recordWeightCopy(bytes: Int(range.length), seconds: copyEnd - copyStart)
-        let weights = try BlockWeights(range: range, ring: streamer.ring)
+        // Load the block's weights unless a prefetch (prologue or previous
+        // iteration) already placed them in this slot.
+        if streamer.loadedLogicalIndexes[slot] != blockIndex {
+            let copyStart = ProcessInfo.processInfo.systemUptime
+            try streamer.load(range, from: file, slot: slot)
+            let copyEnd = ProcessInfo.processInfo.systemUptime
+            metrics?.recordWeightCopy(bytes: Int(range.length), seconds: copyEnd - copyStart)
+        }
+        let weights = try BlockWeights(range: range, ring: streamer.buffer(for: slot))
         guard let command = context.commandQueue.makeCommandBuffer() else {
             throw AnimapkError.validation("failed to create DiT block command buffer")
         }
@@ -86,13 +100,13 @@ final class DiTBlockExecutor {
         try encodeComputeBoundary(command, siluEmb, count: Self.dim)
         try encodeAttentionBranch(command, residual: residual, crossContext: crossContext,
                                   rope: rope, siluEmb: siluEmb, adalnLora: adalnLora,
-                                  weights: weights, cross: false)
+                                  weights: weights, cross: false, slot: slot)
         let selfSnapshot = try diagnosticBranchCompleted.map { _ in
             try encodeSnapshot(command, source: residual, key: "dit.diagnostic.afterSelf.f32")
         }
         try encodeAttentionBranch(command, residual: residual, crossContext: crossContext,
                                   rope: rope, siluEmb: siluEmb, adalnLora: adalnLora,
-                                  weights: weights, cross: true)
+                                  weights: weights, cross: true, slot: slot)
         let crossSnapshot = try diagnosticBranchCompleted.map { _ in
             try encodeSnapshot(command, source: residual, key: "dit.diagnostic.afterCross.f32")
         }
@@ -103,13 +117,33 @@ final class DiTBlockExecutor {
         }
 
         let encodeEnd = ProcessInfo.processInfo.systemUptime
+        streamer.markInFlight(slot)
+        command.commit()
+        // Ping-pong prefetch: copy the next block's weights into the other
+        // slot while this command buffer executes on the GPU. Safe because the
+        // other slot's previous user (block i-1) was already awaited. If the
+        // prefetch fails, still await the in-flight buffer before propagating.
+        var prefetchError: Error?
+        if let prefetchIndex {
+            do {
+                let nextRange = try locator.block(prefetchIndex)
+                let copyStart = ProcessInfo.processInfo.systemUptime
+                try streamer.load(nextRange, from: file, slot: prefetchSlot)
+                metrics?.recordWeightCopy(
+                    bytes: Int(nextRange.length),
+                    seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+            } catch {
+                prefetchError = error
+            }
+        }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            command.addCompletedHandler { completed in
+            command.addCompletedHandler { [weak self] completed in
+                self?.streamer.complete(slot)
                 if let error = completed.error { continuation.resume(throwing: error) }
                 else { continuation.resume() }
             }
-            command.commit()
         }
+        if let prefetchError { throw prefetchError }
         let done = ProcessInfo.processInfo.systemUptime
         let gpuSeconds = (command.gpuStartTime > 0 && command.gpuEndTime >= command.gpuStartTime)
             ? command.gpuEndTime - command.gpuStartTime : 0
@@ -130,6 +164,17 @@ final class DiTBlockExecutor {
         }
     }
 
+    /// Load a block's weights into a slot without executing it (ping-pong
+    /// prologue). The loop's in-flight guard still applies.
+    func prefetch(blockIndex: Int, slot: Int) throws {
+        let range = try locator.block(blockIndex)
+        let copyStart = ProcessInfo.processInfo.systemUptime
+        try streamer.load(range, from: file, slot: slot)
+        metrics?.recordWeightCopy(
+            bytes: Int(range.length),
+            seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+    }
+
     private func encodeSnapshot(
         _ command: MTLCommandBuffer, source: MTLBuffer, key: String
     ) throws -> MTLBuffer {
@@ -146,7 +191,7 @@ final class DiTBlockExecutor {
     private func encodeAttentionBranch(
         _ command: MTLCommandBuffer, residual: MTLBuffer, crossContext: MTLBuffer,
         rope: MTLBuffer, siluEmb: MTLBuffer, adalnLora: MTLBuffer,
-        weights: BlockWeights, cross: Bool
+        weights: BlockWeights, cross: Bool, slot: Int
     ) throws {
         let modulation = try encodeModulation(
             command, siluEmb: siluEmb, adalnLora: adalnLora,
@@ -194,14 +239,14 @@ final class DiTBlockExecutor {
 
         if cross {
             try encodeRMSHeads(command, input: qToken, weightOffset: weights.crossQNorm,
-                               output: qToken, rows: Self.tokens * Self.heads)
+                               output: qToken, rows: Self.tokens * Self.heads, slot: slot)
             try encodeRMSHeads(command, input: kToken, weightOffset: weights.crossKNorm,
-                               output: kToken, rows: Self.contextTokens * Self.heads)
+                               output: kToken, rows: Self.contextTokens * Self.heads, slot: slot)
         } else {
             try encodeRMSRoPE(command, input: qToken, weightOffset: weights.selfQNorm,
-                              rope: rope, output: qToken)
+                              rope: rope, output: qToken, slot: slot)
             try encodeRMSRoPE(command, input: kToken, weightOffset: weights.selfKNorm,
-                              rope: rope, output: kToken)
+                              rope: rope, output: kToken, slot: slot)
         }
         try encodeHalfComputeBoundary(command, qToken, count: Self.tokens * Self.dim)
         try encodeHalfComputeBoundary(command, kToken, count: kTokenCount)
@@ -457,7 +502,7 @@ final class DiTBlockExecutor {
 
     private func encodeRMSRoPE(
         _ command: MTLCommandBuffer, input: MTLBuffer, weightOffset: Int,
-        rope: MTLBuffer, output: MTLBuffer
+        rope: MTLBuffer, output: MTLBuffer, slot: Int
     ) throws {
         let pipeline = try context.pipeline(named: "rms_rope_split_half")
         guard let encoder = command.makeComputeCommandEncoder() else {
@@ -466,7 +511,7 @@ final class DiTBlockExecutor {
         var tokens = UInt32(Self.tokens), heads = UInt32(Self.heads), epsilon = Self.eps
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(input, offset: 0, index: 0)
-        encoder.setBuffer(streamer.ring, offset: weightOffset, index: 1)
+        encoder.setBuffer(streamer.buffer(for: slot), offset: weightOffset, index: 1)
         encoder.setBuffer(rope, offset: 0, index: 2)
         encoder.setBuffer(output, offset: 0, index: 3)
         encoder.setBytes(&tokens, length: 4, index: 4)
@@ -479,7 +524,7 @@ final class DiTBlockExecutor {
 
     private func encodeRMSHeads(
         _ command: MTLCommandBuffer, input: MTLBuffer, weightOffset: Int,
-        output: MTLBuffer, rows: Int
+        output: MTLBuffer, rows: Int, slot: Int
     ) throws {
         let pipeline = try context.pipeline(named: "rmsnorm_heads_half")
         guard let encoder = command.makeComputeCommandEncoder() else {
@@ -488,7 +533,7 @@ final class DiTBlockExecutor {
         var rowCount = UInt32(rows), epsilon = Self.eps
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(input, offset: 0, index: 0)
-        encoder.setBuffer(streamer.ring, offset: weightOffset, index: 1)
+        encoder.setBuffer(streamer.buffer(for: slot), offset: weightOffset, index: 1)
         encoder.setBuffer(output, offset: 0, index: 2)
         encoder.setBytes(&rowCount, length: 4, index: 3)
         encoder.setBytes(&epsilon, length: 4, index: 4)

@@ -153,7 +153,7 @@ final class DiffusionSampler {
             try await forward.execute(
                 residual: residual, emb: embedding, adalnLora: adaln,
                 crossContext: crossHalf, rope: rope,
-                blockCompleted: { block, _ in
+                blockCompleted: { [self] block, _ in
                 try blockProgress?(step, block)
                 try diagnosticBlockCompleted?(step, block, residual)
                 monitor.noteBlockCompleted(step: step, block: block)
