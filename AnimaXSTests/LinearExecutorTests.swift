@@ -1,5 +1,6 @@
 import XCTest
 import Metal
+import MetalPerformanceShaders
 @testable import AnimaXS
 
 final class LinearExecutorTests: XCTestCase {
@@ -171,6 +172,137 @@ final class LinearExecutorTests: XCTestCase {
         for k in [2_048, 8_192] {
             try await characterizePrecision(context: context, k: k)
         }
+    }
+
+    // MARK: - Runtime tile-size experiments (§18.2)
+
+    /// The same W4 matmul must produce the same numerical result (within the
+    /// existing tolerance) for every allowed tile row, because only the MPS
+    /// dispatch granularity changes — never the arithmetic.
+    func testAllTileRowsProduceIdenticalResults() async throws {
+        let context = try requireContext()
+        for tileRows in InferenceOptimizationConfig.allowedTileRows {
+            let result = try await runSyntheticW4(context: context, tileRows: tileRows, m: 300, n: 64, k: 128)
+            XCTAssertEqual(result.tileRows, tileRows)
+            // Reference from the baseline tile.
+            let reference = try await runSyntheticW4(context: context, tileRows: 128, m: 300, n: 64, k: 128)
+            XCTAssertEqual(reference.values.count, result.values.count)
+            for index in result.values.indices {
+                XCTAssertEqual(result.values[index], reference.values[index], accuracy: 0.02,
+                               "tile \(tileRows) diverges at index \(index)")
+            }
+        }
+    }
+
+    /// Direct MPS I/O must be numerically identical to the copy path when the
+    /// tight stride matches MPS's recommended stride (the eligibility rule).
+    /// When it does NOT match, the fallback copy path runs and the direct
+    /// counters stay at zero. We assert based on the runtime stride — never
+    /// hardcoding simulator/Mac stride behavior as A12 behavior.
+    func testDirectMPSIOParityAndCounters() async throws {
+        let context = try requireContext()
+        let m = 200, n = 64, k = 64
+        let scalarBytes = MemoryLayout<Float16>.stride
+        let tightLeftRowBytes = k * scalarBytes
+        let mpsLeftRowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: k, dataType: .float16)
+        let tightResultRowBytes = n * scalarBytes
+        let mpsResultRowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: n, dataType: .float16)
+
+        // Copied (baseline) result.
+        let copiedCollector = MetricsCollector()
+        let copied = try await runSyntheticW4(
+            context: context, tileRows: 128, m: m, n: n, k: k,
+            directMPSIO: false, collector: copiedCollector)
+        // Direct result.
+        let directCollector = MetricsCollector()
+        let direct = try await runSyntheticW4(
+            context: context, tileRows: 128, m: m, n: n, k: k,
+            directMPSIO: true, collector: directCollector)
+
+        for index in direct.values.indices {
+            XCTAssertEqual(direct.values[index], copied.values[index], accuracy: 0.02,
+                           "direct/copy divergence at index \(index)")
+        }
+
+        // Counter assertions must follow the actual runtime stride, not a
+        // hardcoded assumption about this platform.
+        let expectedTiles = copied.tileCount
+        let directMetrics = directCollector.snapshot()
+        if tightLeftRowBytes == mpsLeftRowBytes {
+            XCTAssertEqual(directMetrics.linearDirectInputTiles, expectedTiles,
+                           "tight input stride matched MPS; expected direct input tiles")
+            XCTAssertEqual(directMetrics.linearCopiedInputTiles, 0)
+        } else {
+            XCTAssertEqual(directMetrics.linearDirectInputTiles, 0,
+                           "input stride did not match MPS; direct input must be 0")
+            XCTAssertEqual(directMetrics.linearCopiedInputTiles, expectedTiles)
+        }
+        if tightResultRowBytes == mpsResultRowBytes {
+            XCTAssertEqual(directMetrics.linearDirectOutputTiles, expectedTiles)
+            XCTAssertEqual(directMetrics.linearCopiedOutputTiles, 0)
+        } else {
+            XCTAssertEqual(directMetrics.linearDirectOutputTiles, 0)
+            XCTAssertEqual(directMetrics.linearCopiedOutputTiles, expectedTiles)
+        }
+        XCTAssertEqual(directMetrics.linearGEMMTiles, expectedTiles)
+        // Baseline (copy path) always uses copied tiles.
+        XCTAssertEqual(copiedCollector.snapshot().linearGEMMTiles, expectedTiles)
+        XCTAssertEqual(copiedCollector.snapshot().linearCopiedInputTiles, expectedTiles)
+        XCTAssertEqual(copiedCollector.snapshot().linearCopiedOutputTiles, expectedTiles)
+    }
+
+    // MARK: - Synthetic W4 helper
+
+    private func runSyntheticW4(
+        context: MetalContext, tileRows: Int, m: Int, n: Int, k: Int,
+        directMPSIO: Bool = false, collector: MetricsCollector? = nil
+    ) async throws -> (values: [Float], tileRows: Int, tileCount: Int) {
+        let scalarBytes = MemoryLayout<Float16>.stride
+        let packedStride = (k + 1) / 2
+        let input = try makeBuffer(bytes: m * k * scalarBytes, on: context.device)
+        var inputValues = [Float](repeating: 0, count: m * k)
+        for index in inputValues.indices {
+            let value = Float((index * 7) % 15 - 7) / 4
+            inputValues[index] = Float(Float16(value))
+            store(Float16(value).bitPattern, in: input, byteOffset: index * scalarBytes)
+        }
+        let packed = try makeBuffer(bytes: n * packedStride, on: context.device, fill: 0xAA)
+        for row in 0..<n {
+            for column in 0..<k {
+                let q = UInt8((row * 3 + column * 5) & 15)
+                let offset = row * packedStride + column / 2
+                let pointer = packed.contents().advanced(by: offset).assumingMemoryBound(to: UInt8.self)
+                pointer.pointee = column.isMultiple(of: 2)
+                    ? (pointer.pointee & 0xF0) | q
+                    : (pointer.pointee & 0x0F) | (q << 4)
+            }
+        }
+        // Scale/zero are group-64 quantized: one pair per (row, group).
+        let groupCount = (k + 63) / 64
+        let scales = try makeBuffer(bytes: n * groupCount * scalarBytes, on: context.device)
+        let zeros = try makeBuffer(bytes: n * groupCount * scalarBytes, on: context.device)
+        for row in 0..<n {
+            store(Float16(0.125).bitPattern, in: scales, byteOffset: row * scalarBytes)
+            store(Float16(-0.5).bitPattern, in: zeros, byteOffset: row * scalarBytes)
+        }
+        let output = try makeBuffer(bytes: m * n * scalarBytes, on: context.device)
+        let weight = QuantizedLinearWeightBuffers(
+            storage: .w4, packed: packed, packedOffset: 0,
+            scale: scales, scaleOffset: 0, zero: zeros, zeroOffset: 0,
+            rows: n, columns: k, packedRowStride: packedStride)
+        let executor = LinearExecutor(context: context, tileRows: tileRows, directMPSIO: directMPSIO)
+        executor.metrics = collector
+        try await executor.execute(
+            input: input, weight: weight, output: output, inputRows: m)
+        var values = [Float](repeating: 0, count: m * n)
+        for row in 0..<m {
+            for column in 0..<n {
+                values[row * n + column] = loadHalf(
+                    output, byteOffset: (row * n + column) * scalarBytes)
+            }
+        }
+        let tileCount = (m + tileRows - 1) / tileRows
+        return (values, tileRows, tileCount)
     }
 
     private func characterizePrecision(context: MetalContext, k: Int) async throws {

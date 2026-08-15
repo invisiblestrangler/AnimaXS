@@ -111,6 +111,62 @@ No thermal logic. No silent clamping. No global FP32. Small, reversible commits.
 - Lesson: never move `addCompletedHandler` after `commit()` when restructuring
   Metal awaits; keep handler registration adjacent to commit.
 
+### D206 — Terminal (8/8) checkpoint must never offer Resume; clear after completion
+- **Bug (user-reported):** after a generation completes, the app could show only
+  "Resume" ("Checkpoint: 8/8 steps — Resume available.") instead of Generate.
+  Root cause: a checkpoint at `step == samplerSteps` (8) means diffusion FULLY
+  completed — nothing left to resume — yet `canResume` accepted it
+  (`step <= 8` in `.idle`/`.cancelled`). Such checkpoints were also retained +
+  persisted (the step-7 callback saves step 8), so a cancel-during-VAE or a
+  cold launch with a stale 8/8 file suppressed the Generate button entirely
+  (no discard affordance in `.idle`).
+- **Fix (4 layers):**
+  1. `canResume` requires `step < samplerSteps` (1...7 only).
+  2. The checkpoint callback never retains/persists a terminal checkpoint
+     (`nextStep >= samplerSteps` → skip).
+  3. On `.completed`, `clearCheckpoint()` drops the retained + persisted
+     checkpoint (the user-facing "cache" is cleared after every generation).
+  4. Cold-launch init removes a terminal checkpoint found on disk (legacy
+     files) instead of retaining it.
+  - Plus race hardening: a `generationEpoch` (bumped per run + per clear)
+    + `isGenerating` guard invalidates any in-flight checkpoint-save task that
+    could otherwise resurrect a stale checkpoint after completion or a fresh
+    Generate (the LifecycleSampler harness queues all saves synchronously, so
+    this is a real ordering hazard, not theoretical).
+  - Defense-in-depth: `CheckpointStore.validate` rejects step 8 too; the
+    ContentView caption now shows the real step count.
+- Tests: completed-generation clears checkpoint + offers Generate not Resume;
+  terminal checkpoint on disk cleared at cold launch; 7/8 still offers resume
+  (boundary guard); validate rejects terminal step. Also fixed pre-existing
+  literal `\(...)` escapes in the test files' temp-dir paths and failure
+  messages (same bug class as D200).
+
 ## Open questions
 - Which boundary is the actual first-unsafe site on A12? (Instrument → stress →
   attribute; do not guess.)
+
+---
+
+## Runtime inference-optimization experiments (D207) — decisions (append-only)
+
+- **Performance experiments are runtime-configurable in one build.** Linear
+  and attention tile rows (128/256/512/1024), direct MPS linear I/O, ping-pong
+  weight streaming, numerical monitoring, and DiT pack (W4/W8) are selectable
+  at runtime in Diagnostics. No environment variables or compile flags: one
+  installed binary can run every experiment, so GitHub Actions is not the
+  per-variation inner loop.
+- **Current behavior remains the baseline.** `InferenceOptimizationConfig.currentBaseline`
+  (L128, A128, direct OFF, ping-pong ON, monitor ON, W4) exactly reproduces
+  current HEAD. "Reset to current baseline" restores it.
+- **W8 is Diagnostics-only.** The experimental W8 v2 pack is isolated from the
+  production `ModelManifest.entries` topology; it is imported/removed manually
+  and selected per-run in Diagnostics. No auto-download, no HF credentials in
+  the app, and no production-role collision.
+- **W8 checkpointing is disabled in this batch.** The production W4 hash set
+  does not describe the W8 pack, and a W8 checkpoint must not resurrect
+  unrelated production Resume state. Production W4 keeps the current
+  completed-8/8 cleanup behavior exactly.
+- **Thermal/power values are observational telemetry and never generation
+  gates.** Start/end power, battery, thermal, and Low Power Mode are recorded
+  in the summary so runs under different conditions are discarded, never used
+  to throttle or block generation.

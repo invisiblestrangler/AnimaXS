@@ -22,21 +22,33 @@ struct QuantizedLinearWeightBuffers {
 /// The weight matrix is dequantized once into one reusable fp16 scratch buffer.
 /// Input rows are submitted to MPS in tiles so the same executor works for token
 /// matrices without allocating per-tile copies.
+///
+/// `directMPSIO` (runtime experiment): when a tile's tight row stride exactly
+/// satisfies MPS's recommended row stride, the MPSMatrix wraps the existing
+/// input/output buffers directly and the per-tile copy kernels are skipped.
+/// Input and output eligibility are independent; the run metrics counters
+/// report how many tiles actually hit direct wrapping on the target device.
 final class LinearExecutor {
     static let defaultTileRows = 128
 
     private let context: MetalContext
     private let buffers: BufferPool
     let tileRows: Int
+    private let directMPSIO: Bool
+    /// Run telemetry collector (nil in tests / diagnostic-only construction).
+    /// Receives the cheap tile counters (simple integer increments).
+    var metrics: MetricsCollector?
 
-    init(context: MetalContext, tileRows: Int = defaultTileRows) {
+    init(context: MetalContext, tileRows: Int = defaultTileRows,
+         directMPSIO: Bool = false) {
         precondition(tileRows > 0)
         self.context = context
         self.buffers = BufferPool(device: context.device)
         self.tileRows = tileRows
+        self.directMPSIO = directMPSIO
     }
 
-    /// Encode dequantization and all MPS tiles into an existing command buffer.
+    /// Encodes dequantization and all MPS tiles into an existing command buffer.
     /// The caller owns command-buffer commit/completion.
     func encode(
         commandBuffer: MTLCommandBuffer,
@@ -101,28 +113,67 @@ final class LinearExecutor {
             rows: n, columns: k, rowBytes: rightRowBytes, dataType: .float16)
         let right = MPSMatrix(buffer: scratch, descriptor: rightDescriptor)
 
+        // MPS-recommended row strides for this tile shape. A tile may wrap the
+        // existing tight input/output buffers directly ONLY when the tight
+        // stride exactly equals the recommended stride.
+        let mpsLeftRowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: k, dataType: .float16)
+        let mpsResultRowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: n, dataType: .float16)
+        let tightLeftRowBytes = k * scalarBytes
+        let tightResultRowBytes = n * scalarBytes
+        let inputEligible = directMPSIO && tightLeftRowBytes == mpsLeftRowBytes
+        let outputEligible = directMPSIO && tightResultRowBytes == mpsResultRowBytes
+
         var rowStart = 0
         while rowStart < inputRows {
             let rowsThisTile = min(tileRows, inputRows - rowStart)
-            let leftRowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: k, dataType: .float16)
-            let resultRowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: n, dataType: .float16)
-            let leftScratch = buffers.buffer(
-                key: "linear.left.fp16", bytes: try checkedProduct(rowsThisTile, leftRowBytes))
-            let resultScratch = buffers.buffer(
-                key: "linear.result.fp16", bytes: try checkedProduct(rowsThisTile, resultRowBytes))
-            try encodeCopy(commandBuffer: commandBuffer,
-                           source: input, sourceOffset: inputOffset + rowStart * k * scalarBytes,
-                           destination: leftScratch, destinationOffset: 0,
-                           columns: k, rows: rowsThisTile,
-                           sourceStride: k, destinationStride: leftRowBytes / scalarBytes)
-            let leftDescriptor = MPSMatrixDescriptor(
-                rows: rowsThisTile, columns: k, rowBytes: leftRowBytes, dataType: .float16)
-            let outputDescriptor = MPSMatrixDescriptor(
-                rows: rowsThisTile, columns: n, rowBytes: resultRowBytes, dataType: .float16)
-            let left = MPSMatrix(
-                buffer: leftScratch, descriptor: leftDescriptor)
-            let result = MPSMatrix(
-                buffer: resultScratch, descriptor: outputDescriptor)
+            let leftRowBytes = mpsLeftRowBytes
+            let resultRowBytes = mpsResultRowBytes
+            // Direct input wrap: construct the MPSMatrix over the existing
+            // input buffer at the tile's row offset (no per-tile copy).
+            let left: MPSMatrix
+            if inputEligible {
+                left = MPSMatrix(
+                    buffer: input,
+                    offset: inputOffset + rowStart * k * scalarBytes,
+                    descriptor: MPSMatrixDescriptor(
+                        rows: rowsThisTile, columns: k,
+                        rowBytes: leftRowBytes, dataType: .float16))
+            } else {
+                let leftScratch = buffers.buffer(
+                    key: "linear.left.fp16", bytes: try checkedProduct(rowsThisTile, leftRowBytes))
+                try encodeCopy(commandBuffer: commandBuffer,
+                               source: input, sourceOffset: inputOffset + rowStart * k * scalarBytes,
+                               destination: leftScratch, destinationOffset: 0,
+                               columns: k, rows: rowsThisTile,
+                               sourceStride: k, destinationStride: leftRowBytes / scalarBytes)
+                left = MPSMatrix(
+                    buffer: leftScratch,
+                    descriptor: MPSMatrixDescriptor(
+                        rows: rowsThisTile, columns: k,
+                        rowBytes: leftRowBytes, dataType: .float16))
+            }
+            // Direct output wrap: MPS writes into the existing output buffer at
+            // the tile's row offset when the tight stride matches.
+            let result: MPSMatrix
+            let resultBuffer: MTLBuffer
+            if outputEligible {
+                result = MPSMatrix(
+                    buffer: output,
+                    offset: outputOffset + rowStart * n * scalarBytes,
+                    descriptor: MPSMatrixDescriptor(
+                        rows: rowsThisTile, columns: n,
+                        rowBytes: resultRowBytes, dataType: .float16))
+                resultBuffer = output
+            } else {
+                let scratch = buffers.buffer(
+                    key: "linear.result.fp16", bytes: try checkedProduct(rowsThisTile, resultRowBytes))
+                result = MPSMatrix(
+                    buffer: scratch,
+                    descriptor: MPSMatrixDescriptor(
+                        rows: rowsThisTile, columns: n,
+                        rowBytes: resultRowBytes, dataType: .float16))
+                resultBuffer = scratch
+            }
             let multiplication = MPSMatrixMultiplication(
                 device: context.device,
                 transposeLeft: false,
@@ -137,12 +188,17 @@ final class LinearExecutor {
                 leftMatrix: left,
                 rightMatrix: right,
                 resultMatrix: result)
-            try encodeCopy(commandBuffer: commandBuffer,
-                           source: resultScratch, sourceOffset: 0,
-                           destination: output,
-                           destinationOffset: outputOffset + rowStart * n * scalarBytes,
-                           columns: n, rows: rowsThisTile,
-                           sourceStride: resultRowBytes / scalarBytes, destinationStride: n)
+            if !outputEligible {
+                // Copy the MPS result scratch back into the tight destination.
+                try encodeCopy(commandBuffer: commandBuffer,
+                               source: resultBuffer, sourceOffset: 0,
+                               destination: output,
+                               destinationOffset: outputOffset + rowStart * n * scalarBytes,
+                               columns: n, rows: rowsThisTile,
+                               sourceStride: resultRowBytes / scalarBytes, destinationStride: n)
+            }
+            metrics?.recordLinearGEMMTile(
+                directInput: inputEligible, directOutput: outputEligible)
             rowStart += rowsThisTile
         }
     }

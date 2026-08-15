@@ -33,13 +33,25 @@ final class DiTBlockExecutor {
     private let activationNumerics: ActivationNumerics
     private let monitor: NumericalMonitor?
     /// Run telemetry collector (nil in tests / diagnostic-only construction).
-    var metrics: MetricsCollector?
+    /// Propagated to the child linear/attention executors so their cheap tile
+    /// counters land in the SAME run metrics object (never a separate one).
+    var metrics: MetricsCollector? {
+        didSet {
+            linear.metrics = metrics
+            attention.metrics = metrics
+        }
+    }
     private var emulatesBF16: Bool { activationNumerics == .bf16Compute }
+
+    /// Number of weight slots backing this block's execution (2 with ping-pong
+    /// ON, 1 with it OFF). Used by `DitForward` to drive the loop shape.
+    var slotCount: Int { streamer.slotCount }
 
     init(context: MetalContext, file: AnimapkFile,
          attentionNumerics: AttentionNumerics = .legacy,
          activationNumerics: ActivationNumerics = .legacy,
-         monitor: NumericalMonitor? = nil) throws {
+         monitor: NumericalMonitor? = nil,
+         optimization: InferenceOptimizationConfig = .currentBaseline) throws {
         let locator = try DiTBlockLocator(file: file)
         guard let maximum = locator.blocks.map(\.length).max(), maximum <= UInt64(Int.max) else {
             throw AnimapkError.validation("invalid DiT execution ranges")
@@ -47,14 +59,21 @@ final class DiTBlockExecutor {
         self.context = context
         self.file = file
         self.locator = locator
-        self.streamer = try WeightStreamer(device: context.device, capacity: Int(maximum), slotCount: 2)
+        // Ping-pong ON keeps the existing two-slot streamer; OFF measures the
+        // same generation with one slot and no look-ahead prefetch.
+        let slotCount = optimization.pingPongWeightStreaming ? 2 : 1
+        self.streamer = try WeightStreamer(device: context.device, capacity: Int(maximum), slotCount: slotCount)
         self.buffers = BufferPool(device: context.device)
-        self.linear = LinearExecutor(context: context)
+        self.linear = LinearExecutor(
+            context: context, tileRows: optimization.linearTileRows,
+            directMPSIO: optimization.directLinearMPSIO)
         self.activationNumerics = activationNumerics
         self.monitor = monitor
         let effectiveAttention = activationNumerics == .bf16Compute && attentionNumerics == .legacy
             ? .bf16Compute : attentionNumerics
-        self.attention = AttentionExecutor(context: context, numerics: effectiveAttention, monitor: monitor)
+        self.attention = AttentionExecutor(
+            context: context, tileRows: optimization.attentionTileRows,
+            numerics: effectiveAttention, monitor: monitor)
     }
 
     /// Mutates `residual` in place. All input buffers are tightly packed and use these types:

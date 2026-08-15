@@ -71,7 +71,10 @@ final class ResumeEquivalenceTests: XCTestCase {
         func makeContextAdapter(context: MetalContext, fileURL: URL) throws -> ContextAdapterStage {
             ProbeAdapter()
         }
-        func makeDiffusion(context: MetalContext, fileURL: URL) throws -> DiffusionStage {
+        func makeDiffusion(
+            context: MetalContext, fileURL: URL,
+            optimization: InferenceOptimizationConfig
+        ) throws -> DiffusionStage {
             let sampler = RecurrenceSampler(maxSteps: maxSteps, onExecute: samplerOnExecute)
             self.sampler = sampler
             return sampler
@@ -223,7 +226,7 @@ final class ResumeEquivalenceTests: XCTestCase {
 
     func testCheckpointValidationAcceptsMatchingInputs() throws {
         let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
-            .appendingPathComponent("AnimaXS-resume-\\(UUID().uuidString)", isDirectory: true))
+            .appendingPathComponent("AnimaXS-resume-\(UUID().uuidString)", isDirectory: true))
         let checkpoint = try makeCheckpoint()
         let step = try store.validate(
             checkpoint, prompt: "p", seed: 7, resolution: (512, 512),
@@ -231,9 +234,30 @@ final class ResumeEquivalenceTests: XCTestCase {
         XCTAssertEqual(step, 3)
     }
 
+    func testCheckpointValidationRejectsTerminalStep() throws {
+        let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-resume-\(UUID().uuidString)", isDirectory: true))
+        // A fully-completed run (step == samplerSteps) has no diffusion left
+        // to resume and must be rejected as non-resumable.
+        let terminal = try makeCheckpoint(step: ModelConstants.samplerSteps)
+        XCTAssertThrowsError(
+            try store.validate(terminal, prompt: "p", seed: 7, resolution: (512, 512),
+                               modelHashes: ModelHashes(dit: "d", textEncoder: "t", vae: "v"))) { error in
+            guard case GenerationError.sampler = error else {
+                return XCTFail("expected sampler validation error, got \(error)")
+            }
+        }
+        // The final PARTIAL step is still resumable.
+        let partial = try makeCheckpoint(step: ModelConstants.samplerSteps - 1)
+        XCTAssertEqual(
+            try store.validate(partial, prompt: "p", seed: 7, resolution: (512, 512),
+                               modelHashes: ModelHashes(dit: "d", textEncoder: "t", vae: "v")),
+            ModelConstants.samplerSteps - 1)
+    }
+
     func testCheckpointValidationRejectsPromptMismatch() throws {
         let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
-            .appendingPathComponent("AnimaXS-resume-\\(UUID().uuidString)", isDirectory: true))
+            .appendingPathComponent("AnimaXS-resume-\(UUID().uuidString)", isDirectory: true))
         let checkpoint = try makeCheckpoint()
         XCTAssertThrowsError(
             try store.validate(checkpoint, prompt: "different", seed: 7,
@@ -243,7 +267,7 @@ final class ResumeEquivalenceTests: XCTestCase {
 
     func testCheckpointValidationRejectsSeedMismatch() throws {
         let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
-            .appendingPathComponent("AnimaXS-resume-\\(UUID().uuidString)", isDirectory: true))
+            .appendingPathComponent("AnimaXS-resume-\(UUID().uuidString)", isDirectory: true))
         let checkpoint = try makeCheckpoint()
         XCTAssertThrowsError(
             try store.validate(checkpoint, prompt: "p", seed: 99,
@@ -253,7 +277,7 @@ final class ResumeEquivalenceTests: XCTestCase {
 
     func testCheckpointValidationRejectsResolutionMismatch() throws {
         let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
-            .appendingPathComponent("AnimaXS-resume-\\(UUID().uuidString)", isDirectory: true))
+            .appendingPathComponent("AnimaXS-resume-\(UUID().uuidString)", isDirectory: true))
         let checkpoint = try makeCheckpoint(width: 1024, height: 1024)
         XCTAssertThrowsError(
             try store.validate(checkpoint, prompt: "p", seed: 7,
@@ -263,7 +287,7 @@ final class ResumeEquivalenceTests: XCTestCase {
 
     func testCheckpointValidationRejectsModelHashMismatch() throws {
         let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
-            .appendingPathComponent("AnimaXS-resume-\\(UUID().uuidString)", isDirectory: true))
+            .appendingPathComponent("AnimaXS-resume-\(UUID().uuidString)", isDirectory: true))
         let checkpoint = try makeCheckpoint()
         XCTAssertThrowsError(
             try store.validate(checkpoint, prompt: "p", seed: 7,
@@ -283,7 +307,7 @@ final class ResumeEquivalenceTests: XCTestCase {
 
     func testCorruptCheckpointFileIsRemovedOnLoad() throws {
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("AnimaXS-resume-\\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("AnimaXS-resume-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = try CheckpointStore(directory: directory)
@@ -295,7 +319,7 @@ final class ResumeEquivalenceTests: XCTestCase {
 
     func testCheckpointStoreRoundTrip() throws {
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("AnimaXS-resume-\\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("AnimaXS-resume-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = try CheckpointStore(directory: directory)

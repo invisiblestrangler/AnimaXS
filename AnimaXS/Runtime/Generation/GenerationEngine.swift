@@ -66,7 +66,10 @@ protocol VAEDecodeStage: AnyObject {
 protocol GenerationStageFactory {
     func makePromptEncoder(context: MetalContext, fileURL: URL) throws -> PromptEncoderStage
     func makeContextAdapter(context: MetalContext, fileURL: URL) throws -> ContextAdapterStage
-    func makeDiffusion(context: MetalContext, fileURL: URL) throws -> DiffusionStage
+    func makeDiffusion(
+        context: MetalContext, fileURL: URL,
+        optimization: InferenceOptimizationConfig
+    ) throws -> DiffusionStage
     func makeVAE(context: MetalContext, fileURL: URL) throws -> VAEDecodeStage
 }
 
@@ -80,8 +83,13 @@ struct ProductionStageFactory: GenerationStageFactory {
         try LLMAdapterMetal(context: context, file: try AnimapkFile(url: fileURL))
     }
 
-    func makeDiffusion(context: MetalContext, fileURL: URL) throws -> DiffusionStage {
-        try DiffusionSampler(context: context, file: try AnimapkFile(url: fileURL))
+    func makeDiffusion(
+        context: MetalContext, fileURL: URL,
+        optimization: InferenceOptimizationConfig
+    ) throws -> DiffusionStage {
+        try DiffusionSampler(
+            context: context, file: try AnimapkFile(url: fileURL),
+            optimization: optimization)
     }
 
     func makeVAE(context: MetalContext, fileURL: URL) throws -> VAEDecodeStage {
@@ -135,6 +143,8 @@ struct GenerationEngine {
     ///                 completed step index and the fp32 latent snapshot.
     ///   - metrics: Optional collector for this run's timing/memory telemetry;
     ///              a private one is created when nil (test path).
+    ///   - optimization: Immutable per-run inference configuration snapshot.
+    ///              Captured at Generate time; never mutated mid-run.
     func generate(
         prompt: String,
         seed: UInt64,
@@ -143,9 +153,11 @@ struct GenerationEngine {
         startStep: Int = 0,
         progress: ProgressCallback? = nil,
         checkpoint: ((Int, [Float]) throws -> Void)? = nil,
-        metrics metricsIn: MetricsCollector? = nil
+        metrics metricsIn: MetricsCollector? = nil,
+        optimization: InferenceOptimizationConfig = .currentBaseline
     ) async throws -> DecodedRGBA8 {
         let metrics = metricsIn ?? MetricsCollector()
+        metrics.recordOptimizationConfig(optimization)
         let generationStart = ProcessInfo.processInfo.systemUptime
         defer {
             metrics.finalize(totalWall: ProcessInfo.processInfo.systemUptime - generationStart)
@@ -186,7 +198,8 @@ struct GenerationEngine {
         let finalLatent = try await diffuse(
             models: models, initialLatent: initialLatent, cross: cross,
             startStep: startStep, totalSteps: totalSteps,
-            progress: progress, checkpoint: checkpoint, metrics: metrics)
+            progress: progress, checkpoint: checkpoint, metrics: metrics,
+            optimization: optimization)
         metrics.endStage(.diffusion)
 
         // ---- 4b. Wan21 latent-format boundary (sampler-space → VAE-space) ----
@@ -258,13 +271,14 @@ struct GenerationEngine {
         models: ResolvedModels, initialLatent: MTLBuffer, cross: MTLBuffer,
         startStep: Int, totalSteps: Int,
         progress: ProgressCallback?, checkpoint: ((Int, [Float]) throws -> Void)?,
-        metrics: MetricsCollector
+        metrics: MetricsCollector, optimization: InferenceOptimizationConfig
     ) async throws -> MTLBuffer {
         guard (0...ModelConstants.samplerSteps).contains(startStep) else {
             throw GenerationError.sampler(
                 "startStep \(startStep) out of range 0...\(ModelConstants.samplerSteps)")
         }
-        let sampler = try factory.makeDiffusion(context: context, fileURL: models.dit)
+        let sampler = try factory.makeDiffusion(
+            context: context, fileURL: models.dit, optimization: optimization)
         // Production path: inject the run's metrics collector into the sampler
         // (and through it the preparation/forward/final-layer/euler executors).
         if let sampler = sampler as? DiffusionSampler {
