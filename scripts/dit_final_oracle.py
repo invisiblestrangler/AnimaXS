@@ -4,6 +4,14 @@
 The equations and dtype boundaries follow pinned ComfyUI commit cbbc9dab:
 `comfy/ldm/cosmos/predict2.py` FinalLayer.forward and MiniTrainDIT.unpatchify.
 This script reads only the three final-layer tensors from the production pack.
+
+W4-ONLY oracle: it casts the large fp32 residual to fp16 before LayerNorm,
+which matches the known-good W4 pack path. It is NOT the numerical authority
+for the W8-v2 pack — W8/source semantics keep the residual in BF16 range
+(source model dtype is bfloat16; predict2.py keeps a bf16 residual stream).
+For W8-v2 correctness use `dit_source_oracle.py` (the pinned torch source
+oracle), which applies BF16 RNE rounding while retaining fp32 storage and
+never converts the large residual to fp16.
 """
 import argparse
 import pathlib

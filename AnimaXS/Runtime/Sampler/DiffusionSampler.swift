@@ -50,8 +50,27 @@ final class DiffusionSampler {
     init(context: MetalContext, file: AnimapkFile,
          attentionNumerics: AttentionNumerics = .legacy,
          activationNumerics: ActivationNumerics = .legacy,
-         optimization: InferenceOptimizationConfig = .currentBaseline) throws {
+         optimization: InferenceOptimizationConfig = .currentBaseline,
+         numerics: DiTNumericsPolicy? = nil) throws {
         self.context = context
+        // When the pack-derived policy is supplied it selects the numerical
+        // fidelity (W8-v2 => BF16 emulation, W4 => legacy). It is derived from
+        // the resolved variant id, never from the app-owned filename.
+        let resolvedActivation: ActivationNumerics
+        let resolvedAttention: AttentionNumerics
+        if let numerics {
+            switch numerics {
+            case .w4Legacy:
+                resolvedActivation = .legacy
+                resolvedAttention = .legacy
+            case .w8BF16Emulated:
+                resolvedActivation = .bf16Compute
+                resolvedAttention = .bf16Compute
+            }
+        } else {
+            resolvedActivation = activationNumerics
+            resolvedAttention = attentionNumerics
+        }
         // Numerical monitoring OFF removes monitor/probe work from the
         // production path (the final CPU finite guard is retained). ON keeps
         // the current production monitor exactly.
@@ -59,11 +78,11 @@ final class DiffusionSampler {
             ? try NumericalMonitor(context: context) : nil
         self.monitor = monitor
         preparation = try DiTPreparationExecutor(
-            context: context, file: file, activationNumerics: activationNumerics,
+            context: context, file: file, activationNumerics: resolvedActivation,
             monitor: monitor)
         forward = try DitForward(
-            context: context, file: file, attentionNumerics: attentionNumerics,
-            activationNumerics: activationNumerics, monitor: monitor,
+            context: context, file: file, attentionNumerics: resolvedAttention,
+            activationNumerics: resolvedActivation, monitor: monitor,
             optimization: optimization)
         euler = EulerSampler(context: context, monitor: monitor)
         buffers = BufferPool(device: context.device)

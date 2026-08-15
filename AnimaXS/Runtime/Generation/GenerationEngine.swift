@@ -99,7 +99,8 @@ protocol GenerationStageFactory {
     func makeContextAdapter(context: MetalContext, fileURL: URL) throws -> ContextAdapterStage
     func makeDiffusion(
         context: MetalContext, fileURL: URL,
-        optimization: InferenceOptimizationConfig
+        optimization: InferenceOptimizationConfig,
+        numerics: DiTNumericsPolicy
     ) throws -> DiffusionStage
     func makeVAE(context: MetalContext, fileURL: URL) throws -> VAEDecodeStage
 }
@@ -116,11 +117,12 @@ struct ProductionStageFactory: GenerationStageFactory {
 
     func makeDiffusion(
         context: MetalContext, fileURL: URL,
-        optimization: InferenceOptimizationConfig
+        optimization: InferenceOptimizationConfig,
+        numerics: DiTNumericsPolicy
     ) throws -> DiffusionStage {
         try DiffusionSampler(
             context: context, file: try AnimapkFile(url: fileURL),
-            optimization: optimization)
+            optimization: optimization, numerics: numerics)
     }
 
     func makeVAE(context: MetalContext, fileURL: URL) throws -> VAEDecodeStage {
@@ -309,7 +311,9 @@ struct GenerationEngine {
                 "startStep \(startStep) out of range 0...\(ModelConstants.samplerSteps)")
         }
         let sampler = try factory.makeDiffusion(
-            context: context, fileURL: models.dit.url, optimization: optimization)
+            context: context, fileURL: models.dit.url,
+            optimization: optimization,
+            numerics: DiTNumericsPolicy.fromVariantID(models.dit.variant.id))
         // Production path: inject the run's metrics collector into the sampler
         // (and through it the preparation/forward/final-layer/euler executors).
         if let sampler = sampler as? DiffusionSampler {

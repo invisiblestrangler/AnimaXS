@@ -54,7 +54,8 @@ final class InferenceOptimizationCoordinatorTests: XCTestCase {
         }
         func makeDiffusion(
             context: MetalContext, fileURL: URL,
-            optimization: InferenceOptimizationConfig
+            optimization: InferenceOptimizationConfig,
+            numerics: DiTNumericsPolicy
         ) throws -> DiffusionStage {
             capturedConfig = optimization
             return ProbeSampler()
@@ -200,7 +201,8 @@ final class InferenceOptimizationCoordinatorTests: XCTestCase {
         }
         func makeDiffusion(
             context: MetalContext, fileURL: URL,
-            optimization: InferenceOptimizationConfig
+            optimization: InferenceOptimizationConfig,
+            numerics: DiTNumericsPolicy
         ) throws -> DiffusionStage {
             let sampler = SuspendSampler()
             self.sampler = sampler

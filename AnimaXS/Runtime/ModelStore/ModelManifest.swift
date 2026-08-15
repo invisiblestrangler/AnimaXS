@@ -48,6 +48,23 @@ struct ModelVariantDescriptor: Equatable {
     let sha256: String
 }
 
+/// The numerical-fidelity policy for a DiT pack, derived from the resolved
+/// pack variant id — never from the app-owned local filename.
+///
+/// - `w4Legacy`: the known-good current W4 path (FP16 boundaries as today).
+/// - `w8BF16Emulated`: the W8-v2 pack whose source semantics require a
+///   BF16-like range at compute boundaries. On Apple5/A12 (no native BF16
+///   storage) this is emulated as BF16 RNE rounding while retaining FP32
+///   storage, mapping onto the existing `ActivationNumerics` BF16 machinery.
+enum DiTNumericsPolicy: String, Equatable {
+    case w4Legacy
+    case w8BF16Emulated
+
+    static func fromVariantID(_ id: String) -> DiTNumericsPolicy {
+        id == "w8-v2" ? .w8BF16Emulated : .w4Legacy
+    }
+}
+
 enum ModelManifest {
     static let releaseTag = "model-assets-v1"
     private static let releaseBase = URL(

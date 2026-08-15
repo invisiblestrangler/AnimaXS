@@ -149,7 +149,8 @@ final class GenerationCoordinatorTests: XCTestCase {
         }
         func makeDiffusion(
             context: MetalContext, fileURL: URL,
-            optimization: InferenceOptimizationConfig
+            optimization: InferenceOptimizationConfig,
+            numerics: DiTNumericsPolicy
         ) throws -> DiffusionStage {
             lock.lock(); calls.append(Call(stage: "sampler", url: fileURL)); lock.unlock()
             return ProbeSampler(onExecute: samplerOnExecute)
@@ -241,7 +242,8 @@ final class GenerationCoordinatorTests: XCTestCase {
         }
         func makeDiffusion(
             context: MetalContext, fileURL: URL,
-            optimization: InferenceOptimizationConfig
+            optimization: InferenceOptimizationConfig,
+            numerics: DiTNumericsPolicy
         ) throws -> DiffusionStage {
             let sampler = ProbeSampler()
             self.sampler = sampler
@@ -360,7 +362,8 @@ final class GenerationCoordinatorTests: XCTestCase {
         }
         func makeDiffusion(
             context: MetalContext, fileURL: URL,
-            optimization: InferenceOptimizationConfig
+            optimization: InferenceOptimizationConfig,
+            numerics: DiTNumericsPolicy
         ) throws -> DiffusionStage {
             ProbeSampler()
         }
@@ -446,7 +449,8 @@ final class GenerationCoordinatorTests: XCTestCase {
         }
         func makeDiffusion(
             context: MetalContext, fileURL: URL,
-            optimization: InferenceOptimizationConfig
+            optimization: InferenceOptimizationConfig,
+            numerics: DiTNumericsPolicy
         ) throws -> DiffusionStage {
             lock.lock(); calls.append(Call(stage: "sampler")); lock.unlock()
             let sampler = BlockingSampler()
@@ -857,7 +861,8 @@ final class GenerationCoordinatorTests: XCTestCase {
         }
         func makeDiffusion(
             context: MetalContext, fileURL: URL,
-            optimization: InferenceOptimizationConfig
+            optimization: InferenceOptimizationConfig,
+            numerics: DiTNumericsPolicy
         ) throws -> DiffusionStage {
             let sampler = LifecycleSampler()
             self.sampler = sampler
@@ -912,7 +917,8 @@ final class GenerationCoordinatorTests: XCTestCase {
         }
         func makeDiffusion(
             context: MetalContext, fileURL: URL,
-            optimization: InferenceOptimizationConfig
+            optimization: InferenceOptimizationConfig,
+            numerics: DiTNumericsPolicy
         ) throws -> DiffusionStage {
             let probe = ProbeSampler()
             register(probe)

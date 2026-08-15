@@ -73,7 +73,8 @@ final class ResumeEquivalenceTests: XCTestCase {
         }
         func makeDiffusion(
             context: MetalContext, fileURL: URL,
-            optimization: InferenceOptimizationConfig
+            optimization: InferenceOptimizationConfig,
+            numerics: DiTNumericsPolicy
         ) throws -> DiffusionStage {
             let sampler = RecurrenceSampler(maxSteps: maxSteps, onExecute: samplerOnExecute)
             self.sampler = sampler

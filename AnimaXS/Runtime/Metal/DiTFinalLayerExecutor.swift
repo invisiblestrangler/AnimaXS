@@ -68,19 +68,36 @@ final class DiTFinalLayerExecutor {
         try encodeComputeBoundary(command, modulation, count: Self.modulationSize)
 
         // predict2.py:930 casts the large fp32 residual to cross-attention dtype
-        // before FinalLayer. Make that fp16 boundary explicit before fp32-stat LayerNorm.
-        let residualHalf = buffer("final.residual.f16", Self.tokens * Self.dim, Float16.self)
-        let boundaryFloat = buffer("final.boundary.f32", Self.tokens * Self.dim, Float.self)
+        // before FinalLayer. For W4 (legacy) that is an fp16 boundary followed by
+        // an fp32-stat LayerNorm — the known-good path. For W8-v2 (BF16 emulated),
+        // an FP16 conversion of the large residual would overflow above 65,504, so
+        // the residual is rounded to BF16 RNE while retained in fp32 storage, and
+        // LayerNorm runs in fp32 over those BF16-rounded values (source-faithful).
         let normalized = buffer("final.normalized.f32", Self.tokens * Self.dim, Float.self)
         let normalizedHalf = buffer("final.normalized.f16", Self.tokens * Self.dim, Float16.self)
         let normalizedBoundary = buffer(
             "final.normalizedBoundary.f32", Self.tokens * Self.dim, Float.self)
         let modulated = buffer("final.modulated.f32", Self.tokens * Self.dim, Float.self)
         let projectionInput = buffer("final.projectionInput.f16", Self.tokens * Self.dim, Float16.self)
-        try encodeProbeConvert(command, "float_to_half", residual, residualHalf,
-                               Self.tokens * Self.dim, probe: .finalResidualToHalf)
-        try encodeUnary(command, "half_to_float", residualHalf, boundaryFloat, Self.tokens * Self.dim)
-        try encodeLayerNorm(command, input: boundaryFloat, output: normalized)
+
+        if emulatesBF16 {
+            // W8-v2: BF16 RNE rounding of the large residual while stored in FP32,
+            // then LayerNorm in FP32 over the BF16-rounded values. The large
+            // residual is never converted to half here.
+            let boundaryFloat = buffer("final.boundary.f32", Self.tokens * Self.dim, Float.self)
+            try encodeUnary(command, "round_f32_to_bf16", residual, boundaryFloat,
+                            Self.tokens * Self.dim)
+            try encodeLayerNorm(command, input: boundaryFloat, output: normalized)
+        } else {
+            // W4 legacy: fp16 residual boundary then fp32-stat LayerNorm (unchanged).
+            let residualHalf = buffer("final.residual.f16", Self.tokens * Self.dim, Float16.self)
+            let boundaryFloat = buffer("final.boundary.f32", Self.tokens * Self.dim, Float.self)
+            try encodeProbeConvert(command, "float_to_half", residual, residualHalf,
+                                   Self.tokens * Self.dim, probe: .finalResidualToHalf)
+            try encodeUnary(command, "half_to_float", residualHalf, boundaryFloat,
+                            Self.tokens * Self.dim)
+            try encodeLayerNorm(command, input: boundaryFloat, output: normalized)
+        }
         // torch.layer_norm preserves its fp16 input dtype. AdaLN then promotes the
         // rounded norm output when adding the fp32 shift/scale tensors.
         try encodeProbeConvert(command, "float_to_half", normalized, normalizedHalf,
