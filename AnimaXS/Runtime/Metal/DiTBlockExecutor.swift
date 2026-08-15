@@ -235,6 +235,10 @@ final class DiTBlockExecutor {
                                         output: projectionInput, rows: Self.tokens,
                                         columns: Self.dim,
                                         probe: cross ? .crossProjectionInput : .selfProjectionInput)
+            // P3: the fused pass no longer materializes the two fp32
+            // intermediates (norm + modulated), so record that saved traffic.
+            metrics?.recordFusedTrafficSaved(
+                UInt64(Self.tokens * Self.dim * MemoryLayout<Float>.stride) * 2)
         } else {
             // Legacy three-pass path, kept exactly for A/B.
             let norm = buffer("dit.norm.f32", Self.tokens * Self.dim, Float.self)
@@ -362,6 +366,10 @@ final class DiTBlockExecutor {
             // intermediate and no conversion passes.
             try encodeFusedGELUHalf(command, values: hiddenHalf,
                                     count: Self.tokens * Self.hidden, probe: .mlpHiddenToHalf)
+            // P3: the fused path no longer materializes the fp32 hidden GELU
+            // intermediate, so record that saved traffic.
+            metrics?.recordFusedTrafficSaved(
+                UInt64(Self.tokens * Self.hidden * MemoryLayout<Float>.stride))
         } else {
             // Legacy path, kept exactly for A/B.
             let hiddenFloat = buffer("dit.hidden.f32", Self.tokens * Self.hidden, Float.self)

@@ -44,6 +44,10 @@ struct DiffusionStepMetrics: Equatable {
     var dequantizedWeightBytesWritten: UInt64 = 0
     var transposeBytes: UInt64 = 0
     var conversionBytes: UInt64 = 0
+    /// P3: activation traffic eliminated by the fused paths (norm/modulated
+    /// fp32 intermediates, hidden fp32 GELU intermediate). Recorded on the
+    /// fused path only; legacy path records 0.
+    var fusedTrafficSavedBytes: UInt64 = 0
     var crossKVHits: Int = 0
     var crossKVMisses: Int = 0
     var mmapNoCopyBytes: UInt64 = 0
@@ -87,6 +91,10 @@ struct GenerationMetrics: Equatable {
     var dequantizedWeightBytesWritten: UInt64 = 0
     var transposeBytes: UInt64 = 0
     var conversionBytes: UInt64 = 0
+    /// P3: activation traffic eliminated by the fused paths (fused
+    /// LayerNorm+AdaLN+to-half, in-place half GELU). See
+    /// `DiffusionStepMetrics.fusedTrafficSavedBytes`.
+    var fusedTrafficSavedBytes: UInt64 = 0
 
     // Weight streaming + Metal accounting (seconds)
     var weightCopyTime: Double = 0
@@ -208,6 +216,10 @@ struct GenerationMetrics: Equatable {
                                 Double(transposeBytes) / 1_048_576))
             lines.append(String(format: "conversion bytes: %.0f MB",
                                 Double(conversionBytes) / 1_048_576))
+            if fusedTrafficSavedBytes > 0 {
+                lines.append(String(format: "fused activation traffic saved: %.0f MB",
+                                    Double(fusedTrafficSavedBytes) / 1_048_576))
+            }
             lines.append("")
         }
         lines.append(String(format: "Peak Metal allocation: %.2f GB",
@@ -396,6 +408,18 @@ final class MetricsCollector {
         metrics.conversionBytes += bytes
         if let index = activeStepIndex {
             metrics.stepMetrics[index].conversionBytes += bytes
+        }
+    }
+
+    /// P3: activation traffic ELIMINATED by a fused path (e.g. the fp32
+    /// norm/modulated intermediates or the fp32 MLP GELU intermediate that the
+    /// fused kernel no longer materializes). Recorded on the fused path only;
+    /// the legacy path records 0. Proves an optimization removed traffic even
+    /// when thermal conditions make raw wall time noisy.
+    func recordFusedTrafficSaved(_ bytes: UInt64) {
+        metrics.fusedTrafficSavedBytes += bytes
+        if let index = activeStepIndex {
+            metrics.stepMetrics[index].fusedTrafficSavedBytes += bytes
         }
     }
 
