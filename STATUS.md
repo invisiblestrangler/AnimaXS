@@ -60,7 +60,11 @@ The first physical-device run exposed bugs that simulator/CI did not catch:
   the baseline.
 - **Xcode project:** regenerated via `bootstrap-project.yml` (bot commit
   `64c11e0`).
-- **Normal CI:** run/pending — project-consistency, iphone-build,
-  simulator-tests.
+- **Normal CI:** PASS (run `31874533573`) — project-consistency ✓,
+  iphone-build ✓, simulator-tests ✓ (264 tests, 0 failures, 14 expected
+  real-pack-gated skips).
+- **Full-inference correctness gate:** PASS (run `31874824950`) —
+  `FULL_INFERENCE=PASS`, latent cosine 0.866, RGB cosine 0.8198 (matches the
+  pre-change baseline), `FULL_STRESS=PASS`, 2/2 tests.
 - **Real-device results:** PENDING — no device speedup is claimed from
   simulator/macOS tests. The seven-run matrix is in DEVICE_TESTS.md.
