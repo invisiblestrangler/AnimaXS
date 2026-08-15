@@ -14,6 +14,8 @@ import Foundation
 /// - Direct MPS linear I/O: OFF (per-tile copy path)
 /// - Ping-pong weight streaming: ON (existing two-slot behavior)
 /// - Numerical monitor: ON (existing production probes)
+/// - Fused LayerNorm+AdaLN+to-half: OFF (separate norm/modulated fp32 buffers)
+/// - Fused MLP in-place half GELU: OFF (fp32 hidden GELU intermediate)
 ///
 /// The DiT pack is whichever variant (W4 or W8-v2) was imported into the
 /// `.dit` slot; it is resolved by `ModelStore` and is not a config choice.
@@ -25,13 +27,25 @@ struct InferenceOptimizationConfig: Equatable {
     var directLinearMPSIO: Bool
     var pingPongWeightStreaming: Bool
     var numericalMonitoring: Bool
+    /// P3-A: fuse LayerNorm + AdaLN modulation + compute-boundary + fp16
+    /// conversion into ONE kernel, eliminating the `dit.norm.f32` and
+    /// `dit.modulated.f32` (16 MiB total) intermediates. False keeps the
+    /// legacy three-pass path exactly for A/B.
+    var fusedNormModulation: Bool
+    /// P3-B: evaluate GELU in-place on the fp16 MLP hidden activations
+    /// (fp32 register arithmetic, optional BF16 rounding), eliminating the
+    /// ~32 MiB `dit.hidden.f32` intermediate and its four passes. False
+    /// keeps the legacy half→float→GELU→round→to-half path.
+    var fusedMLPActivation: Bool
 
     static let currentBaseline = InferenceOptimizationConfig(
         linearTileRows: 128,
         attentionTileRows: 128,
         directLinearMPSIO: false,
         pingPongWeightStreaming: true,
-        numericalMonitoring: true
+        numericalMonitoring: true,
+        fusedNormModulation: false,
+        fusedMLPActivation: false
     )
 
     /// Sanitizes a tile-row value down to the nearest allowed value (or the

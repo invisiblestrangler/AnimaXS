@@ -158,6 +158,10 @@ struct DiagnosticsView: View {
                 .disabled(isGenerating)
             Toggle("Numerical monitor", isOn: numericalMonitorBinding)
                 .disabled(isGenerating)
+            Toggle("Fused LayerNorm+AdaLN+to-half", isOn: fusedNormModulationBinding)
+                .disabled(isGenerating)
+            Toggle("Fused MLP in-place GELU", isOn: fusedMLPActivationBinding)
+                .disabled(isGenerating)
             Button("Reset to current baseline") {
                 optimizationSettings.resetToBaseline()
             }
@@ -198,6 +202,18 @@ struct DiagnosticsView: View {
         Binding(
             get: { optimizationSettings.numericalMonitoring },
             set: { optimizationSettings.setNumericalMonitoring($0) })
+    }
+
+    private var fusedNormModulationBinding: Binding<Bool> {
+        Binding(
+            get: { optimizationSettings.fusedNormModulation },
+            set: { optimizationSettings.setFusedNormModulation($0) })
+    }
+
+    private var fusedMLPActivationBinding: Binding<Bool> {
+        Binding(
+            get: { optimizationSettings.fusedMLPActivation },
+            set: { optimizationSettings.setFusedMLPActivation($0) })
     }
 
     @ViewBuilder

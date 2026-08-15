@@ -15,6 +15,8 @@ final class InferenceOptimizationSettings: ObservableObject {
         static let directLinearMPSIO = "inference.directLinearMPSIO"
         static let pingPongWeightStreaming = "inference.pingPongWeightStreaming"
         static let numericalMonitoring = "inference.numericalMonitoring"
+        static let fusedNormModulation = "inference.fusedNormModulation"
+        static let fusedMLPActivation = "inference.fusedMLPActivation"
     }
 
     private let defaults: UserDefaults
@@ -24,6 +26,8 @@ final class InferenceOptimizationSettings: ObservableObject {
     @Published private(set) var directLinearMPSIO: Bool
     @Published private(set) var pingPongWeightStreaming: Bool
     @Published private(set) var numericalMonitoring: Bool
+    @Published private(set) var fusedNormModulation: Bool
+    @Published private(set) var fusedMLPActivation: Bool
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -40,6 +44,10 @@ final class InferenceOptimizationSettings: ObservableObject {
             ?? baseline.pingPongWeightStreaming
         numericalMonitoring = defaults.object(forKey: Keys.numericalMonitoring) as? Bool
             ?? baseline.numericalMonitoring
+        fusedNormModulation = defaults.object(forKey: Keys.fusedNormModulation) as? Bool
+            ?? baseline.fusedNormModulation
+        fusedMLPActivation = defaults.object(forKey: Keys.fusedMLPActivation) as? Bool
+            ?? baseline.fusedMLPActivation
     }
 
     // MARK: - Mutations (validate before persist)
@@ -69,6 +77,16 @@ final class InferenceOptimizationSettings: ObservableObject {
         defaults.set(value, forKey: Keys.numericalMonitoring)
     }
 
+    func setFusedNormModulation(_ value: Bool) {
+        fusedNormModulation = value
+        defaults.set(value, forKey: Keys.fusedNormModulation)
+    }
+
+    func setFusedMLPActivation(_ value: Bool) {
+        fusedMLPActivation = value
+        defaults.set(value, forKey: Keys.fusedMLPActivation)
+    }
+
     /// Immutable snapshot of the current settings, used by a single
     /// generation. Never mutated mid-run.
     var snapshot: InferenceOptimizationConfig {
@@ -77,7 +95,9 @@ final class InferenceOptimizationSettings: ObservableObject {
             attentionTileRows: attentionTileRows,
             directLinearMPSIO: directLinearMPSIO,
             pingPongWeightStreaming: pingPongWeightStreaming,
-            numericalMonitoring: numericalMonitoring
+            numericalMonitoring: numericalMonitoring,
+            fusedNormModulation: fusedNormModulation,
+            fusedMLPActivation: fusedMLPActivation
         )
     }
 
@@ -90,11 +110,15 @@ final class InferenceOptimizationSettings: ObservableObject {
         directLinearMPSIO = baseline.directLinearMPSIO
         pingPongWeightStreaming = baseline.pingPongWeightStreaming
         numericalMonitoring = baseline.numericalMonitoring
+        fusedNormModulation = baseline.fusedNormModulation
+        fusedMLPActivation = baseline.fusedMLPActivation
         defaults.set(baseline.linearTileRows, forKey: Keys.linearTileRows)
         defaults.set(baseline.attentionTileRows, forKey: Keys.attentionTileRows)
         defaults.set(baseline.directLinearMPSIO, forKey: Keys.directLinearMPSIO)
         defaults.set(baseline.pingPongWeightStreaming, forKey: Keys.pingPongWeightStreaming)
         defaults.set(baseline.numericalMonitoring, forKey: Keys.numericalMonitoring)
+        defaults.set(baseline.fusedNormModulation, forKey: Keys.fusedNormModulation)
+        defaults.set(baseline.fusedMLPActivation, forKey: Keys.fusedMLPActivation)
     }
 
     // MARK: - Loading
