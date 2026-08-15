@@ -18,6 +18,7 @@ final class InferenceOptimizationSettings: ObservableObject {
         static let fusedNormModulation = "inference.fusedNormModulation"
         static let fusedMLPActivation = "inference.fusedMLPActivation"
         static let stridedTokenMajorAttention = "inference.stridedTokenMajorAttention"
+        static let crossKVCache = "inference.crossKVCache"
     }
 
     private let defaults: UserDefaults
@@ -30,6 +31,7 @@ final class InferenceOptimizationSettings: ObservableObject {
     @Published private(set) var fusedNormModulation: Bool
     @Published private(set) var fusedMLPActivation: Bool
     @Published private(set) var stridedTokenMajorAttention: Bool
+    @Published private(set) var crossKVCache: Bool
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -52,6 +54,8 @@ final class InferenceOptimizationSettings: ObservableObject {
             ?? baseline.fusedMLPActivation
         stridedTokenMajorAttention = defaults.object(forKey: Keys.stridedTokenMajorAttention) as? Bool
             ?? baseline.stridedTokenMajorAttention
+        crossKVCache = defaults.object(forKey: Keys.crossKVCache) as? Bool
+            ?? baseline.crossKVCache
     }
 
     // MARK: - Mutations (validate before persist)
@@ -96,6 +100,11 @@ final class InferenceOptimizationSettings: ObservableObject {
         defaults.set(value, forKey: Keys.stridedTokenMajorAttention)
     }
 
+    func setCrossKVCache(_ value: Bool) {
+        crossKVCache = value
+        defaults.set(value, forKey: Keys.crossKVCache)
+    }
+
     /// Immutable snapshot of the current settings, used by a single
     /// generation. Never mutated mid-run.
     var snapshot: InferenceOptimizationConfig {
@@ -107,7 +116,8 @@ final class InferenceOptimizationSettings: ObservableObject {
             numericalMonitoring: numericalMonitoring,
             fusedNormModulation: fusedNormModulation,
             fusedMLPActivation: fusedMLPActivation,
-            stridedTokenMajorAttention: stridedTokenMajorAttention
+            stridedTokenMajorAttention: stridedTokenMajorAttention,
+            crossKVCache: crossKVCache
         )
     }
 
@@ -123,6 +133,7 @@ final class InferenceOptimizationSettings: ObservableObject {
         fusedNormModulation = baseline.fusedNormModulation
         fusedMLPActivation = baseline.fusedMLPActivation
         stridedTokenMajorAttention = baseline.stridedTokenMajorAttention
+        crossKVCache = baseline.crossKVCache
         defaults.set(baseline.linearTileRows, forKey: Keys.linearTileRows)
         defaults.set(baseline.attentionTileRows, forKey: Keys.attentionTileRows)
         defaults.set(baseline.directLinearMPSIO, forKey: Keys.directLinearMPSIO)
@@ -131,6 +142,7 @@ final class InferenceOptimizationSettings: ObservableObject {
         defaults.set(baseline.fusedNormModulation, forKey: Keys.fusedNormModulation)
         defaults.set(baseline.fusedMLPActivation, forKey: Keys.fusedMLPActivation)
         defaults.set(baseline.stridedTokenMajorAttention, forKey: Keys.stridedTokenMajorAttention)
+        defaults.set(baseline.crossKVCache, forKey: Keys.crossKVCache)
     }
 
     // MARK: - Loading

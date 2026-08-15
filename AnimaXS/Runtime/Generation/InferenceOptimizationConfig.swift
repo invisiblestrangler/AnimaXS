@@ -43,6 +43,14 @@ struct InferenceOptimizationConfig: Equatable {
     /// exactly for A/B. Only affects DiT attention; Qwen/VAE/adapter attention
     /// is always head-major.
     var stridedTokenMajorAttention: Bool
+    /// P5: cache the invariant cross-attention K/V for the whole generation.
+    /// Cross context is fixed for a generation, so after the first executed
+    /// step each DiT block's cross K/V (post-projection, post-static-boundary,
+    /// post-K-normalization) are reused from a per-generation `CrossKVCache`
+    /// instead of being re-projected every step. EXACT reuse — no
+    /// approximation; Q stays dynamic and is never cached. False keeps the
+    /// legacy per-step cross K/V projection path exactly for A/B.
+    var crossKVCache: Bool
 
     static let currentBaseline = InferenceOptimizationConfig(
         linearTileRows: 128,
@@ -52,7 +60,8 @@ struct InferenceOptimizationConfig: Equatable {
         numericalMonitoring: true,
         fusedNormModulation: false,
         fusedMLPActivation: false,
-        stridedTokenMajorAttention: false
+        stridedTokenMajorAttention: false,
+        crossKVCache: false
     )
 
     /// Sanitizes a tile-row value down to the nearest allowed value (or the

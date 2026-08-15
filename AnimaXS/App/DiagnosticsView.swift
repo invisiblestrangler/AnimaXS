@@ -164,6 +164,8 @@ struct DiagnosticsView: View {
                 .disabled(isGenerating)
             Toggle("Strided token-major attention (P4)", isOn: stridedTokenMajorAttentionBinding)
                 .disabled(isGenerating)
+            Toggle("Cross-attention K/V cache (P5)", isOn: crossKVCacheBinding)
+                .disabled(isGenerating)
             Button("Reset to current baseline") {
                 optimizationSettings.resetToBaseline()
             }
@@ -222,6 +224,12 @@ struct DiagnosticsView: View {
         Binding(
             get: { optimizationSettings.stridedTokenMajorAttention },
             set: { optimizationSettings.setStridedTokenMajorAttention($0) })
+    }
+
+    private var crossKVCacheBinding: Binding<Bool> {
+        Binding(
+            get: { optimizationSettings.crossKVCache },
+            set: { optimizationSettings.setCrossKVCache($0) })
     }
 
     @ViewBuilder
