@@ -103,6 +103,10 @@ final class AttentionExecutor {
     ) throws {
         let kvHeads = keyValueHeads ?? heads
         let inputLayout = layout ?? self.layout
+        let tokenStride: Int? = {
+            if case .tokenMajor(let stride) = inputLayout { return stride }
+            return nil
+        }()
         try validate(query: query, queryOffset: queryOffset, key: key, keyOffset: keyOffset,
                      value: value, valueOffset: valueOffset, output: output,
                      outputOffset: outputOffset, heads: heads, queryCount: queryCount,
@@ -139,6 +143,11 @@ final class AttentionExecutor {
             guard numerics != .bf16Compute else {
                 throw AnimapkError.validation(
                     "P4 strided token-major attention does not support bf16Compute numerics; select baseline numerics")
+            }
+            // Guaranteed non-nil here: isTokenMajor is true only for .tokenMajor.
+            guard let tokenStride else {
+                throw AnimapkError.validation(
+                    "P4 token-major attention requires a token stride")
             }
             try encodeTokenMajor(
                 commandBuffer: commandBuffer, query: query, queryOffset: queryOffset,
