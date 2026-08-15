@@ -22,6 +22,7 @@
 		1E5F02B63F97DE467DB56E70 /* Wan21LatentFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8C434A9F5154FAA0D0A520E /* Wan21LatentFormat.swift */; };
 		1EAFF581CD122DEE34EDD2B3 /* DiagnosticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A7E9F272444BEB44115AC498 /* DiagnosticsTests.swift */; };
 		210604DAFAC40536E7AAE5A6 /* NumericalFailure.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B294BF93F8ED47DB24837D5 /* NumericalFailure.swift */; };
+		21C4B40467553A3419E80735 /* GenerationMetrics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4CAEA04E0522568EBC384E5A /* GenerationMetrics.swift */; };
 		21F05B3A1A0BB661716C0512 /* TokenizerParityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1319CA9D168F08F49BA3EB /* TokenizerParityTests.swift */; };
 		22A697C29A4FE1F67A25D118 /* DitForward.swift in Sources */ = {isa = PBXBuildFile; fileRef = E29ABBFCD1EDD87F59CA9008 /* DitForward.swift */; };
 		24E784492B6C7FD49E64D227 /* LinearExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9346A85EC2056315DFCE66D /* LinearExecutor.swift */; };
@@ -69,6 +70,7 @@
 		8E5DA5D7D9950B728513D3E5 /* GqaHeadMappingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2D891A141A49EBC60BDB3DA /* GqaHeadMappingTests.swift */; };
 		8F07F57A8F85D199B51B2F3C /* AnimapkRangeLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C22C2203066EFC03BF7FB83 /* AnimapkRangeLocator.swift */; };
 		914187C1B6254DDCA7ED3C32 /* QwenNumerics.swift in Sources */ = {isa = PBXBuildFile; fileRef = E0EFD572B87262AE5AAEB996 /* QwenNumerics.swift */; };
+		93117544808FFF10C31B4406 /* GenerationMetricsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B89A09F592DAF689C8D75745 /* GenerationMetricsTests.swift */; };
 		938A4049C06BE05E39F6BCC1 /* MetalContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F6A1853CF522E32A3743ACB /* MetalContext.swift */; };
 		959382291D4CE941AC176BEC /* StageConformances.swift in Sources */ = {isa = PBXBuildFile; fileRef = C3E243B29F63E716A7FA5916 /* StageConformances.swift */; };
 		96A3E7AC0E8DAFE6CAF9490A /* case1_decoded_rgb8.bin in Resources */ = {isa = PBXBuildFile; fileRef = 5679855EA2DD29C171356B8B /* case1_decoded_rgb8.bin */; };
@@ -158,6 +160,7 @@
 		4C7A6A2DAA97C767D88AE25B /* AnimaKernels.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = AnimaKernels.metal; sourceTree = "<group>"; };
 		4C8E968875980A2C9ACC94E5 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		4C8ECADAF128C534D8C999BA /* FP16ConvolutionExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FP16ConvolutionExecutor.swift; sourceTree = "<group>"; };
+		4CAEA04E0522568EBC384E5A /* GenerationMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationMetrics.swift; sourceTree = "<group>"; };
 		4D8B417D7B9040B477BC8CA5 /* DiTWeights.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTWeights.swift; sourceTree = "<group>"; };
 		4E06FAF105B940FAA003D9C8 /* NumericalFailureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NumericalFailureTests.swift; sourceTree = "<group>"; };
 		4E9210A1BDCCB8F59CE8B971 /* VAEDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VAEDecoder.swift; sourceTree = "<group>"; };
@@ -198,6 +201,7 @@
 		A85A8F3F27A84580E23A837E /* ResumeEquivalenceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ResumeEquivalenceTests.swift; sourceTree = "<group>"; };
 		A9346A85EC2056315DFCE66D /* LinearExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinearExecutor.swift; sourceTree = "<group>"; };
 		B55416DCCBC54FD863B0137D /* case1_noise.f32 */ = {isa = PBXFileReference; path = case1_noise.f32; sourceTree = "<group>"; };
+		B89A09F592DAF689C8D75745 /* GenerationMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationMetricsTests.swift; sourceTree = "<group>"; };
 		BAA4F55FCC168791651401D2 /* DiagnosticsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsView.swift; sourceTree = "<group>"; };
 		BE9A7C6882C9A11F40FD3816 /* RGBConverter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RGBConverter.swift; sourceTree = "<group>"; };
 		BF7F7DDF80FF8FC3729F608B /* SeededRNG.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SeededRNG.swift; sourceTree = "<group>"; };
@@ -447,6 +451,7 @@
 			children = (
 				D72261C40210A36E49DDDEA3 /* DiagnosticRunMarker.swift */,
 				D8D449E301EA6883835AE7CC /* DiagnosticsEngine.swift */,
+				4CAEA04E0522568EBC384E5A /* GenerationMetrics.swift */,
 				FFE9533852B9860844811FA0 /* NumericalMonitor.swift */,
 			);
 			path = Diagnostics;
@@ -482,6 +487,7 @@
 				82B32CF88BF83EC3BF4BB22B /* FullInferenceTests.swift */,
 				607907C1088D17DCE300B330 /* GenerationCoordinatorTests.swift */,
 				0CF208C2B8AA9B1CF5DA45AA /* GenerationEligibilityTests.swift */,
+				B89A09F592DAF689C8D75745 /* GenerationMetricsTests.swift */,
 				D2D891A141A49EBC60BDB3DA /* GqaHeadMappingTests.swift */,
 				E00F7AC0D57A13E91CB5F434 /* LinearExecutorTests.swift */,
 				C509546307CB21BE0D1A9146 /* LLMAdapterTests.swift */,
@@ -639,6 +645,7 @@
 				81DF10FC8BD278FEC6C92E2A /* FullInferenceTests.swift in Sources */,
 				FD6BD88253F6B09E884AEB25 /* GenerationCoordinatorTests.swift in Sources */,
 				DE45F5CF8232AA6605B49463 /* GenerationEligibilityTests.swift in Sources */,
+				93117544808FFF10C31B4406 /* GenerationMetricsTests.swift in Sources */,
 				8E5DA5D7D9950B728513D3E5 /* GqaHeadMappingTests.swift in Sources */,
 				7DB2CBB89F9ABC72D09B6089 /* LLMAdapterTests.swift in Sources */,
 				36DCBB069B8AE8C6D90A5115 /* LinearExecutorTests.swift in Sources */,
@@ -695,6 +702,7 @@
 				624C64646074B2239B939623 /* GenerationCoordinator.swift in Sources */,
 				6C1C60DD3DC67A8F64BD5BEA /* GenerationEligibility.swift in Sources */,
 				D7BF749539EBEF04781FBDE2 /* GenerationEngine.swift in Sources */,
+				21C4B40467553A3419E80735 /* GenerationMetrics.swift in Sources */,
 				263D4D4D7FB4D3766DF07296 /* LLMAdapter.swift in Sources */,
 				10ECAB707F0D3BF55B5F9884 /* LLMAdapterMetal.swift in Sources */,
 				24E784492B6C7FD49E64D227 /* LinearExecutor.swift in Sources */,
