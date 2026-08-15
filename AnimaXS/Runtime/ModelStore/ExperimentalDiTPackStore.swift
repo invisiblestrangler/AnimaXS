@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// The verified metadata an experimental DiT pack must satisfy. The production
@@ -49,26 +50,28 @@ actor ExperimentalDiTPackStore {
         case failed(String)
     }
 
-    typealias Verifier = (URL) throws -> String
     typealias CapacityProvider = (URL) throws -> Int64
 
     private let directory: URL
     private let spec: ExperimentalDiTPackSpec
-    private let verifier: Verifier
     private let availableCapacity: CapacityProvider
     private let secureInstalls: Bool
+    /// Read/write chunk size for the single-pass copy+hash stream. Production
+    /// defaults to 1 MiB (bounded memory); tests inject a tiny value to force
+    /// many stream iterations without a multi-GB fixture.
+    private let chunkBytes: Int
     private var state: State = .missing
 
     private static let diskReserve: Int64 = 256 * 1_024 * 1_024
 
     /// Creates the store for a given spec. Tests inject a tiny spec and a
-    /// custom verifier; production uses the pinned W8 v2 spec.
+    /// small chunk size; production uses the pinned W8 v2 spec at 1 MiB.
     init(
         directory: URL? = nil,
         spec: ExperimentalDiTPackSpec = PinnedExperimentalW8Spec(),
-        verifier: Verifier? = nil,
         availableCapacity: CapacityProvider? = nil,
-        secureInstalls: Bool = true
+        secureInstalls: Bool = true,
+        chunkBytes: Int = 1 << 20
     ) throws {
         if let directory {
             self.directory = directory
@@ -80,9 +83,9 @@ actor ExperimentalDiTPackStore {
                 "AnimaXS/ExperimentalModels", isDirectory: true)
         }
         self.spec = spec
-        self.verifier = verifier ?? Self.sha256Verifier
         self.availableCapacity = availableCapacity ?? Self.defaultCapacityProvider()
         self.secureInstalls = secureInstalls
+        self.chunkBytes = chunkBytes
         try FileManager.default.createDirectory(
             at: self.directory, withIntermediateDirectories: true)
     }
@@ -118,9 +121,15 @@ actor ExperimentalDiTPackStore {
 
     /// User-triggered import of a verified pack from a security-scoped source
     /// URL (the caller holds security-scoped access for the whole operation).
-    /// Rejects wrong byte size, verifies the pinned SHA-256, stages to a
-    /// temporary file, then atomically moves the verified pack into place and
+    /// Rejects wrong byte size, then streams the source into a staging file
+    /// EXACTLY ONCE while incrementally hashing it (CryptoKit SHA-256) with
+    /// bounded memory, then atomically moves the verified pack into place and
     /// writes a cheap verification receipt.
+    ///
+    /// The source is traversed once (read -> hash -> write per chunk) instead
+    /// of the previous full SHA pass followed by a second full `copyItem`
+    /// pass, removing ~2.23 GB of redundant source-side I/O and the unbounded
+    /// temporary lifetime risk on memory-constrained devices.
     func importPack(from source: URL) async throws -> URL {
         state = .verifying
         do {
@@ -136,23 +145,33 @@ actor ExperimentalDiTPackStore {
                 throw AnimapkError.validation(
                     "insufficient disk space for experimental W8 import (need \(spec.byteCount) bytes + reserve)")
             }
-            // Verify the source exactly (size + pinned SHA-256) BEFORE staging.
+            // Cheap size gate from the source stat BEFORE streaming anything.
             let sourceSize = try fileSize(at: source)
             guard sourceSize == spec.byteCount else {
                 throw AnimapkError.validation(
                     "experimental W8 size mismatch: got \(sourceSize), expected \(spec.byteCount)")
             }
-            let digest = try verifier(source)
-            guard digest == spec.sha256.lowercased() else {
-                throw AnimapkError.validation("experimental W8 SHA-256 mismatch")
+            guard chunkBytes > 0 else {
+                throw AnimapkError.validation(
+                    "experimental W8 import chunk size must be positive")
             }
             // Stage to a temporary file, then atomically move into place.
             // Replaces an existing (possibly corrupt) destination: moveItem
             // cannot overwrite, so a stale W8 file must never block re-import.
             let staging = directory.appendingPathComponent(
                 ".\(spec.filename).staging-\(UUID().uuidString)")
+            // Single source pass: stream -> staging while computing SHA-256,
+            // then verify byte count + digest. Cleanup must cover hash/size
+            // mismatch, read/write failure, secure() failure and move/replace
+            // failure; after a successful move there is nothing left to remove.
             do {
-                try FileManager.default.copyItem(at: source, to: staging)
+                defer {
+                    try? FileManager.default.removeItem(at: staging)
+                }
+                try Self.streamCopyAndHash(
+                    from: source, to: staging, chunkBytes: chunkBytes,
+                    expectedByteCount: spec.byteCount,
+                    expectedSHA256: spec.sha256.lowercased())
                 if secureInstalls {
                     try secure(staging)
                 }
@@ -168,7 +187,6 @@ actor ExperimentalDiTPackStore {
                 }
                 try FileManager.default.moveItem(at: staging, to: packURL)
             } catch {
-                try? FileManager.default.removeItem(at: staging)
                 throw AnimapkError.validation("failed to install experimental W8 pack: \(error.localizedDescription)")
             }
             writeReceipt(at: packURL)
@@ -187,11 +205,61 @@ actor ExperimentalDiTPackStore {
         state = .missing
     }
 
-    // MARK: - Verifiers / capacity
+    // MARK: - Streaming copy + hash
 
-    /// SHA-256 via streaming chunked reads (never loads the whole file).
-    static func sha256Verifier(url: URL) throws -> String {
-        try ModelManifest.sha256(of: url)
+    /// Streams `source` into `destination` EXACTLY ONCE while incrementally
+    /// updating a CryptoKit `SHA256`. Bounded memory: each chunk is read,
+    /// hashed, and written inside an explicit `autoreleasepool` so Foundation
+    /// temporaries cannot accumulate over thousands of iterations.
+    ///
+    /// - Throws on: read/write failure, `bytesCopied != expectedByteCount`
+    ///   (catches a source that changed size between the initial stat and
+    ///   EOF), or a final digest != `expectedSHA256`. On any throw the
+    ///   caller's cleanup removes the partial staging file.
+    static func streamCopyAndHash(
+        from source: URL,
+        to destination: URL,
+        chunkBytes: Int,
+        expectedByteCount: UInt64,
+        expectedSHA256: String
+    ) throws {
+        guard chunkBytes > 0 else {
+            throw AnimapkError.validation("import chunk size must be positive")
+        }
+        let sourceHandle = try FileHandle(forReadingFrom: source)
+        defer { try? sourceHandle.close() }
+        let created = FileManager.default.createFile(atPath: destination.path, contents: nil)
+        guard created else {
+            throw AnimapkError.validation("failed to create staging file for experimental W8 import")
+        }
+        let stagingHandle = try FileHandle(forWritingTo: destination)
+        defer { try? stagingHandle.close() }
+
+        var digest = SHA256()
+        var bytesCopied: UInt64 = 0
+        while true {
+            let reachedEOF = try autoreleasepool { () throws -> Bool in
+                let data = try sourceHandle.read(upToCount: chunkBytes) ?? Data()
+                guard !data.isEmpty else { return true }
+                digest.update(data: data)
+                try stagingHandle.write(contentsOf: data)
+                bytesCopied += UInt64(data.count)
+                if bytesCopied > expectedByteCount {
+                    throw AnimapkError.validation(
+                        "experimental W8 size changed while importing")
+                }
+                return false
+            }
+            if reachedEOF { break }
+        }
+        guard bytesCopied == expectedByteCount else {
+            throw AnimapkError.validation(
+                "experimental W8 size mismatch: got \(bytesCopied), expected \(expectedByteCount)")
+        }
+        let hex = digest.finalize().map { String(format: "%02x", $0) }.joined()
+        guard hex == expectedSHA256 else {
+            throw AnimapkError.validation("experimental W8 SHA-256 mismatch")
+        }
     }
 
     static func defaultCapacityProvider() -> CapacityProvider {

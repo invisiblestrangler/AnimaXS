@@ -40,11 +40,18 @@ final class ExperimentalDiTPackCatalog: ObservableObject {
 
     /// User-triggered import from a security-scoped source URL. The caller
     /// (the Files importer) holds security-scoped access for the whole call.
+    ///
+    /// Publishes an in-progress state BEFORE awaiting the store so SwiftUI
+    /// reflects the running multi-gigabyte import immediately (and the row
+    /// hides its Import button for the duration) rather than continuing to
+    /// show the previous state.
     func importPack(from source: URL) async {
         guard let store else {
             state = .failed("Experimental W8 store unavailable")
             return
         }
+        state = .verifying
+        message = "Importing and verifying W8 v2…"
         do {
             let url = try await store.importPack(from: source)
             state = .ready(url)
