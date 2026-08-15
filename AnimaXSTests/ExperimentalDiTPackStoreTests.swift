@@ -26,6 +26,23 @@ final class ExperimentalDiTPackStoreTests: XCTestCase {
         return dir
     }
 
+    /// The pinned W8 v2 manifest values must match the HuggingFace LFS
+    /// metadata exactly (verified 2026-08-15 via the tree API). This pins the
+    /// constants so a digit-transcription error in the manifest (like the
+    /// 2_232_973_560 vs 2_232_975_360 flip that rejected every import) is
+    /// caught in CI without downloading the 2.23 GB pack.
+    func testPinnedW8ManifestMatchesLFSMetadata() {
+        XCTAssertEqual(ExperimentalDiTManifest.filename, "anima-turbo-v1.0-xsmax-w8-v2.animapk")
+        XCTAssertEqual(ExperimentalDiTManifest.byteCount, 2_232_975_360,
+                       "must match HuggingFace LFS size for the pinned revision")
+        XCTAssertEqual(
+            ExperimentalDiTManifest.sha256,
+            "8b63c7fd9b5872805e5a2ba799ab6d79989c54a6a89a4f34edf022c59c9ed130")
+        XCTAssertEqual(
+            ExperimentalDiTManifest.revision,
+            "589d028122f872e66ee20cdd12cb55eb3b816add")
+    }
+
     private func sha256Hex(of data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
