@@ -17,9 +17,11 @@ final class DiTPreparationExecutor {
     private let linear: LinearExecutor
     private let buffers: BufferPool
     private let activationNumerics: ActivationNumerics
+    private let monitor: NumericalMonitor?
 
     init(context: MetalContext, file: AnimapkFile,
-         activationNumerics: ActivationNumerics = .legacy) throws {
+         activationNumerics: ActivationNumerics = .legacy,
+         monitor: NumericalMonitor? = nil) throws {
         let locator = try DiTPreparationLocator(file: file)
         guard file.quantGroup == 64 else {
             throw AnimapkError.validation("DiT preparation requires quant group 64")
@@ -31,6 +33,7 @@ final class DiTPreparationExecutor {
         self.linear = LinearExecutor(context: context)
         self.buffers = BufferPool(device: context.device)
         self.activationNumerics = activationNumerics
+        self.monitor = monitor
     }
 
     /// Outputs fp32 residual `[1024,2048]`, timestep embedding `[2048]`, and
@@ -78,7 +81,12 @@ final class DiTPreparationExecutor {
         let residualHalf = buffers.buffer(
             key: "dit.prepare.residual.f16", bytes: Self.tokens * Self.hidden * 2)
         try encodeComputeBoundary(command, patches, count: Self.tokens * 68)
-        try encodeUnary(command, "float_to_half", patches, patchesHalf, Self.tokens * 68)
+        if let monitor {
+            try encodeProbeConvert(command, "float_to_half", patches, patchesHalf,
+                                   Self.tokens * 68, probe: .patchesToHalf)
+        } else {
+            try encodeUnary(command, "float_to_half", patches, patchesHalf, Self.tokens * 68)
+        }
         try linear.encode(commandBuffer: command, input: patchesHalf,
                           weight: weights.xEmbed, output: residualHalf,
                           inputRows: Self.tokens)
@@ -230,6 +238,32 @@ final class DiTPreparationExecutor {
         let width = min(pipeline.threadExecutionWidth, pipeline.maxTotalThreadsPerThreadgroup)
         encoder.dispatchThreads(MTLSize(width: Int(count), height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    /// float_to_half with in-kernel numerical-health recording.
+    private func encodeProbeConvert(
+        _ command: MTLCommandBuffer, _ name: String, _ input: MTLBuffer,
+        _ output: MTLBuffer, _ count: Int, probe: NumericalMonitor.Probe
+    ) throws {
+        guard let monitor else {
+            try encodeUnary(command, name, input, output, count)
+            return
+        }
+        let pipeline = try context.pipeline(named: "float_to_half_probe")
+        guard let encoder = command.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create float_to_half_probe encoder")
+        }
+        var elementCount = UInt32(count)
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(input, offset: 0, index: 0)
+        encoder.setBuffer(output, offset: 0, index: 1)
+        encoder.setBytes(&elementCount, length: 4, index: 2)
+        monitor.bindProbe(encoder, probe: probe, statsIndex: 3, slotIndex: 4)
+        let groups = (count + 255) / 256
+        encoder.dispatchThreadgroups(
+            MTLSize(width: groups, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         encoder.endEncoding()
     }
 

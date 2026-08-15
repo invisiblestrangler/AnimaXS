@@ -28,11 +28,13 @@ final class DiTBlockExecutor {
     private let linear: LinearExecutor
     private let attention: AttentionExecutor
     private let activationNumerics: ActivationNumerics
+    private let monitor: NumericalMonitor?
     private var emulatesBF16: Bool { activationNumerics == .bf16Compute }
 
     init(context: MetalContext, file: AnimapkFile,
          attentionNumerics: AttentionNumerics = .legacy,
-         activationNumerics: ActivationNumerics = .legacy) throws {
+         activationNumerics: ActivationNumerics = .legacy,
+         monitor: NumericalMonitor? = nil) throws {
         let locator = try DiTBlockLocator(file: file)
         guard let maximum = locator.blocks.map(\.length).max(), maximum <= UInt64(Int.max) else {
             throw AnimapkError.validation("invalid DiT execution ranges")
@@ -44,9 +46,10 @@ final class DiTBlockExecutor {
         self.buffers = BufferPool(device: context.device)
         self.linear = LinearExecutor(context: context)
         self.activationNumerics = activationNumerics
+        self.monitor = monitor
         let effectiveAttention = activationNumerics == .bf16Compute && attentionNumerics == .legacy
             ? .bf16Compute : attentionNumerics
-        self.attention = AttentionExecutor(context: context, numerics: effectiveAttention)
+        self.attention = AttentionExecutor(context: context, numerics: effectiveAttention, monitor: monitor)
     }
 
     /// Mutates `residual` in place. All input buffers are tightly packed and use these types:
@@ -133,7 +136,8 @@ final class DiTBlockExecutor {
         try encodeModulate(command, normalized: norm, modulation: modulation,
                            output: modulated, count: Self.tokens * Self.dim)
         try encodeFloatToComputeHalf(command, input: modulated, output: projectionInput,
-                                      count: Self.tokens * Self.dim)
+                                      count: Self.tokens * Self.dim,
+                                      probe: cross ? .crossProjectionInput : .selfProjectionInput)
 
         let qToken = buffer("dit.q.token.f16", Self.tokens * Self.dim, Float16.self)
         let qHead = buffer("dit.q.head.f16", Self.tokens * Self.dim, Float16.self)
@@ -156,6 +160,14 @@ final class DiTBlockExecutor {
         try encodeHalfComputeBoundary(command, qToken, count: Self.tokens * Self.dim)
         try encodeHalfComputeBoundary(command, kToken, count: kTokenCount)
         try encodeHalfComputeBoundary(command, vToken, count: kTokenCount)
+        if NumericalMonitor.detailedProbesEnabled, let monitor {
+            try monitor.encodeProbe(command, values: qToken, count: Self.tokens * Self.dim,
+                                    probe: cross ? .crossQToken : .selfQToken)
+            try monitor.encodeProbe(command, values: kToken, count: kTokenCount,
+                                    probe: cross ? .crossKToken : .selfKToken)
+            try monitor.encodeProbe(command, values: vToken, count: kTokenCount,
+                                    probe: cross ? .crossVToken : .selfVToken)
+        }
 
         if cross {
             try encodeRMSHeads(command, input: qToken, weightOffset: weights.crossQNorm,
@@ -180,8 +192,13 @@ final class DiTBlockExecutor {
         let attendedToken = buffer("dit.attended.token.f16", Self.tokens * Self.dim, Float16.self)
         try attention.encode(commandBuffer: command, query: qHead, key: kHead, value: vHead,
                              output: attendedHead, heads: Self.heads, queryCount: Self.tokens,
-                             keyCount: keyRows, headDim: Self.headDim)
+                             keyCount: keyRows, headDim: Self.headDim,
+                             probe: cross ? .crossScores : .selfScores)
         try encodeHalfComputeBoundary(command, attendedHead, count: Self.tokens * Self.dim)
+        if NumericalMonitor.detailedProbesEnabled, let monitor {
+            try monitor.encodeProbe(command, values: attendedHead, count: Self.tokens * Self.dim,
+                                    probe: cross ? .crossAttended : .selfAttended)
+        }
         try encodeTranspose(command, input: attendedHead, output: attendedToken,
                             tokens: Self.tokens, toHeadMajor: false)
         let branch = buffer("dit.branch.f16", Self.tokens * Self.dim, Float16.self)
@@ -189,9 +206,19 @@ final class DiTBlockExecutor {
                           weight: cross ? weights.crossO : weights.selfO,
                           output: branch, inputRows: Self.tokens)
         try encodeHalfComputeBoundary(command, branch, count: Self.tokens * Self.dim)
+        if NumericalMonitor.detailedProbesEnabled, let monitor {
+            try monitor.encodeProbe(command, values: branch, count: Self.tokens * Self.dim,
+                                    probe: cross ? .crossBranch : .selfBranch)
+        }
         try encodeGateAdd(command, residual: residual, branch: branch, modulation: modulation,
-                          count: Self.tokens * Self.dim)
+                          count: Self.tokens * Self.dim,
+                          probe: cross ? .crossGateAdd : .selfGateAdd)
         try encodeActivationBoundary(command, residual)
+        if NumericalMonitor.detailedProbesEnabled, let monitor {
+            try monitor.encodeProbeF32(command, values: residual,
+                                       count: Self.tokens * Self.dim,
+                                       probe: cross ? .crossResidual : .selfResidual)
+        }
     }
 
     private func encodeMLP(
@@ -207,7 +234,7 @@ final class DiTBlockExecutor {
         try encodeModulate(command, normalized: norm, modulation: modulation,
                            output: modulated, count: Self.tokens * Self.dim)
         try encodeFloatToComputeHalf(command, input: modulated, output: projectionInput,
-                                      count: Self.tokens * Self.dim)
+                                      count: Self.tokens * Self.dim, probe: .mlpProjectionInput)
         let hiddenHalf = buffer("dit.hidden.f16", Self.tokens * Self.hidden, Float16.self)
         let hiddenFloat = buffer("dit.hidden.f32", Self.tokens * Self.hidden, Float.self)
         try linear.encode(commandBuffer: command, input: projectionInput,
@@ -218,15 +245,29 @@ final class DiTBlockExecutor {
         try encodeUnary(command, kernel: "gelu", input: hiddenFloat,
                         output: hiddenFloat, count: Self.tokens * Self.hidden)
         try encodeComputeBoundary(command, hiddenFloat, count: Self.tokens * Self.hidden)
-        try encodeConvert(command, kernel: "float_to_half", input: hiddenFloat,
-                          output: hiddenHalf, count: Self.tokens * Self.hidden)
+        if let monitor {
+            try encodeProbeConvert(command, input: hiddenFloat, output: hiddenHalf,
+                                   count: Self.tokens * Self.hidden,
+                                   monitor: monitor, probe: .mlpHiddenToHalf)
+        } else {
+            try encodeConvert(command, kernel: "float_to_half", input: hiddenFloat,
+                              output: hiddenHalf, count: Self.tokens * Self.hidden)
+        }
         let branch = buffer("dit.branch.f16", Self.tokens * Self.dim, Float16.self)
         try linear.encode(commandBuffer: command, input: hiddenHalf,
                           weight: weights.mlp2, output: branch, inputRows: Self.tokens)
         try encodeHalfComputeBoundary(command, branch, count: Self.tokens * Self.dim)
+        if NumericalMonitor.detailedProbesEnabled, let monitor {
+            try monitor.encodeProbe(command, values: branch, count: Self.tokens * Self.dim,
+                                    probe: .mlpBranch)
+        }
         try encodeGateAdd(command, residual: residual, branch: branch, modulation: modulation,
-                          count: Self.tokens * Self.dim)
+                          count: Self.tokens * Self.dim, probe: .mlpGateAdd)
         try encodeActivationBoundary(command, residual)
+        if NumericalMonitor.detailedProbesEnabled, let monitor {
+            try monitor.encodeProbeF32(command, values: residual,
+                                       count: Self.tokens * Self.dim, probe: .mlpResidual)
+        }
     }
 
     private func encodeActivationBoundary(
@@ -246,11 +287,48 @@ final class DiTBlockExecutor {
     }
 
     private func encodeFloatToComputeHalf(
-        _ command: MTLCommandBuffer, input: MTLBuffer, output: MTLBuffer, count: Int
+        _ command: MTLCommandBuffer, input: MTLBuffer, output: MTLBuffer, count: Int,
+        probe: NumericalMonitor.Probe
     ) throws {
         try encodeComputeBoundary(command, input, count: count)
-        try encodeConvert(command, kernel: "float_to_half", input: input,
-                          output: output, count: count)
+        if let monitor {
+            try encodeProbeConvert(command, input: input, output: output, count: count,
+                                   monitor: monitor, probe: probe)
+        } else {
+            try encodeConvert(command, kernel: "float_to_half", input: input,
+                              output: output, count: count)
+        }
+    }
+
+    /// float_to_half with in-kernel numerical-health recording. The probe
+    /// kernel performs the identical conversion; stats land in the monitor.
+    private func encodeProbeConvert(
+        _ command: MTLCommandBuffer, input: MTLBuffer, output: MTLBuffer, count: Int,
+        monitor: NumericalMonitor, probe: NumericalMonitor.Probe
+    ) throws {
+        let pipeline = try context.pipeline(named: "float_to_half_probe")
+        guard let encoder = command.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create float_to_half_probe encoder")
+        }
+        var elementCount = UInt32(count)
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(input, offset: 0, index: 0)
+        encoder.setBuffer(output, offset: 0, index: 1)
+        encoder.setBytes(&elementCount, length: 4, index: 2)
+        monitor.bindProbe(encoder, probe: probe, statsIndex: 3, slotIndex: 4)
+        dispatchProbe(encoder, pipeline: pipeline, count: count)
+        encoder.endEncoding()
+    }
+
+    /// Dispatch shape for the probe kernels: exactly one thread per element in
+    /// fixed 256-thread threadgroups (the kernels reduce via threadgroup memory).
+    private func dispatchProbe(
+        _ encoder: MTLComputeCommandEncoder, pipeline: MTLComputePipelineState, count: Int
+    ) {
+        let groups = (count + 255) / 256
+        encoder.dispatchThreadgroups(
+            MTLSize(width: groups, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
     }
 
     private func encodeHalfComputeBoundary(
@@ -420,8 +498,25 @@ final class DiTBlockExecutor {
 
     private func encodeGateAdd(
         _ command: MTLCommandBuffer, residual: MTLBuffer, branch: MTLBuffer,
-        modulation: MTLBuffer, count: Int
+        modulation: MTLBuffer, count: Int, probe: NumericalMonitor.Probe
     ) throws {
+        if let monitor {
+            let pipeline = try context.pipeline(named: "gate_add_half_f32_probe")
+            guard let encoder = command.makeComputeCommandEncoder() else {
+                throw AnimapkError.validation("failed to create gated residual encoder")
+            }
+            var n = UInt32(Self.dim), elementCount = UInt32(count)
+            encoder.setComputePipelineState(pipeline)
+            encoder.setBuffer(residual, offset: 0, index: 0)
+            encoder.setBuffer(branch, offset: 0, index: 1)
+            encoder.setBuffer(modulation, offset: 2 * Self.dim * MemoryLayout<Float>.stride, index: 2)
+            encoder.setBytes(&n, length: 4, index: 3)
+            encoder.setBytes(&elementCount, length: 4, index: 4)
+            monitor.bindProbe(encoder, probe: probe, statsIndex: 5, slotIndex: 6)
+            dispatchProbe(encoder, pipeline: pipeline, count: count)
+            encoder.endEncoding()
+            return
+        }
         let pipeline = try context.pipeline(named: "gate_add_half_f32")
         guard let encoder = command.makeComputeCommandEncoder() else {
             throw AnimapkError.validation("failed to create gated residual encoder")

@@ -9,12 +9,14 @@ final class DitForward {
 
     init(context: MetalContext, file: AnimapkFile,
          attentionNumerics: AttentionNumerics = .legacy,
-         activationNumerics: ActivationNumerics = .legacy) throws {
+         activationNumerics: ActivationNumerics = .legacy,
+         monitor: NumericalMonitor? = nil) throws {
         block = try DiTBlockExecutor(
             context: context, file: file, attentionNumerics: attentionNumerics,
-            activationNumerics: activationNumerics)
+            activationNumerics: activationNumerics, monitor: monitor)
         finalLayer = try DiTFinalLayerExecutor(
-            context: context, file: file, activationNumerics: activationNumerics)
+            context: context, file: file, activationNumerics: activationNumerics,
+            monitor: monitor)
     }
 
     /// Mutates the tightly packed fp32 `[1024,2048]` residual in place.

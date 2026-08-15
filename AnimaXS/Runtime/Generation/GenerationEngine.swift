@@ -243,7 +243,7 @@ struct GenerationEngine {
     ) async throws -> MTLBuffer {
         guard (0...ModelConstants.samplerSteps).contains(startStep) else {
             throw GenerationError.sampler(
-                "startStep \\(startStep) out of range 0...\\(ModelConstants.samplerSteps)")
+                "startStep \(startStep) out of range 0...\(ModelConstants.samplerSteps)")
         }
         let sampler = try factory.makeDiffusion(context: context, fileURL: models.dit)
         defer { withExtendedLifetime(sampler) {} }
@@ -294,7 +294,7 @@ struct GenerationEngine {
     private func makeBuffer(length: Int, _ label: String) throws -> MTLBuffer {
         guard let buffer = context.device.makeBuffer(
             length: length, options: .storageModeShared) else {
-            throw GenerationError.metal("failed to allocate \\(label)")
+            throw GenerationError.metal("failed to allocate \(label)")
         }
         return buffer
     }
