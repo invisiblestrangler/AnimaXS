@@ -147,7 +147,10 @@ final class GenerationCoordinatorTests: XCTestCase {
             lock.lock(); calls.append(Call(stage: "adapter", url: fileURL)); lock.unlock()
             return ProbeAdapter(onExecute: adapterOnExecute)
         }
-        func makeDiffusion(context: MetalContext, fileURL: URL) throws -> DiffusionStage {
+        func makeDiffusion(
+            context: MetalContext, fileURL: URL,
+            optimization: InferenceOptimizationConfig
+        ) throws -> DiffusionStage {
             lock.lock(); calls.append(Call(stage: "sampler", url: fileURL)); lock.unlock()
             return ProbeSampler(onExecute: samplerOnExecute)
         }
@@ -227,7 +230,10 @@ final class GenerationCoordinatorTests: XCTestCase {
         func makeContextAdapter(context: MetalContext, fileURL: URL) throws -> ContextAdapterStage {
             ProbeAdapter()
         }
-        func makeDiffusion(context: MetalContext, fileURL: URL) throws -> DiffusionStage {
+        func makeDiffusion(
+            context: MetalContext, fileURL: URL,
+            optimization: InferenceOptimizationConfig
+        ) throws -> DiffusionStage {
             let sampler = ProbeSampler()
             self.sampler = sampler
             return sampler
@@ -343,7 +349,10 @@ final class GenerationCoordinatorTests: XCTestCase {
         func makeContextAdapter(context: MetalContext, fileURL: URL) throws -> ContextAdapterStage {
             ProbeAdapter()
         }
-        func makeDiffusion(context: MetalContext, fileURL: URL) throws -> DiffusionStage {
+        func makeDiffusion(
+            context: MetalContext, fileURL: URL,
+            optimization: InferenceOptimizationConfig
+        ) throws -> DiffusionStage {
             ProbeSampler()
         }
         func makeVAE(context: MetalContext, fileURL: URL) throws -> VAEDecodeStage {
@@ -426,7 +435,10 @@ final class GenerationCoordinatorTests: XCTestCase {
             lock.lock(); calls.append(Call(stage: "adapter")); lock.unlock()
             return ProbeAdapter()
         }
-        func makeDiffusion(context: MetalContext, fileURL: URL) throws -> DiffusionStage {
+        func makeDiffusion(
+            context: MetalContext, fileURL: URL,
+            optimization: InferenceOptimizationConfig
+        ) throws -> DiffusionStage {
             lock.lock(); calls.append(Call(stage: "sampler")); lock.unlock()
             let sampler = BlockingSampler()
             lock.lock(); samplers.append(sampler); lock.unlock()
@@ -834,7 +846,10 @@ final class GenerationCoordinatorTests: XCTestCase {
         func makeContextAdapter(context: MetalContext, fileURL: URL) throws -> ContextAdapterStage {
             ProbeAdapter()
         }
-        func makeDiffusion(context: MetalContext, fileURL: URL) throws -> DiffusionStage {
+        func makeDiffusion(
+            context: MetalContext, fileURL: URL,
+            optimization: InferenceOptimizationConfig
+        ) throws -> DiffusionStage {
             let sampler = LifecycleSampler()
             self.sampler = sampler
             return sampler
@@ -886,7 +901,10 @@ final class GenerationCoordinatorTests: XCTestCase {
             register(probe)
             return probe
         }
-        func makeDiffusion(context: MetalContext, fileURL: URL) throws -> DiffusionStage {
+        func makeDiffusion(
+            context: MetalContext, fileURL: URL,
+            optimization: InferenceOptimizationConfig
+        ) throws -> DiffusionStage {
             let probe = ProbeSampler()
             register(probe)
             return probe

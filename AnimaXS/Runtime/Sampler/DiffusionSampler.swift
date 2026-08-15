@@ -30,7 +30,10 @@ final class DiffusionSampler {
     private let euler: EulerSampler
     private let buffers: BufferPool
     private let rope: MTLBuffer
-    private let monitor: NumericalMonitor
+    /// nil when `optimization.numericalMonitoring` is OFF (the experiment that
+    /// measures monitoring overhead). The final CPU finite guard stays on
+    /// regardless — a non-finite latent still fails safely.
+    private let monitor: NumericalMonitor?
     private let stateLock = NSLock()
     private var running = false
 
@@ -46,16 +49,22 @@ final class DiffusionSampler {
 
     init(context: MetalContext, file: AnimapkFile,
          attentionNumerics: AttentionNumerics = .legacy,
-         activationNumerics: ActivationNumerics = .legacy) throws {
+         activationNumerics: ActivationNumerics = .legacy,
+         optimization: InferenceOptimizationConfig = .currentBaseline) throws {
         self.context = context
-        let monitor = try NumericalMonitor(context: context)
+        // Numerical monitoring OFF removes monitor/probe work from the
+        // production path (the final CPU finite guard is retained). ON keeps
+        // the current production monitor exactly.
+        let monitor = optimization.numericalMonitoring
+            ? try NumericalMonitor(context: context) : nil
         self.monitor = monitor
         preparation = try DiTPreparationExecutor(
             context: context, file: file, activationNumerics: activationNumerics,
             monitor: monitor)
         forward = try DitForward(
             context: context, file: file, attentionNumerics: attentionNumerics,
-            activationNumerics: activationNumerics, monitor: monitor)
+            activationNumerics: activationNumerics, monitor: monitor,
+            optimization: optimization)
         euler = EulerSampler(context: context, monitor: monitor)
         buffers = BufferPool(device: context.device)
 
@@ -109,7 +118,7 @@ final class DiffusionSampler {
     ) async throws {
         try beginRun()
         defer { endRun() }
-        monitor.beginRun()
+        monitor?.beginRun()
         guard (0...ModelConstants.samplerSteps).contains(startStep) else {
             throw AnimapkError.validation(
                 "startStep \(startStep) out of range 0...\(ModelConstants.samplerSteps)")
@@ -156,7 +165,7 @@ final class DiffusionSampler {
                 blockCompleted: { [self] block, _ in
                 try blockProgress?(step, block)
                 try diagnosticBlockCompleted?(step, block, residual)
-                monitor.noteBlockCompleted(step: step, block: block)
+                monitor?.noteBlockCompleted(step: step, block: block)
             }, diagnosticBranchFilter: { block in
                 diagnosticBranchFilter?(step, block) ?? true
             }, diagnosticBranchCompleted: { block, branch, current in
@@ -170,7 +179,7 @@ final class DiffusionSampler {
             try await euler.executeStep(
                 latent: latent, denoised: denoised, output: next,
                 sigma: sigma, nextSigma: nextSigma, count: Self.latentElements)
-            monitor.noteStepCompleted(step: step)
+            monitor?.noteStepCompleted(step: step)
             guard isFinite(next, count: Self.latentElements) else {
                 // 1-based step for the human-visible message; attribution
                 // (block/stage/condition) is added by the numerical monitor.
@@ -180,21 +189,28 @@ final class DiffusionSampler {
             try stepCompleted?(step, sigma, nextSigma, denoised, next)
             swap(&latent, &next)
         }
-        metrics?.setNumericalWarnings(monitor.warningCount())
-        metrics?.setNumericalDetails(monitor.warningDetails())
+        if let monitor {
+            metrics?.setNumericalWarnings(monitor.warningCount())
+            metrics?.setNumericalDetails(monitor.warningDetails())
+        } else {
+            // Monitor OFF: warnings were not collected — never report "0".
+            metrics?.setNumericalMonitoringDisabled(true)
+        }
         try await copy(latent, to: outputLatent, bytes: bytes)
     }
 
     // MARK: - Diagnostic accessors (stress harness / tests)
 
-    /// Full probe report after a completed (or failed) run.
+    /// Full probe report after a completed (or failed) run. Empty when the
+    /// numerical monitor was disabled for this run.
     var numericalReport: [NumericalMonitor.Probe: NumericalMonitor.Stats] {
-        monitor.report()
+        monitor?.report() ?? [:]
     }
 
-    /// First unsafe (step, block, probe) attribution, if any.
+    /// First unsafe (step, block, probe) attribution, if any. nil when the
+    /// monitor was disabled or no issue was recorded.
     var earliestNumericalIssue: NumericalMonitor.FirstIssue? {
-        monitor.earliestIssue
+        monitor?.earliestIssue
     }
 
     static func cpuDenoised(latent: [Float], velocity: [Float], sigma: Float) throws -> [Float] {
@@ -218,7 +234,23 @@ final class DiffusionSampler {
     }
 
     private func numericalFailure(step: Int) -> NumericalFailure {
-        if let issue = monitor.earliestIssue {
+        if let monitor, let issue = monitor.earliestIssue {
+            return NumericalFailure.attributed(
+                step: issue.step, totalSteps: ModelConstants.samplerSteps,
+                block: issue.block ?? 1, totalBlocks: DiTBlockLocator.blockCount,
+                stage: issue.probe.stageLabel, condition: issue.stats.condition)
+        }
+        return NumericalFailure.eulerOutput(
+            step: step + 1, totalSteps: ModelConstants.samplerSteps)
+    }
+
+    /// Test seam: the failure produced when the Euler finite guard fires with
+    /// no monitor attached (monitoring OFF). Proves the guard is independent
+    /// of monitoring and still fails safely with a 1-based step.
+    static func numericalFailureForTesting(
+        step: Int, monitor: NumericalMonitor?
+    ) -> NumericalFailure {
+        if let monitor, let issue = monitor.earliestIssue {
             return NumericalFailure.attributed(
                 step: issue.step, totalSteps: ModelConstants.samplerSteps,
                 block: issue.block ?? 1, totalBlocks: DiTBlockLocator.blockCount,
@@ -248,8 +280,10 @@ final class DiffusionSampler {
             MTLSize(width: Self.latentElements, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
         encoder.endEncoding()
-        try monitor.encodeProbeF32(
-            command, values: denoised, count: Self.latentElements, probe: .denoised)
+        if let monitor {
+            try monitor.encodeProbeF32(
+                command, values: denoised, count: Self.latentElements, probe: .denoised)
+        }
         try await commit(command)
     }
 
@@ -260,13 +294,18 @@ final class DiffusionSampler {
               let encoder = command.makeComputeCommandEncoder() else {
             throw AnimapkError.validation("failed to create context conversion command")
         }
-        let pipeline = try context.pipeline(named: "float_to_half_probe")
+        // Use the non-probe conversion when the numerical monitor is OFF so
+        // the monitoring-overhead experiment measures a clean path.
+        let pipeline = try context.pipeline(
+            named: monitor != nil ? "float_to_half_probe" : "float_to_half")
         var count = UInt32(count)
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(input, offset: 0, index: 0)
         encoder.setBuffer(output, offset: 0, index: 1)
         encoder.setBytes(&count, length: 4, index: 2)
-        monitor.bindProbe(encoder, probe: .crossContextToHalf, statsIndex: 3, slotIndex: 4)
+        if let monitor {
+            monitor.bindProbe(encoder, probe: .crossContextToHalf, statsIndex: 3, slotIndex: 4)
+        }
         let groups = (Int(count) + 255) / 256
         encoder.dispatchThreadgroups(
             MTLSize(width: groups, height: 1, depth: 1),

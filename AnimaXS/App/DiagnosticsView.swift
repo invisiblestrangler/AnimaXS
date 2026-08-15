@@ -24,6 +24,7 @@ struct DiagnosticsView: View {
     @State private var previousRunWarning: String?
     @State private var exportError: String?
     @State private var exportPresented = false
+    @State private var showingW8Importer = false
     @State private var jsonURL = FileManager.default.temporaryDirectory
         .appendingPathComponent("anima-xs-diagnostics.json")
 
@@ -31,13 +32,36 @@ struct DiagnosticsView: View {
     /// from the coordinator so it is visible without a cable.
     var lastMetricsText: String?
 
+    /// Runtime inference-optimization settings (persistent, Diagnostics-only).
+    @ObservedObject var optimizationSettings: InferenceOptimizationSettings
+
+    /// Experimental W8 DiT pack state (Diagnostics-only).
+    @ObservedObject var experimentalPack: ExperimentalDiTPackCatalog
+
+    /// Whether a generation is currently active (controls are disabled while
+    /// it runs so a toggle can never mutate an in-flight run).
+    var isGenerating: Bool
+
     private let marker = DiagnosticRunMarker()
+
+    init(
+        lastMetricsText: String? = nil,
+        optimizationSettings: InferenceOptimizationSettings,
+        experimentalPack: ExperimentalDiTPackCatalog,
+        isGenerating: Bool = false
+    ) {
+        self.lastMetricsText = lastMetricsText
+        self.optimizationSettings = optimizationSettings
+        self.experimentalPack = experimentalPack
+        self.isGenerating = isGenerating
+    }
 
     var body: some View {
         Form {
             previousRunSection
             deviceSection
             metricsSection
+            performanceSection
             modelSection
             basicTestsSection
             hardwareTestsSection
@@ -45,7 +69,28 @@ struct DiagnosticsView: View {
             actionsSection
         }
         .navigationTitle("Diagnostics")
-        .task { await loadSnapshot() }
+        .task {
+            await loadSnapshot()
+            await experimentalPack.refresh()
+        }
+        .fileImporter(
+            isPresented: $showingW8Importer,
+            allowedContentTypes: [.data],
+            allowsMultipleSelection: false
+        ) { result in
+            guard let url = try? result.get().first else { return }
+            // Files-provided URLs are security-scoped: access must be held
+            // for the ENTIRE async import (size check + SHA-256 + copy).
+            let didStart = url.startAccessingSecurityScopedResource()
+            Task {
+                defer {
+                    if didStart {
+                        url.stopAccessingSecurityScopedResource()
+                    }
+                }
+                await experimentalPack.importPack(from: url)
+            }
+        }
         .fileExporter(
             isPresented: $exportPresented,
             document: JSONFile(url: jsonURL),
@@ -108,6 +153,123 @@ struct DiagnosticsView: View {
                 .font(.caption)
             }
         }
+    }
+
+    /// Runtime inference-performance experiments (one build, runtime choice).
+    /// Controls are disabled during an active generation so a toggle can never
+    /// mutate the in-flight run; the captured run configuration is shown in
+    /// the post-run metrics summary instead.
+    @ViewBuilder
+    private var performanceSection: some View {
+        Section("Inference performance experiments") {
+            Text("Applies to the next fresh generation. Use Generate, not Resume, for performance comparisons.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Picker("Linear tile rows", selection: linearTileSelection) {
+                ForEach(InferenceOptimizationConfig.allowedTileRows, id: \.self) { rows in
+                    Text("\(rows)").tag(rows)
+                }
+            }
+            .disabled(isGenerating)
+            Picker("Attention tile rows", selection: attentionTileSelection) {
+                ForEach(InferenceOptimizationConfig.allowedTileRows, id: \.self) { rows in
+                    Text("\(rows)").tag(rows)
+                }
+            }
+            .disabled(isGenerating)
+            Toggle("Direct MPS linear I/O", isOn: directLinearBinding)
+                .disabled(isGenerating)
+            Toggle("Ping-pong weight streaming", isOn: pingPongBinding)
+                .disabled(isGenerating)
+            Toggle("Numerical monitor", isOn: numericalMonitorBinding)
+                .disabled(isGenerating)
+            Picker("DiT pack", selection: ditPackBinding) {
+                Text("Production W4").tag(DiTPackVariant.productionW4)
+                Text(experimentalPack.isReady
+                     ? "Experimental W8 v2"
+                     : "Experimental W8 v2 (not imported)")
+                    .tag(DiTPackVariant.experimentalW8V2)
+            }
+            .disabled(isGenerating || !experimentalPack.isReady)
+            w8PackRow
+            Button("Reset to current baseline") {
+                optimizationSettings.resetToBaseline()
+            }
+            .disabled(isGenerating)
+            if isGenerating {
+                Text("Controls are disabled while a generation is running.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        }
+    }
+
+    /// Experimental W8 pack status + import/remove (user-triggered only).
+    @ViewBuilder
+    private var w8PackRow: some View {
+        let packState = experimentalPack.state
+        VStack(alignment: .leading, spacing: 4) {
+            LabeledContent("W8 v2 status", value: w8StateLabel(packState))
+            if case .ready = packState {
+                Button("Remove W8 v2", role: .destructive) {
+                    Task { await experimentalPack.remove() }
+                }
+                .font(.caption)
+            } else if case .failed(let message) = packState {
+                Text(message).font(.caption2).foregroundStyle(.red)
+                Button("Import W8 v2") { showingW8Importer = true }
+                    .font(.caption)
+            } else {
+                Button("Import W8 v2") { showingW8Importer = true }
+                    .font(.caption)
+            }
+        }
+    }
+
+    private func w8StateLabel(_ state: ExperimentalDiTPackStore.State) -> String {
+        switch state {
+        case .missing: return "not installed"
+        case .verifying: return "verifying…"
+        case .ready: return "verified and ready"
+        case .unverified: return "installed but unverified — re-import required"
+        case .failed(let message): return "failed (\(message))"
+        }
+    }
+
+    private var linearTileSelection: Binding<Int> {
+        Binding(
+            get: { optimizationSettings.linearTileRows },
+            set: { optimizationSettings.setLinearTileRows($0) })
+    }
+
+    private var attentionTileSelection: Binding<Int> {
+        Binding(
+            get: { optimizationSettings.attentionTileRows },
+            set: { optimizationSettings.setAttentionTileRows($0) })
+    }
+
+    private var directLinearBinding: Binding<Bool> {
+        Binding(
+            get: { optimizationSettings.directLinearMPSIO },
+            set: { optimizationSettings.setDirectLinearMPSIO($0) })
+    }
+
+    private var pingPongBinding: Binding<Bool> {
+        Binding(
+            get: { optimizationSettings.pingPongWeightStreaming },
+            set: { optimizationSettings.setPingPongWeightStreaming($0) })
+    }
+
+    private var numericalMonitorBinding: Binding<Bool> {
+        Binding(
+            get: { optimizationSettings.numericalMonitoring },
+            set: { optimizationSettings.setNumericalMonitoring($0) })
+    }
+
+    private var ditPackBinding: Binding<DiTPackVariant> {
+        Binding(
+            get: { optimizationSettings.ditPackVariant },
+            set: { optimizationSettings.setDiTPackVariant($0) })
     }
 
     @ViewBuilder

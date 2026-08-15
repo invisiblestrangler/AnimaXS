@@ -62,7 +62,8 @@ final class GenerationMetricsTests: XCTestCase {
         let text = collector.snapshot().summaryText
         XCTAssertTrue(text.contains("Generation: 247.8 s"))
         XCTAssertTrue(text.contains("Measured GPU command time: 181.3 s"))
-        XCTAssertTrue(text.contains("Weight copy/load time: 31.5 s"))
+        XCTAssertTrue(text.contains("Weight copy/load CPU work: 31.5 s, 37 MB"))
+        XCTAssertTrue(text.contains("may overlap GPU time when ping-pong is on"))
         XCTAssertTrue(text.contains("Host/other measured time: 35.0 s"))
         XCTAssertTrue(text.contains("Peak Metal allocation: 1.40 GB"))
         XCTAssertTrue(text.contains("Minimum available process memory: 572 MB"))
@@ -74,5 +75,66 @@ final class GenerationMetricsTests: XCTestCase {
         collector.finalize(totalWall: 10)
         let text = collector.snapshot().summaryText
         XCTAssertFalse(text.contains("Minimum available process memory: 0"))
+    }
+
+    /// The summary must embed the immutable per-run config snapshot, the
+    /// executor tile counters, the environment start/end, and the overlap
+    /// caveat for weight-copy time (§14, §18.6).
+    func testSummaryIncludesConfigCountersAndEnvironment() {
+        let collector = MetricsCollector()
+        var config = InferenceOptimizationConfig.currentBaseline
+        config.linearTileRows = 1024
+        config.attentionTileRows = 512
+        config.directLinearMPSIO = true
+        config.pingPongWeightStreaming = false
+        config.numericalMonitoring = false
+        collector.recordOptimizationConfig(config)
+        collector.recordLinearGEMMTile(directInput: true, directOutput: true)
+        collector.recordLinearGEMMTile(directInput: true, directOutput: false)
+        collector.recordLinearGEMMTile(directInput: false, directOutput: true)
+        collector.recordAttentionQueryTile()
+        collector.recordEnvironmentStart(EnvironmentSnapshot(
+            powerState: "unplugged", batteryLevel: 78, thermalState: "nominal", lowPowerMode: false))
+        collector.recordEnvironmentEnd(EnvironmentSnapshot(
+            powerState: "unplugged", batteryLevel: 51, thermalState: "fair", lowPowerMode: false))
+        collector.finalize(totalWall: 100)
+
+        let text = collector.snapshot().summaryText
+        // Config snapshot.
+        XCTAssertTrue(text.contains("Inference configuration"))
+        XCTAssertTrue(text.contains("DiT pack: W4 production"))
+        XCTAssertTrue(text.contains("Linear tile rows: 1024"))
+        XCTAssertTrue(text.contains("Attention tile rows: 512"))
+        XCTAssertTrue(text.contains("Direct MPS linear I/O: on"))
+        XCTAssertTrue(text.contains("Ping-pong weight streaming: off"))
+        XCTAssertTrue(text.contains("Numerical monitor: off"))
+        // Checkpointing on for production W4.
+        XCTAssertTrue(text.contains("Checkpointing: on"))
+        // Counters: 3 GEMM tiles → 2 direct + 1 copied input, 2 direct + 1 copied output.
+        XCTAssertTrue(text.contains("Linear GEMM tiles: 3"))
+        XCTAssertTrue(text.contains("Linear input tiles: 2 direct / 1 copied"))
+        XCTAssertTrue(text.contains("Linear output tiles: 2 direct / 1 copied"))
+        XCTAssertTrue(text.contains("Attention query tiles: 1"))
+        // Monitor OFF wording.
+        XCTAssertTrue(text.contains("Numerical monitor: off (Euler finite guard on)"))
+        XCTAssertTrue(text.contains("Numerical warnings: not collected"))
+        XCTAssertFalse(text.contains("Numerical warnings: 0"))
+        // Environment.
+        XCTAssertTrue(text.contains("Power: unplugged -> unplugged"))
+        XCTAssertTrue(text.contains("Battery: 78% -> 51%"))
+        XCTAssertTrue(text.contains("Thermal: nominal -> fair"))
+        XCTAssertTrue(text.contains("Low Power Mode: off -> off"))
+    }
+
+    /// W8 runs report checkpointing disabled in the summary (§13).
+    func testSummaryReportsCheckpointingDisabledForW8() {
+        let collector = MetricsCollector()
+        var config = InferenceOptimizationConfig.currentBaseline
+        config.ditPackVariant = .experimentalW8V2
+        collector.recordOptimizationConfig(config)
+        collector.finalize(totalWall: 100)
+        let text = collector.snapshot().summaryText
+        XCTAssertTrue(text.contains("DiT pack: W8 v2 experimental"))
+        XCTAssertTrue(text.contains("Checkpointing: off (experimental W8)"))
     }
 }
