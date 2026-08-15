@@ -4,7 +4,7 @@ import Metal
 /// One resolved model pack: its URL, component, and the variant descriptor
 /// identifying which accepted variant (W4 or W8-v2 for DiT) was actually
 /// installed and verified.
-struct ResolvedModelPack: Equatable {
+struct ResolvedModelPack: Hashable {
     let url: URL
     let component: ModelComponent
     let variant: ModelVariantDescriptor

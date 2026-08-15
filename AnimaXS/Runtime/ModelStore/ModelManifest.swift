@@ -41,7 +41,7 @@ struct ModelManifestEntry: Codable, Equatable {
 /// the human-visible variant id ("w4" or "w8-v2") and the display filename so
 /// telemetry can report which pack actually ran even though the app-owned
 /// local file is always named after the W4 slot.
-struct ModelVariantDescriptor: Equatable {
+struct ModelVariantDescriptor: Hashable {
     let id: String
     let displayFilename: String
     let size: UInt64
