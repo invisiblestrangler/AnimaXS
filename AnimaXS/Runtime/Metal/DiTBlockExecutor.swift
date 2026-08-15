@@ -32,6 +32,9 @@ final class DiTBlockExecutor {
     private let attention: AttentionExecutor
     private let activationNumerics: ActivationNumerics
     private let monitor: NumericalMonitor?
+    /// Immutable optimization snapshot for this executor's lifetime (captured
+    /// at Generate). Controls the P3-A/P3-B fused paths.
+    private let optimization: InferenceOptimizationConfig
     /// Run telemetry collector (nil in tests / diagnostic-only construction).
     /// Propagated to the child linear/attention executors so their cheap tile
     /// counters land in the SAME run metrics object (never a separate one).
@@ -59,6 +62,7 @@ final class DiTBlockExecutor {
         self.context = context
         self.file = file
         self.locator = locator
+        self.optimization = optimization
         // Ping-pong ON keeps the existing two-slot streamer; OFF measures the
         // same generation with one slot and no look-ahead prefetch.
         let slotCount = optimization.pingPongWeightStreaming ? 2 : 1
@@ -223,15 +227,25 @@ final class DiTBlockExecutor {
             command, siluEmb: siluEmb, adalnLora: adalnLora,
             w1: cross ? weights.modCross1 : weights.modSelf1,
             w2: cross ? weights.modCross2 : weights.modSelf2)
-        let norm = buffer("dit.norm.f32", Self.tokens * Self.dim, Float.self)
-        let modulated = buffer("dit.modulated.f32", Self.tokens * Self.dim, Float.self)
         let projectionInput = buffer("dit.projectionInput.f16", Self.tokens * Self.dim, Float16.self)
-        try encodeLayerNorm(command, input: residual, output: norm, rows: Self.tokens, columns: Self.dim)
-        try encodeModulate(command, normalized: norm, modulation: modulation,
-                           output: modulated, count: Self.tokens * Self.dim)
-        try encodeFloatToComputeHalf(command, input: modulated, output: projectionInput,
-                                      count: Self.tokens * Self.dim,
-                                      probe: cross ? .crossProjectionInput : .selfProjectionInput)
+        if optimization.fusedNormModulation {
+            // P3-A: one fused pass (LayerNorm + AdaLN + BF16 boundary + fp16
+            // conversion). No dit.norm.f32 / dit.modulated.f32 intermediates.
+            try encodeFusedNormModulate(command, residual: residual, modulation: modulation,
+                                        output: projectionInput, rows: Self.tokens,
+                                        columns: Self.dim,
+                                        probe: cross ? .crossProjectionInput : .selfProjectionInput)
+        } else {
+            // Legacy three-pass path, kept exactly for A/B.
+            let norm = buffer("dit.norm.f32", Self.tokens * Self.dim, Float.self)
+            let modulated = buffer("dit.modulated.f32", Self.tokens * Self.dim, Float.self)
+            try encodeLayerNorm(command, input: residual, output: norm, rows: Self.tokens, columns: Self.dim)
+            try encodeModulate(command, normalized: norm, modulation: modulation,
+                               output: modulated, count: Self.tokens * Self.dim)
+            try encodeFloatToComputeHalf(command, input: modulated, output: projectionInput,
+                                         count: Self.tokens * Self.dim,
+                                         probe: cross ? .crossProjectionInput : .selfProjectionInput)
+        }
 
         let qToken = buffer("dit.q.token.f16", Self.tokens * Self.dim, Float16.self)
         let qHead = buffer("dit.q.head.f16", Self.tokens * Self.dim, Float16.self)
@@ -321,36 +335,54 @@ final class DiTBlockExecutor {
     ) throws {
         let modulation = try encodeModulation(command, siluEmb: siluEmb, adalnLora: adalnLora,
                                               w1: weights.modMLP1, w2: weights.modMLP2)
-        let norm = buffer("dit.norm.f32", Self.tokens * Self.dim, Float.self)
-        let modulated = buffer("dit.modulated.f32", Self.tokens * Self.dim, Float.self)
         let projectionInput = buffer("dit.projectionInput.f16", Self.tokens * Self.dim, Float16.self)
-        try encodeLayerNorm(command, input: residual, output: norm, rows: Self.tokens, columns: Self.dim)
-        try encodeModulate(command, normalized: norm, modulation: modulation,
-                           output: modulated, count: Self.tokens * Self.dim)
-        try encodeFloatToComputeHalf(command, input: modulated, output: projectionInput,
-                                      count: Self.tokens * Self.dim, probe: .mlpProjectionInput)
+        if optimization.fusedNormModulation {
+            // P3-A: one fused pass (LayerNorm + AdaLN + BF16 boundary + fp16
+            // conversion). No dit.norm.f32 / dit.modulated.f32 intermediates.
+            try encodeFusedNormModulate(command, residual: residual, modulation: modulation,
+                                        output: projectionInput, rows: Self.tokens,
+                                        columns: Self.dim, probe: .mlpProjectionInput)
+        } else {
+            // Legacy three-pass path, kept exactly for A/B.
+            let norm = buffer("dit.norm.f32", Self.tokens * Self.dim, Float.self)
+            let modulated = buffer("dit.modulated.f32", Self.tokens * Self.dim, Float.self)
+            try encodeLayerNorm(command, input: residual, output: norm, rows: Self.tokens, columns: Self.dim)
+            try encodeModulate(command, normalized: norm, modulation: modulation,
+                               output: modulated, count: Self.tokens * Self.dim)
+            try encodeFloatToComputeHalf(command, input: modulated, output: projectionInput,
+                                         count: Self.tokens * Self.dim, probe: .mlpProjectionInput)
+        }
         let hiddenHalf = buffer("dit.hidden.f16", Self.tokens * Self.hidden, Float16.self)
-        let hiddenFloat = buffer("dit.hidden.f32", Self.tokens * Self.hidden, Float.self)
         try linear.encode(commandBuffer: command, input: projectionInput,
                           weight: weights.mlp1, output: hiddenHalf, inputRows: Self.tokens)
         try encodeHalfComputeBoundary(command, hiddenHalf, count: Self.tokens * Self.hidden)
-        try encodeConvert(command, kernel: "half_to_float", input: hiddenHalf,
-                          output: hiddenFloat, count: Self.tokens * Self.hidden)
-        // P2-C: f16→f32 conversion traffic (bytes written, counted once).
-        metrics?.recordConversionBytes(UInt64(Self.tokens * Self.hidden * MemoryLayout<Float>.stride))
-        try encodeUnary(command, kernel: "gelu", input: hiddenFloat,
-                        output: hiddenFloat, count: Self.tokens * Self.hidden)
-        try encodeComputeBoundary(command, hiddenFloat, count: Self.tokens * Self.hidden)
-        if let monitor {
-            try encodeProbeConvert(command, input: hiddenFloat, output: hiddenHalf,
-                                   count: Self.tokens * Self.hidden,
-                                   monitor: monitor, probe: .mlpHiddenToHalf)
+        if optimization.fusedMLPActivation {
+            // P3-B: in-place GELU on the fp16 hidden activations (fp32 register
+            // arithmetic, optional BF16 rounding). No dit.hidden.f32 (~32 MiB)
+            // intermediate and no conversion passes.
+            try encodeFusedGELUHalf(command, values: hiddenHalf,
+                                    count: Self.tokens * Self.hidden, probe: .mlpHiddenToHalf)
         } else {
-            try encodeConvert(command, kernel: "float_to_half", input: hiddenFloat,
-                              output: hiddenHalf, count: Self.tokens * Self.hidden)
+            // Legacy path, kept exactly for A/B.
+            let hiddenFloat = buffer("dit.hidden.f32", Self.tokens * Self.hidden, Float.self)
+            try encodeConvert(command, kernel: "half_to_float", input: hiddenHalf,
+                              output: hiddenFloat, count: Self.tokens * Self.hidden)
+            // P2-C: f16→f32 conversion traffic (bytes written, counted once).
+            metrics?.recordConversionBytes(UInt64(Self.tokens * Self.hidden * MemoryLayout<Float>.stride))
+            try encodeUnary(command, kernel: "gelu", input: hiddenFloat,
+                            output: hiddenFloat, count: Self.tokens * Self.hidden)
+            try encodeComputeBoundary(command, hiddenFloat, count: Self.tokens * Self.hidden)
+            if let monitor {
+                try encodeProbeConvert(command, input: hiddenFloat, output: hiddenHalf,
+                                       count: Self.tokens * Self.hidden,
+                                       monitor: monitor, probe: .mlpHiddenToHalf)
+            } else {
+                try encodeConvert(command, kernel: "float_to_half", input: hiddenFloat,
+                                  output: hiddenHalf, count: Self.tokens * Self.hidden)
+            }
+            // P2-C: f32→f16 conversion traffic (bytes written, counted once).
+            metrics?.recordConversionBytes(UInt64(Self.tokens * Self.hidden * MemoryLayout<Float16>.stride))
         }
-        // P2-C: f32→f16 conversion traffic (bytes written, counted once).
-        metrics?.recordConversionBytes(UInt64(Self.tokens * Self.hidden * MemoryLayout<Float16>.stride))
         let branch = buffer("dit.branch.f16", Self.tokens * Self.dim, Float16.self)
         try linear.encode(commandBuffer: command, input: hiddenHalf,
                           weight: weights.mlp2, output: branch, inputRows: Self.tokens)
@@ -529,6 +561,67 @@ final class DiTBlockExecutor {
         encoder.setBytes(&n, length: 4, index: 4)
         encoder.setBytes(&elementCount, length: 4, index: 5)
         dispatch1D(encoder, pipeline: pipeline, count: count)
+        encoder.endEncoding()
+    }
+
+    /// P3-A: one fused pass replacing layernorm → modulate → boundary → toHalf.
+    /// The modulation buffer uses the EXACT legacy layout (scale at
+    /// `modulationOffset` = dim*4, shift at offset 0). The optional BF16
+    /// rounding sits between modulation and the fp16 conversion, matching the
+    /// legacy `encodeFloatToComputeHalf` boundary placement. When a monitor is
+    /// present the probe kernel records the same stats as the legacy
+    /// `float_to_half_probe` pass, on the value fed to `half()`.
+    private func encodeFusedNormModulate(
+        _ command: MTLCommandBuffer, residual: MTLBuffer, modulation: MTLBuffer,
+        output: MTLBuffer, rows: Int, columns: Int, probe: NumericalMonitor.Probe
+    ) throws {
+        let kernel = monitor == nil ? "dit_layernorm_modulate_to_half" : "dit_layernorm_modulate_to_half_probe"
+        let pipeline = try context.pipeline(named: kernel)
+        guard let encoder = command.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create fused LayerNorm/modulate encoder")
+        }
+        var n = UInt32(columns), epsilon = Self.eps, rowCount = UInt32(rows)
+        var modulationOffset = UInt32(Self.dim * MemoryLayout<Float>.stride)
+        var boundary: UInt32 = emulatesBF16 ? 1 : 0
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(residual, offset: 0, index: 0)
+        encoder.setBuffer(modulation, offset: 0, index: 1)
+        encoder.setBuffer(output, offset: 0, index: 2)
+        encoder.setBytes(&n, length: 4, index: 3)
+        encoder.setBytes(&epsilon, length: 4, index: 4)
+        encoder.setBytes(&rowCount, length: 4, index: 5)
+        encoder.setBytes(&modulationOffset, length: 4, index: 6)
+        encoder.setBytes(&boundary, length: 4, index: 7)
+        if let monitor {
+            monitor.bindProbe(encoder, probe: probe, statsIndex: 8, slotIndex: 9)
+        }
+        encoder.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    /// P3-B: in-place GELU on the fp16 MLP hidden activations (fp32 register
+    /// arithmetic + optional BF16 rounding). With a monitor the probe kernel
+    /// records the same stats as the legacy `mlpHiddenToHalf` conversion.
+    private func encodeFusedGELUHalf(
+        _ command: MTLCommandBuffer, values: MTLBuffer, count: Int,
+        probe: NumericalMonitor.Probe
+    ) throws {
+        let kernel = monitor == nil ? "dit_gelu_half_inplace" : "dit_gelu_half_inplace_probe"
+        let pipeline = try context.pipeline(named: kernel)
+        guard let encoder = command.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create fused GELU half encoder")
+        }
+        var elementCount = UInt32(count)
+        var boundary: UInt32 = emulatesBF16 ? 1 : 0
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(values, offset: 0, index: 0)
+        encoder.setBytes(&elementCount, length: 4, index: 1)
+        encoder.setBytes(&boundary, length: 4, index: 2)
+        if let monitor {
+            monitor.bindProbe(encoder, probe: probe, statsIndex: 3, slotIndex: 4)
+        }
+        dispatchProbe(encoder, pipeline: pipeline, count: count)
         encoder.endEncoding()
     }
 

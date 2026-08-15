@@ -53,7 +53,7 @@ final class DitForward {
             optimization: optimization)
         finalLayer = try DiTFinalLayerExecutor(
             context: context, file: file, activationNumerics: activationNumerics,
-            monitor: monitor)
+            monitor: monitor, optimization: optimization)
     }
 
     /// Mutates the tightly packed fp32 `[1024,2048]` residual in place.

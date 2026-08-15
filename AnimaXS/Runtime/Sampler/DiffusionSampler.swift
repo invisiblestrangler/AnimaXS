@@ -79,7 +79,7 @@ final class DiffusionSampler {
         self.monitor = monitor
         preparation = try DiTPreparationExecutor(
             context: context, file: file, activationNumerics: resolvedActivation,
-            monitor: monitor)
+            monitor: monitor, optimization: optimization)
         forward = try DitForward(
             context: context, file: file, attentionNumerics: resolvedAttention,
             activationNumerics: resolvedActivation, monitor: monitor,

@@ -25,7 +25,8 @@ final class DiTFinalLayerExecutor {
 
     init(context: MetalContext, file: AnimapkFile,
          activationNumerics: ActivationNumerics = .legacy,
-         monitor: NumericalMonitor? = nil) throws {
+         monitor: NumericalMonitor? = nil,
+         optimization: InferenceOptimizationConfig = .currentBaseline) throws {
         let range = try DiTFinalLayerLocator(file: file).range
         guard range.length <= UInt64(Int.max) else {
             throw AnimapkError.validation("DiT final layer range is too large")
@@ -35,7 +36,9 @@ final class DiTFinalLayerExecutor {
         self.range = range
         self.streamer = try WeightStreamer(device: context.device, capacity: Int(range.length))
         self.buffers = BufferPool(device: context.device)
-        self.linear = LinearExecutor(context: context)
+        self.linear = LinearExecutor(
+            context: context, tileRows: optimization.linearTileRows,
+            directMPSIO: optimization.directLinearMPSIO)
         self.activationNumerics = activationNumerics
         self.monitor = monitor
     }

@@ -23,7 +23,8 @@ final class DiTPreparationExecutor {
 
     init(context: MetalContext, file: AnimapkFile,
          activationNumerics: ActivationNumerics = .legacy,
-         monitor: NumericalMonitor? = nil) throws {
+         monitor: NumericalMonitor? = nil,
+         optimization: InferenceOptimizationConfig = .currentBaseline) throws {
         let locator = try DiTPreparationLocator(file: file)
         guard file.quantGroup == 64 else {
             throw AnimapkError.validation("DiT preparation requires quant group 64")
@@ -32,7 +33,9 @@ final class DiTPreparationExecutor {
         self.file = file
         self.locator = locator
         self.streamer = try WeightStreamer(device: context.device, capacity: Int(locator.range.length))
-        self.linear = LinearExecutor(context: context)
+        self.linear = LinearExecutor(
+            context: context, tileRows: optimization.linearTileRows,
+            directMPSIO: optimization.directLinearMPSIO)
         self.buffers = BufferPool(device: context.device)
         self.activationNumerics = activationNumerics
         self.monitor = monitor
