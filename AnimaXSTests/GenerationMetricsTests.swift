@@ -259,13 +259,15 @@ final class GenerationMetricsTests: XCTestCase {
     // and reported in the summary. Proves a fused path eliminated traffic.
     func testFusedTrafficSavedAccumulatesAndReports() {
         let collector = MetricsCollector()
+        let normModulatedSaved = UInt64(1024 * 2048 * 4) * 2 // norm + modulated fp32
+        let hiddenFloatSaved = UInt64(1024 * 8192 * 4)       // hiddenFloat fp32
         collector.beginStep(0)
-        collector.recordFusedTrafficSaved(1024 * 2048 * 4 * 2) // norm + modulated fp32
-        collector.recordFusedTrafficSaved(1024 * 8192 * 4)      // hiddenFloat fp32
+        collector.recordFusedTrafficSaved(normModulatedSaved)
+        collector.recordFusedTrafficSaved(hiddenFloatSaved)
         collector.endStep(completed: true)
         collector.finalize(totalWall: 10)
         let metrics = collector.snapshot()
-        let expected = UInt64(1024 * 2048 * 4 * 2 + 1024 * 8192 * 4)
+        let expected = normModulatedSaved + hiddenFloatSaved
         XCTAssertEqual(metrics.fusedTrafficSavedBytes, expected)
         XCTAssertEqual(metrics.stepMetrics[0].fusedTrafficSavedBytes, expected)
         XCTAssertTrue(metrics.summaryText.contains("fused activation traffic saved"))
