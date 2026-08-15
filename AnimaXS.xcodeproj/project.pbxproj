@@ -55,6 +55,7 @@
 		71ADB51252B165CD5A774E95 /* VerificationReceipt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3270A28300E6D83F52536EDB /* VerificationReceipt.swift */; };
 		71B669F9AF60FB45E4842F57 /* t5_special_tokens_map.json in Resources */ = {isa = PBXBuildFile; fileRef = 67B56E4FB7D12CC1F63A52F9 /* t5_special_tokens_map.json */; };
 		7387F6A165EC6A2781B76716 /* ModulationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14DA44DE36980DC498AB4B99 /* ModulationTests.swift */; };
+		75F9518D94777534C492EDAA /* WeightStreamerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8F65944449BDD5AE90E521F /* WeightStreamerTests.swift */; };
 		774F60C7B433299EA6C55C9B /* DiTInputTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28C2E8E80AFBE05DB0577977 /* DiTInputTests.swift */; };
 		783DCD7D892DE4BFC079C74D /* DiffusionSampler.swift in Sources */ = {isa = PBXBuildFile; fileRef = 21050D453899FA878AFF60FA /* DiffusionSampler.swift */; };
 		79538031C513FDA03EF8F9AF /* DiTPreparationExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11F46883652E38191A3A29BC /* DiTPreparationExecutor.swift */; };
@@ -228,6 +229,7 @@
 		F28A65A79E0706DF0F0D5AB2 /* qwen_tokenizer.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = qwen_tokenizer.json; sourceTree = "<group>"; };
 		F3F286C454EBE7A92C592214 /* AttentionExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AttentionExecutor.swift; sourceTree = "<group>"; };
 		F8C434A9F5154FAA0D0A520E /* Wan21LatentFormat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wan21LatentFormat.swift; sourceTree = "<group>"; };
+		F8F65944449BDD5AE90E521F /* WeightStreamerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WeightStreamerTests.swift; sourceTree = "<group>"; };
 		F93DCAAE4B32EEDADD9FE44F /* VAEDecoderLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VAEDecoderLocator.swift; sourceTree = "<group>"; };
 		FA4C64A421E46C82C2311767 /* t5_tokenizer_config.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = t5_tokenizer_config.json; sourceTree = "<group>"; };
 		FA91D9A84879D3562284E548 /* case1_cond_context.f32 */ = {isa = PBXFileReference; path = case1_cond_context.f32; sourceTree = "<group>"; };
@@ -507,6 +509,7 @@
 				507AD044478BA9533EE6512E /* VAEDecoderLocatorTests.swift */,
 				94B18038F06B899E8A619F95 /* VAEPrimitiveTests.swift */,
 				6223C8A55E7E942B28480E48 /* Wan21LatentFormatTests.swift */,
+				F8F65944449BDD5AE90E521F /* WeightStreamerTests.swift */,
 				C1AF906B806B069AFE8824C2 /* Fixtures */,
 				7B14170E7B42897CE5D8540B /* Support */,
 			);
@@ -667,6 +670,7 @@
 				6145717FE3945CB7AA4DFBD5 /* VAEDecoderLocatorTests.swift in Sources */,
 				0DBB66A5E3DA44E0A984B762 /* VAEPrimitiveTests.swift in Sources */,
 				ABDB45E6553263148CA027AB /* Wan21LatentFormatTests.swift in Sources */,
+				75F9518D94777534C492EDAA /* WeightStreamerTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
