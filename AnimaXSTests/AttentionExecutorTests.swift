@@ -207,7 +207,8 @@ final class AttentionExecutorTests: XCTestCase {
     func testAttentionQueryTileCounterCountsHeadsAndTiles() async throws {
         let context = try requireContext()
         let heads = 2, queryCount = 130, keyCount = 64, dim = 8
-        let zeros = [Float16](repeating: 0, count: queryCount * dim)
+        // Per-head layout: [heads, queryCount, dim].
+        let zeros = [Float16](repeating: 0, count: heads * queryCount * dim)
         let zeroKey = [Float16](repeating: 0, count: keyCount * dim)
         let value = [Float16](repeating: 1, count: keyCount * dim)
         let output = try XCTUnwrap(context.device.makeBuffer(

@@ -277,8 +277,10 @@ final class LinearExecutorTests: XCTestCase {
                     : (pointer.pointee & 0x0F) | (q << 4)
             }
         }
-        let scales = try makeBuffer(bytes: n * scalarBytes, on: context.device)
-        let zeros = try makeBuffer(bytes: n * scalarBytes, on: context.device)
+        // Scale/zero are group-64 quantized: one pair per (row, group).
+        let groupCount = (k + 63) / 64
+        let scales = try makeBuffer(bytes: n * groupCount * scalarBytes, on: context.device)
+        let zeros = try makeBuffer(bytes: n * groupCount * scalarBytes, on: context.device)
         for row in 0..<n {
             store(Float16(0.125).bitPattern, in: scales, byteOffset: row * scalarBytes)
             store(Float16(-0.5).bitPattern, in: zeros, byteOffset: row * scalarBytes)
