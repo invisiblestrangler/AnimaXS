@@ -46,6 +46,11 @@
 - ci.yml Gate B #31940846369: success (project-consistency, iphone-build, simulator-tests) at 86c5904
 - full-inference-refine #31941211295: PASS both W4 (w4Legacy, latent cos 0.8231, RGB cos 0.7818) and W8 (w8LegacyStabilized, latent cos 0.9105, RGB cos 0.8613); generated images coherent, no checkerboard/NaN
 
+## Merge
+- Merged fix/device-stability-no-checkpoint -> main (fast-forward) on 2026-08-16; main now at e5bd03c, pushed.
+- ci.yml on main #31945270251: success (project-consistency, iphone-build, simulator-tests) — merged main confirmed green.
+- Feature branch NOT yet deleted (available for reference); can be deleted once no longer needed.
+
 ## Deviations
 - (none)
 
