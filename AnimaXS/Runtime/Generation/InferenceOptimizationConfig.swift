@@ -209,34 +209,34 @@ enum InferencePreset: String, CaseIterable {
             c.directLinearMPSIO = true
             c.pingPongWeightStreaming = true
         case .fusedTraffic:
-            c = .current1024Control.makeConfig()
+            c = InferencePreset.current1024Control.makeConfig()
             c.fusedNormModulation = true
             c.fusedMLPActivation = true
         case .stridedMPS:
-            c = .fusedTraffic.makeConfig()
+            c = InferencePreset.fusedTraffic.makeConfig()
             c.stridedTokenMajorAttention = true
             c.attentionBackend = .stridedTokenMajorMPS
         case .stridedMPSKV:
-            c = .stridedMPS.makeConfig()
+            c = InferencePreset.stridedMPS.makeConfig()
             c.crossKVCache = true
         case .noCopyCandidate:
-            c = .stridedMPSKV.makeConfig()
+            c = InferencePreset.stridedMPSKV.makeConfig()
             c.noCopyWeightSource = true
         case .streamingMPSCandidate:
-            c = .fusedTraffic.makeConfig()
+            c = InferencePreset.fusedTraffic.makeConfig()
             c.crossKVCache = true
             c.stridedTokenMajorAttention = true
             c.attentionBackend = .streamingMPS
         case .metalFlashCandidate:
-            c = .fusedTraffic.makeConfig()
+            c = InferencePreset.fusedTraffic.makeConfig()
             c.crossKVCache = true
             c.stridedTokenMajorAttention = true
             c.attentionBackend = .metalFlash
         case .directQGEMMCandidate:
-            c = .stridedMPSKV.makeConfig()
+            c = InferencePreset.stridedMPSKV.makeConfig()
             c.linearBackend = .hybrid
         case .allCandidate:
-            c = .stridedMPSKV.makeConfig()
+            c = InferencePreset.stridedMPSKV.makeConfig()
             c.noCopyWeightSource = true
             c.attentionBackend = .streamingMPS
             c.linearBackend = .hybrid
