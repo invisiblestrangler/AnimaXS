@@ -13,12 +13,16 @@ final class WeightStreamerTests: XCTestCase {
     }
 
     /// Build a minimal valid W4 pack (16KB-aligned blobs) via TestPackFactory.
-    /// The pack file is intentionally NOT removed here — the returned URL must
-    /// stay valid for the duration of the test.
+    /// The blob payload is sized to a 4096 multiple so the single-blob range
+    /// satisfies the P6 page-aligned START AND END eligibility (blob offsets
+    /// are 16 KB-aligned by the factory; a 4096-byte blob length makes the
+    /// end 4096-aligned too). The pack file is intentionally NOT removed here
+    /// — the returned URL must stay valid for the duration of the test.
     private func makePack() throws -> URL {
         let dir = try makeTempDir()
         let k = 64
-        let data = Data(repeating: 0xAB, count: k / 2)
+        // 4092 bytes + 2 scale + 2 zero = 4096-byte blob (page-aligned length).
+        let data = Data(repeating: 0xAB, count: 4_092)
         let scale = Data(repeating: 0, count: (k / 64) * 2)
         let zero = Data(repeating: 0, count: (k / 64) * 2)
         let spec = TestPackFactory.BlobSpec(
@@ -132,6 +136,51 @@ final class WeightStreamerTests: XCTestCase {
         let misaligned = AnimapkExecutionRange(
             logicalIndex: 99, fileOffset: 256, length: 64, tensors: [])
         XCTAssertFalse(WeightNoCopyPolicy.isEligible(range: misaligned, file: file))
+    }
+
+    /// P6 HARDENED (Task 5): a range with a page-aligned START but a
+    /// NON-page-aligned length/end is ineligible — BOTH the start and the end
+    /// of the aliased region must sit on page boundaries. Correctness
+    /// hardening only: it does NOT claim to prove the historical A12 GPU page
+    /// fault (kIOGPUCommandBufferCallbackErrorPageFault) was caused by the
+    /// no-copy path.
+    func testP6PageAlignedStartButNonPageAlignedEndIsIneligible() throws {
+        let url = try makePack()
+        let file = try AnimapkFile(url: url)
+        // Start is 4096-aligned but the length (and therefore the end) is not.
+        let partial = AnimapkExecutionRange(
+            logicalIndex: 99, fileOffset: 16_384, length: 4_096 + 64, tensors: [])
+        XCTAssertEqual(Int(partial.fileRange.lowerBound) % 4_096, 0,
+                       "sanity: start must be page-aligned")
+        XCTAssertNotEqual(Int(partial.fileRange.upperBound) % 4_096, 0,
+                          "sanity: end must NOT be page-aligned")
+        XCTAssertFalse(WeightNoCopyPolicy.isEligible(range: partial, file: file),
+                       "page-aligned start with non-page-aligned end must be ineligible")
+    }
+
+    /// P6 HARDENED (Task 5): a range whose start AND end are both
+    /// page-aligned remains eligible (the existing eligibility contract,
+    /// now with the end requirement explicit).
+    func testP6PageAlignedStartAndEndIsEligible() throws {
+        let url = try makePack()
+        let file = try AnimapkFile(url: url)
+        let aligned = AnimapkExecutionRange(
+            logicalIndex: 99, fileOffset: 16_384, length: 8_192, tensors: [])
+        XCTAssertEqual(Int(aligned.fileRange.lowerBound) % 4_096, 0)
+        XCTAssertEqual(Int(aligned.fileRange.upperBound) % 4_096, 0)
+        XCTAssertTrue(WeightNoCopyPolicy.isEligible(range: aligned, file: file))
+    }
+
+    /// P6 HARDENED (Task 5): a fully page-aligned range that runs past EOF is
+    /// still ineligible (bounds check unchanged).
+    func testP6PageAlignedRangePastEOFIsIneligible() throws {
+        let url = try makePack()
+        let file = try AnimapkFile(url: url)
+        // Start + end aligned, but the range extends past the file's size.
+        let pastEOF = AnimapkExecutionRange(
+            logicalIndex: 99, fileOffset: 16_384,
+            length: UInt64(file.header.fileSize) + 4_096, tensors: [])
+        XCTAssertFalse(WeightNoCopyPolicy.isEligible(range: pastEOF, file: file))
     }
 
     /// P6-A/B: loading an eligible range with `.noCopy` yields an MTLBuffer

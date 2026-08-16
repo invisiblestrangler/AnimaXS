@@ -70,8 +70,8 @@ final class InferenceOptimizationSettings: ObservableObject {
             ?? baseline.stridedTokenMajorAttention
         crossKVCache = defaults.object(forKey: Keys.crossKVCache) as? Bool
             ?? baseline.crossKVCache
-        noCopyWeightSource = defaults.object(forKey: Keys.noCopyWeightSource) as? Bool
-            ?? baseline.noCopyWeightSource
+        noCopyWeightSource = InferenceOptimizationSettings.loadNoCopyWeightSource(
+            from: defaults, baseline: baseline.noCopyWeightSource)
         attentionBackend = InferenceOptimizationSettings.loadAttentionBackend(
             from: defaults, baseline: baseline.attentionBackend)
         linearBackend = InferenceOptimizationSettings.loadLinearBackend(
@@ -128,8 +128,17 @@ final class InferenceOptimizationSettings: ObservableObject {
     }
 
     func setNoCopyWeightSource(_ value: Bool) {
-        noCopyWeightSource = value
-        defaults.set(value, forKey: Keys.noCopyWeightSource)
+        // DISABLED (Task 5): the P6 mmap no-copy weight source is blocked for
+        // normal production/device settings after a physical A12 run hit a
+        // real GPU page fault (kIOGPUCommandBufferCallbackErrorPageFault)
+        // while no-copy bytes were being served. `true` is normalized to
+        // `false` and NEVER persisted; the research implementation
+        // (WeightNoCopyPolicy.makeAlias / WeightStreamer) stays intact so an
+        // isolated hardware test can re-enable it later. This is
+        // correctness/safety hardening, NOT a proof of the historical root
+        // cause.
+        noCopyWeightSource = false
+        defaults.set(false, forKey: Keys.noCopyWeightSource)
     }
 
     func setAttentionBackend(_ value: DiTAttentionBackend) {
@@ -146,6 +155,16 @@ final class InferenceOptimizationSettings: ObservableObject {
     /// runs, so a manual selection is rejected/normalized to
     /// `.dequantizedMPS` and never persisted.
     static let quarantineReason = "P8 direct QGEMM (.directQuantized / .hybrid) is temporarily disabled: it measured ~10x slower than dequantized MPS on the A12 device (performance regression, not a proven correctness failure). The research kernel remains testable directly via LinearExecutor."
+
+    /// DISABLED (Task 5): human-readable reason for the P6 mmap no-copy
+    /// weight-source block. A physical A12 run hit a real GPU page fault
+    /// (`kIOGPUCommandBufferCallbackErrorPageFault`) while no-copy bytes
+    /// were being served, so normal production/device settings can never
+    /// select the no-copy path again until an isolated hardware test proves
+    /// it safe. This is correctness/safety hardening, NOT a proof of the
+    /// historical root cause — the research implementation
+    /// (`WeightNoCopyPolicy.makeAlias` / `WeightStreamer`) stays intact.
+    static let p6NoCopyDisabledReason = "P6 mmap no-copy weight source is temporarily disabled: a physical A12 run hit a real GPU page fault (kIOGPUCommandBufferCallbackErrorPageFault) while no-copy bytes were being served. This is correctness/safety hardening, not a proof of the historical root cause; the research implementation remains intact for an isolated hardware test."
 
     func setLinearBackend(_ value: DiTLinearBackend) {
         // QUARANTINED (Task 4): reject direct/hybrid selections for normal
@@ -287,6 +306,27 @@ final class InferenceOptimizationSettings: ObservableObject {
             return baseline
         }
         return value
+    }
+
+    /// DISABLED (Task 5): the P6 mmap no-copy weight source is blocked for
+    /// normal production/device settings after a physical A12 run hit a real
+    /// GPU page fault (`kIOGPUCommandBufferCallbackErrorPageFault`) while
+    /// no-copy bytes were being served. A persisted `true` (e.g. from a
+    /// pre-disable build) is migrated back to `false` on load, and the
+    /// sanitized value is re-persisted so the store is clean. This is
+    /// correctness/safety hardening, NOT a proof of the historical root
+    /// cause — the research implementation stays intact for an isolated
+    /// hardware test.
+    static func loadNoCopyWeightSource(from defaults: UserDefaults,
+                                       baseline: Bool) -> Bool {
+        guard let persisted = defaults.object(forKey: Keys.noCopyWeightSource) as? Bool else {
+            return baseline
+        }
+        if persisted {
+            defaults.set(false, forKey: Keys.noCopyWeightSource)
+            return false
+        }
+        return persisted
     }
 
     /// Loads the persisted active preset. An invalid/corrupt value sanitizes

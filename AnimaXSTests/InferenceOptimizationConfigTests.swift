@@ -192,6 +192,64 @@ final class InferenceOptimizationConfigTests: XCTestCase {
                        "dequantizedMPS")
     }
 
+    // DISABLED (Task 5): a persisted noCopyWeightSource == true (e.g. from a
+    // pre-disable build) is migrated back to false on load, and the sanitized
+    // value is re-persisted so the store is clean — a normal device launch
+    // can never hand `true` to Metal.
+    @MainActor
+    func testPersistedNoCopyTrueMigratesToFalse() {
+        let defaults = makeDefaults()
+        defaults.set(true, forKey: InferenceOptimizationSettings.Keys.noCopyWeightSource)
+        let settings = InferenceOptimizationSettings(defaults: defaults)
+        XCTAssertFalse(settings.noCopyWeightSource,
+                       "persisted true must migrate to false on load")
+        XCTAssertFalse(settings.snapshot.noCopyWeightSource)
+        XCTAssertEqual(defaults.bool(forKey: InferenceOptimizationSettings.Keys.noCopyWeightSource),
+                       false,
+                       "the sanitized value must be re-persisted")
+        let reloaded = InferenceOptimizationSettings(defaults: defaults)
+        XCTAssertFalse(reloaded.noCopyWeightSource)
+        XCTAssertFalse(reloaded.snapshot.noCopyWeightSource)
+    }
+
+    // DISABLED (Task 5): a manual setNoCopyWeightSource(true) is
+    // normalized to false and NEVER reaches the persisted store.
+    @MainActor
+    func testSetNoCopyWeightSourceNormalizesTrueToFalse() {
+        let defaults = makeDefaults()
+        let settings = InferenceOptimizationSettings(defaults: defaults)
+        settings.setNoCopyWeightSource(true)
+        XCTAssertFalse(settings.noCopyWeightSource,
+                       "setNoCopyWeightSource(true) must normalize to false")
+        XCTAssertFalse(settings.snapshot.noCopyWeightSource)
+        XCTAssertEqual(defaults.bool(forKey: InferenceOptimizationSettings.Keys.noCopyWeightSource),
+                       false,
+                       "true must never be persisted")
+        // Setting false stays false and round-trips.
+        settings.setNoCopyWeightSource(false)
+        XCTAssertFalse(settings.noCopyWeightSource)
+        XCTAssertEqual(defaults.bool(forKey: InferenceOptimizationSettings.Keys.noCopyWeightSource),
+                       false)
+    }
+
+    // DISABLED (Task 5): applying a preset whose P6 no-copy part is disabled
+    // persists noCopyWeightSource == false (makeConfig already neutralizes
+    // it; the settings layer must never reintroduce true).
+    @MainActor
+    func testSetPresetNeverPersistsNoCopyTrue() {
+        for preset in [InferencePreset.noCopyCandidate, .allCandidate] {
+            let defaults = makeDefaults()
+            let settings = InferenceOptimizationSettings(defaults: defaults)
+            settings.setPreset(preset)
+            XCTAssertFalse(settings.noCopyWeightSource)
+            XCTAssertFalse(settings.snapshot.noCopyWeightSource)
+            XCTAssertEqual(defaults.bool(forKey: InferenceOptimizationSettings.Keys.noCopyWeightSource),
+                           false, "\(preset) must never persist noCopyWeightSource == true")
+            let reloaded = InferenceOptimizationSettings(defaults: defaults)
+            XCTAssertFalse(reloaded.noCopyWeightSource)
+        }
+    }
+
     // QUARANTINED (Task 4): the quarantined flag covers exactly the two
     // disabled P8 backends.
     func testQuarantineFlag() {
@@ -291,13 +349,18 @@ final class InferenceOptimizationConfigTests: XCTestCase {
         XCTAssertEqual(c.attentionBackend, .stridedTokenMajorMPS)
     }
 
-    // No-copy candidate = KV + mmap no-copy (experimental).
+    // No-copy candidate = KV + mmap no-copy (experimental). DISABLED
+    // (Task 5): the no-copy part is forced back to false — a physical A12
+    // run hit a real GPU page fault (kIOGPUCommandBufferCallbackErrorPageFault)
+    // while no-copy bytes were being served. Every other component of the
+    // combination still applies unchanged.
     @MainActor
     func testNoCopyCandidatePreset() {
         let c = InferencePreset.noCopyCandidate.makeConfig()
-        XCTAssertTrue(c.noCopyWeightSource)
+        XCTAssertFalse(c.noCopyWeightSource)
         XCTAssertTrue(c.crossKVCache)
         XCTAssertTrue(c.stridedTokenMajorAttention)
+        XCTAssertEqual(c.attentionBackend, .stridedTokenMajorMPS)
     }
 
     // Streaming MPS candidate = fused + KV + streaming MPS attention backend,
@@ -342,6 +405,8 @@ final class InferenceOptimizationConfigTests: XCTestCase {
     // allCandidate combines the winning components but is NOT forced as best.
     // QUARANTINED (Task 4): every other combined setting stays as-is EXCEPT
     // the hybrid/QGEMM part, which is forced back to .dequantizedMPS.
+    // DISABLED (Task 5): the P6 mmap no-copy part is also forced back to
+    // false (real A12 GPU page fault while no-copy bytes were being served).
     @MainActor
     func testAllCandidatePreset() {
         let c = InferencePreset.allCandidate.makeConfig()
@@ -349,7 +414,7 @@ final class InferenceOptimizationConfigTests: XCTestCase {
         XCTAssertTrue(c.fusedMLPActivation)
         XCTAssertTrue(c.stridedTokenMajorAttention)
         XCTAssertTrue(c.crossKVCache)
-        XCTAssertTrue(c.noCopyWeightSource)
+        XCTAssertFalse(c.noCopyWeightSource)
         XCTAssertEqual(c.attentionBackend, .streamingMPS)
         XCTAssertEqual(c.linearBackend, .dequantizedMPS)
     }
@@ -369,6 +434,8 @@ final class InferenceOptimizationConfigTests: XCTestCase {
 
     // QUARANTINED (Task 4): the quarantined presets keep every NON-QGEMM
     // component of their combination — only linearBackend is neutralized.
+    // DISABLED (Task 5): the noCopy/all presets also keep every NON-no-copy
+    // component — only noCopyWeightSource is neutralized.
     @MainActor
     func testQuarantinedPresetsKeepNonQGEMMComponents() {
         let direct = InferencePreset.directQGEMMCandidate.makeConfig()
@@ -382,7 +449,53 @@ final class InferenceOptimizationConfigTests: XCTestCase {
         XCTAssertTrue(all.fusedMLPActivation)
         XCTAssertTrue(all.stridedTokenMajorAttention)
         XCTAssertTrue(all.crossKVCache)
-        XCTAssertTrue(all.noCopyWeightSource)
+        XCTAssertFalse(all.noCopyWeightSource)
+        XCTAssertEqual(all.attentionBackend, .streamingMPS)
+        XCTAssertEqual(all.linearBackend, .dequantizedMPS)
+    }
+
+    // DISABLED (Task 5): no preset a normal device user can apply may ever
+    // produce a `noCopyWeightSource == true` — the P6 mmap no-copy path is
+    // blocked after a real A12 GPU page fault
+    // (kIOGPUCommandBufferCallbackErrorPageFault) while no-copy bytes were
+    // being served. Correctness/safety hardening, not a proof of the
+    // historical root cause.
+    @MainActor
+    func testNoPresetProducesNoCopyWeightSource() {
+        for preset in InferencePreset.allCases {
+            let c = preset.makeConfig()
+            XCTAssertFalse(c.noCopyWeightSource,
+                           "\(preset) must not produce noCopyWeightSource == true")
+        }
+    }
+
+    // DISABLED (Task 5): the disabled-no-copy marker covers exactly the two
+    // presets whose P6 part is neutralized.
+    func testDisabledNoCopyMarker() {
+        XCTAssertTrue(InferencePreset.noCopyCandidate.containsDisabledNoCopy)
+        XCTAssertTrue(InferencePreset.allCandidate.containsDisabledNoCopy)
+        XCTAssertFalse(InferencePreset.baseline.containsDisabledNoCopy)
+        XCTAssertFalse(InferencePreset.stridedMPSKV.containsDisabledNoCopy)
+        XCTAssertFalse(InferencePreset.streamingMPSCandidate.containsDisabledNoCopy)
+        XCTAssertFalse(InferencePreset.metalFlashCandidate.containsDisabledNoCopy)
+    }
+
+    // DISABLED (Task 5): the disabled-no-copy presets keep every NON-no-copy
+    // component of their combination — only noCopyWeightSource is neutralized.
+    @MainActor
+    func testDisabledNoCopyPresetsKeepOtherComponents() {
+        let noCopy = InferencePreset.noCopyCandidate.makeConfig()
+        XCTAssertFalse(noCopy.noCopyWeightSource)
+        XCTAssertTrue(noCopy.crossKVCache)
+        XCTAssertTrue(noCopy.stridedTokenMajorAttention)
+        XCTAssertEqual(noCopy.attentionBackend, .stridedTokenMajorMPS)
+
+        let all = InferencePreset.allCandidate.makeConfig()
+        XCTAssertFalse(all.noCopyWeightSource)
+        XCTAssertTrue(all.fusedNormModulation)
+        XCTAssertTrue(all.fusedMLPActivation)
+        XCTAssertTrue(all.stridedTokenMajorAttention)
+        XCTAssertTrue(all.crossKVCache)
         XCTAssertEqual(all.attentionBackend, .streamingMPS)
         XCTAssertEqual(all.linearBackend, .dequantizedMPS)
     }

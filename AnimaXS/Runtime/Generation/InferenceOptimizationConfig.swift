@@ -96,6 +96,18 @@ struct InferenceOptimizationConfig: Equatable {
     /// path is byte-for-byte unchanged, so this toggle only ever adds the
     /// no-copy fast path. False keeps the current memcpy path exactly for
     /// A/B. EXPERIMENTAL — never a production default (device decides later).
+    ///
+    /// DISABLED (device stabilization — Task 5): normal production/device
+    /// configuration can no longer set this to `true`. A physical A12 run
+    /// hit a real GPU page fault (`kIOGPUCommandBufferCallbackErrorPageFault`)
+    /// while no-copy bytes were being served, so `InferenceOptimizationSettings`
+    /// migrates persisted `true` → `false`, `setNoCopyWeightSource(true)` is
+    /// normalized to `false`, and the `noCopyCandidate` / `allCandidate`
+    /// presets force it back to `false`. This is correctness/safety
+    /// hardening, NOT a proof that the no-copy path caused the historical
+    /// page fault. The research implementation (`WeightNoCopyPolicy.makeAlias`
+    /// / `WeightStreamer`) stays fully intact so an isolated hardware test
+    /// can re-enable the path later.
     var noCopyWeightSource: Bool
     /// P7: DiT attention backend selector. Defaults to `.legacyHeadMajorMPS`
     /// — the effective current behavior — so the known-good W4 path is
@@ -176,7 +188,13 @@ enum InferencePreset: String, CaseIterable {
     case stridedMPS
     /// Strided + cross-attention K/V cache.
     case stridedMPSKV
-    /// KV + mmap no-copy weight source (experimental).
+    /// KV + mmap no-copy weight source (experimental). DISABLED (Task 5):
+    /// the no-copy part is forced back to `false` in `makeConfig()` — a
+    /// physical A12 run hit a real GPU page fault
+    /// (`kIOGPUCommandBufferCallbackErrorPageFault`) while no-copy bytes
+    /// were being served. This is correctness/safety hardening, NOT a proof
+    /// of the historical root cause; every other component of the
+    /// combination still applies unchanged.
     case noCopyCandidate
     /// Fused + KV + streaming MPS attention backend.
     case streamingMPSCandidate
@@ -199,7 +217,12 @@ enum InferencePreset: String, CaseIterable {
     /// `directQGEMMCandidate`, the hybrid/QGEMM part is temporarily disabled
     /// (measured ~10x A12 regression vs `.dequantizedMPS`; performance, not
     /// correctness). `makeConfig()` keeps every other combined setting as-is
-    /// EXCEPT `linearBackend` is forced back to `.dequantizedMPS`.
+    /// EXCEPT `linearBackend` is forced back to `.dequantizedMPS`. DISABLED
+    /// (Task 5): the P6 mmap no-copy part is also forced back to `false` —
+    /// a physical A12 run hit a real GPU page fault
+    /// (`kIOGPUCommandBufferCallbackErrorPageFault`) while no-copy bytes
+    /// were being served (correctness/safety hardening, not a proof of the
+    /// historical root cause).
     case allCandidate
 
     /// QUARANTINED (Task 4): true for presets whose QGEMM part is temporarily
@@ -210,6 +233,20 @@ enum InferencePreset: String, CaseIterable {
     /// so a device preset can never silently run the 10x-slower direct path.
     var containsQuarantinedLinearBackend: Bool {
         self == .directQGEMMCandidate || self == .allCandidate
+    }
+
+    /// DISABLED (Task 5): true for presets whose P6 mmap no-copy part is
+    /// temporarily disabled — a physical A12 run hit a real GPU page fault
+    /// (`kIOGPUCommandBufferCallbackErrorPageFault`) while no-copy bytes
+    /// were being served. This is correctness/safety hardening, NOT a proof
+    /// that the no-copy path caused the historical page fault. They remain
+    /// selectable: `makeConfig()` forces `noCopyWeightSource` back to `false`
+    /// while keeping every other component of the combination. The UI marks
+    /// them so the disabled part is impossible to miss. The research
+    /// implementation (`WeightNoCopyPolicy.makeAlias` / `WeightStreamer`)
+    /// stays intact so an isolated hardware test can re-enable it later.
+    var containsDisabledNoCopy: Bool {
+        self == .noCopyCandidate || self == .allCandidate
     }
 
     /// Human-friendly label for UI selection.
@@ -255,7 +292,13 @@ enum InferencePreset: String, CaseIterable {
             c.crossKVCache = true
         case .noCopyCandidate:
             c = InferencePreset.stridedMPSKV.makeConfig()
-            c.noCopyWeightSource = true
+            // DISABLED (Task 5): the P6 mmap no-copy part is forced back to
+            // `false` — a physical A12 run hit a real GPU page fault
+            // (kIOGPUCommandBufferCallbackErrorPageFault) while no-copy
+            // bytes were being served. Correctness/safety hardening, not a
+            // proof of the historical root cause. Every other component of
+            // the combination still applies unchanged.
+            c.noCopyWeightSource = false
         case .streamingMPSCandidate:
             c = InferencePreset.fusedTraffic.makeConfig()
             c.crossKVCache = true
@@ -274,7 +317,12 @@ enum InferencePreset: String, CaseIterable {
             c.linearBackend = .dequantizedMPS
         case .allCandidate:
             c = InferencePreset.stridedMPSKV.makeConfig()
-            c.noCopyWeightSource = true
+            // DISABLED (Task 5): the P6 mmap no-copy part is forced back to
+            // `false` — a physical A12 run hit a real GPU page fault
+            // (kIOGPUCommandBufferCallbackErrorPageFault) while no-copy
+            // bytes were being served. Correctness/safety hardening, not a
+            // proof of the historical root cause.
+            c.noCopyWeightSource = false
             c.attentionBackend = .streamingMPS
             // QUARANTINED (Task 4): keep every other combined setting as-is,
             // EXCEPT the hybrid/QGEMM part — measured ~10x A12 regression vs

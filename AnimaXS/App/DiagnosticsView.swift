@@ -142,19 +142,25 @@ struct DiagnosticsView: View {
                 .foregroundStyle(.secondary)
             Picker("Preset (P9)", selection: presetBinding) {
                 ForEach(InferencePreset.allCases, id: \.self) { preset in
-                    // QUARANTINED (Task 4): presets whose QGEMM part is
-                    // disabled remain selectable, but are shown as disabled
+                    // QUARANTINED (Task 4) + DISABLED (Task 5): presets whose
+                    // QGEMM part is quarantined, or whose P6 mmap no-copy part
+                    // is disabled, remain selectable but are shown as disabled
                     // with a visible explanation. Their makeConfig() forces
-                    // linearBackend back to .dequantizedMPS, so applying one
-                    // can never run the 10x-slower direct path — and the
-                    // disabled look makes the quarantine impossible to miss.
+                    // the affected components back to the known-good values,
+                    // so applying one can never run the 10x-slower direct
+                    // path or the no-copy weight path — and the disabled look
+                    // makes it impossible to miss.
                     Text(preset.label).tag(preset)
-                        .disabled(preset.containsQuarantinedLinearBackend)
+                        .disabled(preset.containsQuarantinedLinearBackend
+                                  || preset.containsDisabledNoCopy)
                 }
             }
             .disabled(isGenerating)
             if optimizationSettings.activePreset?.containsQuarantinedLinearBackend == true {
                 quarantineNote
+            }
+            if optimizationSettings.activePreset?.containsDisabledNoCopy == true {
+                p6NoCopyNote
             }
             Text("A preset sets every control below at once. Adjusting individual controls below refines it; nothing here is claimed fastest until the physical XS Max is measured.")
                 .font(.caption2)
@@ -186,7 +192,14 @@ struct DiagnosticsView: View {
             Toggle("Cross-attention K/V cache (P5)", isOn: crossKVCacheBinding)
                 .disabled(isGenerating)
             Toggle("Mmap no-copy weight source (P6, experimental)", isOn: noCopyWeightSourceBinding)
-                .disabled(isGenerating)
+                // DISABLED (Task 5): permanently locked OFF for normal
+                // device settings after a physical A12 run hit a real GPU
+                // page fault (kIOGPUCommandBufferCallbackErrorPageFault)
+                // while no-copy bytes were being served. The setting is
+                // normalized to false and never persisted; the research
+                // implementation stays intact for an isolated hardware test.
+                .disabled(true)
+            p6NoCopyNote
             Picker("DiT attention backend (P7)", selection: attentionBackendBinding) {
                 ForEach(DiTAttentionBackend.allCases, id: \.self) { backend in
                     Text(backend.rawValue).tag(backend)
@@ -226,6 +239,23 @@ struct DiagnosticsView: View {
     private var quarantineNote: some View {
         Label {
             Text(InferenceOptimizationSettings.quarantineReason)
+                .font(.caption2)
+        } icon: {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+        }
+        .foregroundStyle(.secondary)
+    }
+
+    /// DISABLED (Task 5): visible explanation shown whenever the P6 mmap
+    /// no-copy weight source (or the presets containing it) is disabled in
+    /// the UI. Wording states it is blocked after a real A12 GPU page fault
+    /// (kIOGPUCommandBufferCallbackErrorPageFault) while no-copy bytes were
+    /// being served — correctness/safety hardening, NOT a proof of the
+    /// historical root cause; the research implementation stays intact.
+    private var p6NoCopyNote: some View {
+        Label {
+            Text(InferenceOptimizationSettings.p6NoCopyDisabledReason)
                 .font(.caption2)
         } icon: {
             Image(systemName: "exclamationmark.triangle.fill")

@@ -58,6 +58,13 @@ final class GenerationCoordinator: ObservableObject {
     /// Compact text summary of the most recent generation's telemetry
     /// (Phase 8: readable without a cable).
     @Published private(set) var lastMetricsText: String?
+    /// Set after a FATAL Metal command-buffer fault (MTLCommandBufferError
+    /// `.pageFault` / `.invalidResource` / `.internal`, or the IOGPU
+    /// page-fault error text fallback). Once poisoned, generation is blocked
+    /// until the process restarts: the Metal context is NOT recreated and the
+    /// command buffer is NOT retried (a faulting GPU context is not
+    /// trustworthy). Ordinary cooperative cancellation NEVER sets this.
+    @Published private(set) var metalContextPoisoned = false
 
     private let context: MetalContext?
     private let factory: any GenerationStageFactory
@@ -98,9 +105,17 @@ final class GenerationCoordinator: ObservableObject {
     }
 
     /// Whether Metal is available for generation (recoverable, not a crash).
+    /// Becomes `false` after a fatal Metal command-buffer fault poisons the
+    /// context, so generation eligibility (driven from ContentView via this
+    /// property) is blocked until the process restarts.
     var isMetalAvailable: Bool {
-        context != nil
+        context != nil && !metalContextPoisoned
     }
+
+    /// User-visible message used whenever the Metal context is (or just got)
+    /// poisoned by a fatal GPU fault. Generation stays blocked until the
+    /// process restarts — no auto-recreate of the Metal context, no retry.
+    static let fatalMetalFaultMessage = "Fatal GPU fault. Restart AnimaXS before generating again."
 
     /// Starts one generation. Does nothing when a generation is already
     /// running (K002: only one generation may execute at once).
@@ -115,6 +130,12 @@ final class GenerationCoordinator: ObservableObject {
         optimization: InferenceOptimizationConfig = .currentBaseline
     ) {
         guard !isGenerating else { return }
+        guard !metalContextPoisoned else {
+            // A fatal GPU fault already poisoned the context: generation stays
+            // blocked until the process restarts. No auto-recreate, no retry.
+            state = .failed(Self.fatalMetalFaultMessage)
+            return
+        }
         guard let context else {
             state = .failed(GenerationError.metal("Metal device unavailable").localizedDescription)
             return
@@ -213,11 +234,70 @@ final class GenerationCoordinator: ObservableObject {
                 self.image = GenerationCoordinator.makeUIImage(from: decoded)
                 self.state = .completed
             } catch is CancellationError {
+                // Ordinary cooperative cancellation (K003): never a Metal
+                // fault — the context is NOT poisoned and a fresh Generate is
+                // available afterward.
                 self.state = .cancelled
             } catch {
-                self.state = .failed(error.localizedDescription)
+                if self.isFatalMetalFault(error) {
+                    // Fatal Metal command-buffer fault (e.g. a GPU page
+                    // fault): poison the context so Generate stays blocked
+                    // until the process restarts. Do NOT auto-recreate the
+                    // Metal context and do NOT retry the command buffer — a
+                    // faulting GPU context is not trustworthy.
+                    self.metalContextPoisoned = true
+                    self.state = .failed(Self.fatalMetalFaultMessage)
+                } else {
+                    self.state = .failed(error.localizedDescription)
+                }
             }
         }
+    }
+
+    /// True when `error` is a FATAL Metal command-buffer fault that should
+    /// poison the generation context for this process.
+    ///
+    /// Classification, in order:
+    /// 1. Raw `NSError` in `MTLCommandBufferErrorDomain` whose code is one of
+    ///    the fatal-for-this-app cases: `.pageFault`, `.invalidResource`, or
+    ///    `.internal` (a faulting GPU context is not trustworthy — retrying
+    ///    the command buffer or recreating the context in-process is unsafe).
+    /// 2. Narrow IOGPU text fallback: when the device bridge does not expose
+    ///    the expected Metal domain/code, the native error text
+    ///    (`localizedDescription` / `description`) is checked for the
+    ///    IOGPU page-fault callback marker (e.g.
+    ///    `kIOGPUCommandBufferCallbackErrorPageFault`). Only the page-fault
+    ///    family is matched here — deliberately narrow.
+    /// 3. `GenerationError.metal(String)`: if a path stringifies the
+    ///    underlying error into a message, the same text fallback is applied
+    ///    to the message so classification still works without redesigning
+    ///    the error plumbing.
+    ///
+    /// Ordinary cooperative cancellation (`CancellationError`) is NOT a Metal
+    /// fault and never returns true.
+    func isFatalMetalFault(_ error: Error) -> Bool {
+        // 1. Raw Metal command-buffer NSError with a fatal code.
+        let nsError = error as NSError
+        if nsError.domain == MTLCommandBufferErrorDomain, nsError.code >= 0 {
+            switch MTLCommandBufferError(rawValue: UInt(nsError.code)) {
+            case .pageFault, .invalidResource, .internal:
+                return true
+            default:
+                break
+            }
+        }
+        // 2 + 3. Narrow text fallback (also covers GenerationError.metal
+        // messages that stringify the underlying error).
+        let message = (error as? GenerationError)?.errorDescription
+            ?? error.localizedDescription
+        return Self.isFatalIOGPUPageFaultText(message)
+    }
+
+    /// Narrow IOGPU page-fault text marker. Only the page-fault family of the
+    /// native IOGPU command-buffer callback errors is matched.
+    private static func isFatalIOGPUPageFaultText(_ text: String) -> Bool {
+        text.contains("kIOGPUCommandBufferCallbackErrorPageFault")
+            || text.contains("IOGPUCommandBufferCallbackErrorPageFault")
     }
 
     /// Captures power/battery/thermal/low-power facts for the run summary.

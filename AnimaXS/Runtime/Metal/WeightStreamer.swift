@@ -31,18 +31,31 @@ struct WeightLoadResult {
 /// 4096-byte aligned; every other range falls back to the copied path. The
 /// alias never frees the pointer (the `AnimapkFile` owns the mmap and must
 /// outlive the buffer) and never touches past EOF.
+///
+/// HARDENED (device stabilization — Task 5): eligibility additionally
+/// requires the range's LENGTH (and therefore its end/upper bound) to be
+/// page-aligned, so BOTH the start and the end of the aliased region sit on
+/// page boundaries. This is correctness hardening only — it does NOT claim
+/// to prove the historical A12 GPU page fault
+/// (`kIOGPUCommandBufferCallbackErrorPageFault`) was caused by the no-copy
+/// path; it simply narrows the set of ranges the zero-copy backend may serve.
 enum WeightNoCopyPolicy {
     /// Minimum pointer alignment Metal requires for a `bytesNoCopy` buffer.
     static let pageSize = 4_096
 
     /// True when the range may be served zero-copy: page-aligned absolute
-    /// file offset, `Int`-representable length, and fully inside the file.
+    /// file offset AND page-aligned length/end (so both the start and the
+    /// end of the aliased region are page-aligned), `Int`-representable
+    /// length, and fully inside the file.
     static func isEligible(range: AnimapkExecutionRange, file: AnimapkFile) -> Bool {
         let offset = range.fileRange.lowerBound
+        let upperBound = range.fileRange.upperBound
         guard offset <= UInt64(Int.max),
               Int(offset) % pageSize == 0,
-              range.length <= UInt64(Int.max) else { return false }
-        return range.fileRange.upperBound <= file.header.fileSize
+              range.length <= UInt64(Int.max),
+              range.length % UInt64(pageSize) == 0,
+              upperBound % UInt64(pageSize) == 0 else { return false }
+        return upperBound <= file.header.fileSize
     }
 
     /// Builds the aliasing `MTLBuffer` for an eligible range, or nil when the

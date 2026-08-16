@@ -481,6 +481,228 @@ final class GenerationCoordinatorTests: XCTestCase {
         }
     }
 
+    // MARK: - Fatal Metal command-buffer fault poisoning (Task 5)
+
+    /// Diffusion stage that throws a synthetic fatal Metal command-buffer
+    /// error from `execute`, exercising the coordinator's `run()` catch path
+    /// exactly as a real GPU fault would (the raw NSError propagates
+    /// un-wrapped through the engine).
+    private final class FatalMetalSampler: DiffusionStage {
+        let error: Error
+        init(error: Error) { self.error = error }
+        func execute(
+            initialLatent: MTLBuffer,
+            crossContext: MTLBuffer,
+            outputLatent: MTLBuffer,
+            startStep: Int,
+            blockProgress: ((Int, Int) throws -> Void)?,
+            stepCompleted: ((Int, Float, Float, MTLBuffer, MTLBuffer) throws -> Void)?
+        ) async throws {
+            throw error
+        }
+    }
+
+    /// Factory whose diffusion stage throws the injected synthetic error,
+    /// so the coordinator's catch path sees exactly that error.
+    private final class FatalMetalFactory: GenerationStageFactory {
+        let error: Error
+        init(error: Error) { self.error = error }
+        func makePromptEncoder(context: MetalContext, fileURL: URL) throws -> PromptEncoderStage {
+            ProbeEncoder()
+        }
+        func makeContextAdapter(context: MetalContext, fileURL: URL) throws -> ContextAdapterStage {
+            ProbeAdapter()
+        }
+        func makeDiffusion(
+            context: MetalContext, fileURL: URL,
+            optimization: InferenceOptimizationConfig,
+            numerics: DiTNumericsPolicy
+        ) throws -> DiffusionStage {
+            FatalMetalSampler(error: error)
+        }
+        func makeVAE(context: MetalContext, fileURL: URL) throws -> VAEDecodeStage {
+            ProbeVAE()
+        }
+    }
+
+    /// Synthetic MTLCommandBufferErrorDomain fault with the given code.
+    private func makeFatalMetalError(
+        _ code: MTLCommandBufferError,
+        description: String
+    ) -> NSError {
+        NSError(
+            domain: MTLCommandBufferErrorDomain,
+            code: Int(code.rawValue),
+            userInfo: [NSLocalizedDescriptionKey: description])
+    }
+
+    /// Runs one generation against a factory that throws `error` from the
+    /// diffusion stage, waits for the terminal state, and returns the
+    /// coordinator.
+    @MainActor
+    private func runFatalFaultGeneration(error: Error) async throws -> GenerationCoordinator {
+        let context = try makeContext()
+        let coordinator = GenerationCoordinator(
+            context: context, factory: FatalMetalFactory(error: error))
+        coordinator.generate(prompt: "fatal", seed: 1, models: testModels())
+        // Wait for the terminal state (the thrown fault propagates quickly).
+        for _ in 0..<250 {
+            if !coordinator.isGenerating { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertFalse(coordinator.isGenerating, "generation ended after the fatal fault")
+        return coordinator
+    }
+
+    @MainActor
+    private func assertPoisoned(_ coordinator: GenerationCoordinator,
+                                file: StaticString = #filePath,
+                                line: UInt = #line) {
+        XCTAssertTrue(coordinator.metalContextPoisoned,
+                      "metalContextPoisoned must be true after a fatal Metal fault",
+                      file: file, line: line)
+        XCTAssertFalse(coordinator.isMetalAvailable,
+                       "isMetalAvailable must be false after poisoning",
+                       file: file, line: line)
+        if case .failed(let message) = coordinator.state {
+            XCTAssertTrue(message.contains("Fatal GPU fault"),
+                          "expected the fatal fault message, got \(message)",
+                          file: file, line: line)
+            XCTAssertTrue(message.contains("Restart AnimaXS"),
+                          "message must ask for a restart, got \(message)",
+                          file: file, line: line)
+        } else {
+            XCTFail("expected failed state, got \(coordinator.state)",
+                    file: file, line: line)
+        }
+        // Generation eligibility is blocked after poisoning (the same
+        // coordinator.isMetalAvailable drives ContentView's eligibility).
+        let eligibility = GenerationEligibility.evaluate(
+            modelsResolved: true, isGenerating: false,
+            prompt: "t", seedText: "1", metalAvailable: coordinator.isMetalAvailable)
+        XCTAssertFalse(eligibility.isReady,
+                       "eligibility must be blocked after poisoning",
+                       file: file, line: line)
+    }
+
+    // MARK: - Fatal Metal fault tests
+
+    @MainActor
+    func testFatalMetalPageFaultPoisonsContext() async throws {
+        let coordinator = try await runFatalFaultGeneration(error: makeFatalMetalError(
+            .pageFault,
+            description: "kIOGPUCommandBufferCallbackErrorPageFault while serving no-copy bytes"))
+        assertPoisoned(coordinator)
+
+        // A subsequent generate() is blocked: no new run, state stays failed.
+        coordinator.generate(prompt: "again", seed: 2, models: testModels())
+        XCTAssertFalse(coordinator.isGenerating,
+                       "a second generate must be blocked after poisoning")
+        if case .failed(let message) = coordinator.state {
+            XCTAssertTrue(message.contains("Fatal GPU fault"), "got \(message)")
+        } else {
+            XCTFail("expected failed state after blocked generate, got \(coordinator.state)")
+        }
+    }
+
+    @MainActor
+    func testFatalMetalInvalidResourcePoisonsContext() async throws {
+        let coordinator = try await runFatalFaultGeneration(error: makeFatalMetalError(
+            .invalidResource,
+            description: "resource became invalid while the command buffer executed"))
+        assertPoisoned(coordinator)
+    }
+
+    @MainActor
+    func testFatalMetalInternalErrorPoisonsContext() async throws {
+        let coordinator = try await runFatalFaultGeneration(error: makeFatalMetalError(
+            .internal,
+            description: "internal Metal error"))
+        assertPoisoned(coordinator)
+    }
+
+    @MainActor
+    func testIOGPUPageFaultTextFallbackPoisonsContext() async throws {
+        // Device-bridge fallback: no Metal domain/code exposed — the native
+        // IOGPU page-fault text alone must still classify as fatal.
+        let coordinator = try await runFatalFaultGeneration(error: NSError(
+            domain: "IOGPU", code: 0,
+            userInfo: [NSLocalizedDescriptionKey:
+                "IOGPUCommandBufferCallbackErrorPageFault (kIOGPUCommandBufferCallbackErrorPageFault): GPU page fault"]))
+        assertPoisoned(coordinator)
+    }
+
+    @MainActor
+    func testGenerationErrorMetalStringifyingPageFaultPoisonsContext() async throws {
+        // A path that stringifies the underlying fault into GenerationError.metal
+        // must still be classified as fatal via the message fallback.
+        let coordinator = try await runFatalFaultGeneration(
+            error: GenerationError.metal(
+                "command buffer failed: kIOGPUCommandBufferCallbackErrorPageFault (page fault)"))
+        assertPoisoned(coordinator)
+    }
+
+    @MainActor
+    func testOrdinaryFailureDoesNotPoisonContext() async throws {
+        // A recoverable (non-Metal) failure must NOT poison the context:
+        // state becomes failed with the normal message, but a fresh
+        // Generate is available afterward.
+        let context = try makeContext()
+        let factory = ProbeFactory()
+        factory.samplerOnExecute = { throw GenerationError.diffusionPack("boom") }
+        let coordinator = GenerationCoordinator(context: context, factory: factory)
+        coordinator.generate(prompt: "recoverable", seed: 1, models: testModels())
+        for _ in 0..<250 {
+            if !coordinator.isGenerating { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertFalse(coordinator.isGenerating)
+        XCTAssertFalse(coordinator.metalContextPoisoned,
+                       "an ordinary failure must not poison the context")
+        XCTAssertTrue(coordinator.isMetalAvailable)
+        if case .failed(let message) = coordinator.state {
+            XCTAssertTrue(message.contains("Diffusion"), "got \(message)")
+        } else {
+            XCTFail("expected failed state, got \(coordinator.state)")
+        }
+        // A fresh Generate still starts after an ordinary failure.
+        let okFactory = LifecycleFactory()
+        let coordinator2 = GenerationCoordinator(context: context, factory: okFactory)
+        coordinator2.generate(prompt: "fresh", seed: 2, models: testModels())
+        XCTAssertTrue(coordinator2.isGenerating,
+                      "a fresh Generate starts after an ordinary (non-fatal) failure")
+        coordinator2.cancel()
+    }
+
+    @MainActor
+    func testCooperativeCancellationDoesNotPoisonContext() async throws {
+        let context = try makeContext()
+        let factory = LifecycleFactory()
+        let coordinator = GenerationCoordinator(context: context, factory: factory)
+
+        coordinator.generate(prompt: "lifecycle", seed: 11, models: testModels())
+        for _ in 0..<250 {
+            if factory.sampler?.completedSteps ?? 0 >= 1 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertGreaterThanOrEqual(factory.sampler?.completedSteps ?? 0, 1)
+        coordinator.cancel()
+        for _ in 0..<250 {
+            if !coordinator.isGenerating { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertFalse(coordinator.isGenerating)
+        if case .cancelled = coordinator.state {
+            // expected
+        } else {
+            XCTFail("expected cancelled, got \(coordinator.state)")
+        }
+        XCTAssertFalse(coordinator.metalContextPoisoned,
+                       "cooperative cancellation must NOT poison the context")
+        XCTAssertTrue(coordinator.isMetalAvailable,
+                      "Metal stays available after cooperative cancellation")
+    }
+
     // MARK: - K003 lifecycle: background/memory-warning cancellation
 
     /// Sampler that completes one step then suspends until cancellation, so a
