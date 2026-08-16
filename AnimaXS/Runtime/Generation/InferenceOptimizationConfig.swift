@@ -61,6 +61,21 @@ struct InferenceOptimizationConfig: Equatable {
     /// no-copy fast path. False keeps the current memcpy path exactly for
     /// A/B. EXPERIMENTAL — never a production default (device decides later).
     var noCopyWeightSource: Bool
+    /// P7: DiT attention backend selector. Defaults to `.legacyHeadMajorMPS`
+    /// — the effective current behavior — so the known-good W4 path is
+    /// byte-for-byte unchanged. Precedence (documented for the state file):
+    /// - `.legacyHeadMajorMPS` → legacy transposed head-major MPS path
+    ///   (ignores `stridedTokenMajorAttention`).
+    /// - `.stridedTokenMajorMPS` → P4 strided token-major MPS path, but
+    ///   HONORS the `stridedTokenMajorAttention` boolean: when the bool is
+    ///   OFF this case selects the legacy head-major path, preserving the
+    ///   P4 semantics exactly.
+    /// - `.streamingMPS` / `.metalFlash` → the P7 backends REQUIRE the
+    ///   token-major layout; DiTBlockExecutor throws unless
+    ///   `stridedTokenMajorAttention` is ON (never a silent fallback).
+    /// Only DiT attention is affected; Qwen/VAE/adapter attention always
+    /// runs the legacy head-major path regardless of this selector.
+    var attentionBackend: DiTAttentionBackend
 
     static let currentBaseline = InferenceOptimizationConfig(
         linearTileRows: 128,
@@ -72,7 +87,8 @@ struct InferenceOptimizationConfig: Equatable {
         fusedMLPActivation: false,
         stridedTokenMajorAttention: false,
         crossKVCache: false,
-        noCopyWeightSource: false
+        noCopyWeightSource: false,
+        attentionBackend: .legacyHeadMajorMPS
     )
 
     /// Sanitizes a tile-row value down to the nearest allowed value (or the
