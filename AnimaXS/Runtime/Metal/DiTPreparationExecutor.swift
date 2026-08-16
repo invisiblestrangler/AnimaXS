@@ -39,7 +39,8 @@ final class DiTPreparationExecutor {
         self.streamer = try WeightStreamer(device: context.device, capacity: Int(locator.range.length))
         self.linear = LinearExecutor(
             context: context, tileRows: optimization.linearTileRows,
-            directMPSIO: optimization.directLinearMPSIO)
+            directMPSIO: optimization.directLinearMPSIO,
+            linearBackend: optimization.linearBackend)
         self.buffers = BufferPool(device: context.device)
         self.activationNumerics = activationNumerics
         self.monitor = monitor

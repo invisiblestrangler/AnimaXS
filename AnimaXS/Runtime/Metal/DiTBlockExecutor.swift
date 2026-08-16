@@ -114,7 +114,8 @@ final class DiTBlockExecutor {
         self.buffers = BufferPool(device: context.device)
         self.linear = LinearExecutor(
             context: context, tileRows: optimization.linearTileRows,
-            directMPSIO: optimization.directLinearMPSIO)
+            directMPSIO: optimization.directLinearMPSIO,
+            linearBackend: optimization.linearBackend)
         self.activationNumerics = activationNumerics
         self.monitor = monitor
         let effectiveAttention = activationNumerics == .bf16Compute && attentionNumerics == .legacy
@@ -352,7 +353,8 @@ final class DiTBlockExecutor {
         let keyWeight = cross ? weights.crossK : weights.selfK
         let valueWeight = cross ? weights.crossV : weights.selfV
         try linear.encode(commandBuffer: command, input: projectionInput,
-                          weight: queryWeight, output: qToken, inputRows: Self.tokens)
+                          weight: queryWeight, output: qToken, inputRows: Self.tokens,
+                          family: .attentionProjection)
         let keyInput = cross ? crossContext : projectionInput
         let keyRows = cross ? Self.contextTokens : Self.tokens
         // P5: cache the invariant cross K/V across diffusion steps. On a hit we
@@ -375,9 +377,11 @@ final class DiTBlockExecutor {
             metrics?.recordCrossKVHit()
         } else {
             try linear.encode(commandBuffer: command, input: keyInput,
-                              weight: keyWeight, output: kToken, inputRows: keyRows)
+                              weight: keyWeight, output: kToken, inputRows: keyRows,
+                              family: .attentionProjection)
             try linear.encode(commandBuffer: command, input: keyInput,
-                              weight: valueWeight, output: vToken, inputRows: keyRows)
+                              weight: valueWeight, output: vToken, inputRows: keyRows,
+                              family: .attentionProjection)
             try encodeHalfComputeBoundary(command, kToken, count: kTokenCount)
             try encodeHalfComputeBoundary(command, vToken, count: kTokenCount)
             if NumericalMonitor.detailedProbesEnabled, let monitor {
@@ -474,7 +478,8 @@ final class DiTBlockExecutor {
         let branch = buffer("dit.branch.f16", Self.tokens * Self.dim, Float16.self)
         try linear.encode(commandBuffer: command, input: attendedToken,
                           weight: cross ? weights.crossO : weights.selfO,
-                          output: branch, inputRows: Self.tokens)
+                          output: branch, inputRows: Self.tokens,
+                          family: .attentionProjection)
         try encodeHalfComputeBoundary(command, branch, count: Self.tokens * Self.dim)
         if NumericalMonitor.detailedProbesEnabled, let monitor {
             try monitor.encodeProbe(command, values: branch, count: Self.tokens * Self.dim,
@@ -516,7 +521,8 @@ final class DiTBlockExecutor {
         }
         let hiddenHalf = buffer("dit.hidden.f16", Self.tokens * Self.hidden, Float16.self)
         try linear.encode(commandBuffer: command, input: projectionInput,
-                          weight: weights.mlp1, output: hiddenHalf, inputRows: Self.tokens)
+                          weight: weights.mlp1, output: hiddenHalf, inputRows: Self.tokens,
+                          family: .mlpUp)
         try encodeHalfComputeBoundary(command, hiddenHalf, count: Self.tokens * Self.hidden)
         if optimization.fusedMLPActivation {
             // P3-B: in-place GELU on the fp16 hidden activations (fp32 register
@@ -551,7 +557,8 @@ final class DiTBlockExecutor {
         }
         let branch = buffer("dit.branch.f16", Self.tokens * Self.dim, Float16.self)
         try linear.encode(commandBuffer: command, input: hiddenHalf,
-                          weight: weights.mlp2, output: branch, inputRows: Self.tokens)
+                          weight: weights.mlp2, output: branch, inputRows: Self.tokens,
+                          family: .mlpDown)
         try encodeHalfComputeBoundary(command, branch, count: Self.tokens * Self.dim)
         if NumericalMonitor.detailedProbesEnabled, let monitor {
             try monitor.encodeProbe(command, values: branch, count: Self.tokens * Self.dim,

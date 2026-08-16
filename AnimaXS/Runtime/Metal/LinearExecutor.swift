@@ -2,6 +2,18 @@ import Foundation
 import Metal
 import MetalPerformanceShaders
 
+/// P8: matrix-family classification for the DiT linear dispatch (runbook
+/// §13). Explicitly tagged at the DiT call sites — NEVER inferred from a
+/// filename. Enables hybrid dispatch: MLP matrices (the largest
+/// decompressed-weight scratch traffic) run the direct packed QGEMM while
+/// attention projections stay on MPS until A12 data proves otherwise.
+enum DiTLinearFamily {
+    case attentionProjection
+    case mlpUp
+    case mlpDown
+    case other
+}
+
 /// Ring-relative buffers and metadata for a packed W4/W8 `[N,K]` matrix.
 struct QuantizedLinearWeightBuffers {
     let storage: StorageDtype
@@ -30,22 +42,36 @@ struct QuantizedLinearWeightBuffers {
 /// report how many tiles actually hit direct wrapping on the target device.
 final class LinearExecutor {
     static let defaultTileRows = 128
+    /// P8: QGEMM tile-profile thresholds. The K=16-wide profile (128
+    /// threads) is only chosen when N is large enough to make it worthwhile;
+    /// small-N linears use the K=8-wide profile.
+    static let qgemmWideProfileMinN = 16
 
     private let context: MetalContext
     private let buffers: BufferPool
     let tileRows: Int
     private let directMPSIO: Bool
+    /// P8: direct packed QGEMM backend selector (defaults to the legacy
+    /// dequantized-MPS behavior).
+    let linearBackend: DiTLinearBackend
+    /// P8: matrix family for hybrid dispatch (defaults to `.other` so
+    /// non-DiT callers are unaffected).
+    let family: DiTLinearFamily
     /// Run telemetry collector (nil in tests / diagnostic-only construction).
     /// Receives the cheap tile counters (simple integer increments).
     var metrics: MetricsCollector?
 
     init(context: MetalContext, tileRows: Int = defaultTileRows,
-         directMPSIO: Bool = false) {
+         directMPSIO: Bool = false,
+         linearBackend: DiTLinearBackend = .dequantizedMPS,
+         family: DiTLinearFamily = .other) {
         precondition(tileRows > 0)
         self.context = context
         self.buffers = BufferPool(device: context.device)
         self.tileRows = tileRows
         self.directMPSIO = directMPSIO
+        self.linearBackend = linearBackend
+        self.family = family
     }
 
     /// Encodes dequantization and all MPS tiles into an existing command buffer.
@@ -57,11 +83,60 @@ final class LinearExecutor {
         weight: QuantizedLinearWeightBuffers,
         output: MTLBuffer,
         outputOffset: Int = 0,
-        inputRows: Int
+        inputRows: Int,
+        family: DiTLinearFamily = .other
     ) throws {
         try validate(input: input, inputOffset: inputOffset, weight: weight,
                      output: output, outputOffset: outputOffset, inputRows: inputRows)
 
+        // P8: backend dispatch. M=1 modulation matvecs are NEVER routed to
+        // the QGEMM (the existing direct matvec kernels are the precision
+        // baseline for those); QGEMM requires packed W4/W8 weights with a
+        // group-64 layout. Every other case falls through to the legacy
+        // dequantized-MPS path, which stays byte-for-byte unchanged.
+        let direct = (weight.storage == .w4 || weight.storage == .w8)
+            && inputRows > 1
+        if direct {
+            switch linearBackend {
+            case .dequantizedMPS:
+                break
+            case .directQuantized:
+                try encodeQGEMM(commandBuffer: commandBuffer, input: input,
+                                inputOffset: inputOffset, weight: weight,
+                                output: output, outputOffset: outputOffset,
+                                inputRows: inputRows, family: family)
+                return
+            case .hybrid:
+                switch family {
+                case .mlpUp, .mlpDown:
+                    try encodeQGEMM(commandBuffer: commandBuffer, input: input,
+                                    inputOffset: inputOffset, weight: weight,
+                                    output: output, outputOffset: outputOffset,
+                                    inputRows: inputRows, family: family)
+                    return
+                case .attentionProjection, .other:
+                    break
+                }
+            }
+        }
+
+        try encodeMPS(commandBuffer: commandBuffer, input: input,
+                      inputOffset: inputOffset, weight: weight,
+                      output: output, outputOffset: outputOffset,
+                      inputRows: inputRows)
+    }
+
+    /// P8: the legacy dequantize-once + MPS-tile path (byte-for-byte the
+    /// P0-P7 behavior; `encode` keeps it as the default and hybrid fallback).
+    private func encodeMPS(
+        commandBuffer: MTLCommandBuffer,
+        input: MTLBuffer,
+        inputOffset: Int,
+        weight: QuantizedLinearWeightBuffers,
+        output: MTLBuffer,
+        outputOffset: Int,
+        inputRows: Int
+    ) throws {
         let n = weight.rows
         let k = weight.columns
         let rightRowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: k, dataType: .float16)
@@ -214,6 +289,70 @@ final class LinearExecutor {
         }
     }
 
+    /// P8: direct packed W4/W8 GEMM. Dequantizes each 64-wide K group's W tile
+    /// into threadgroup memory and MACs immediately with an FP32 accumulator —
+    /// no full `[N,K]` fp16 weight scratch. Picks the 8x8 or 8x16 tile profile
+    /// by output width N; W4 vs W8 selects the matching kernel. The kernel
+    /// reuses the EXACT `dequant_w4_to_half`/`dequant_w8_to_half` decode
+    /// semantics (group K = 64). M=1 is never routed here (see `encode`).
+    private func encodeQGEMM(
+        commandBuffer: MTLCommandBuffer,
+        input: MTLBuffer,
+        inputOffset: Int,
+        weight: QuantizedLinearWeightBuffers,
+        output: MTLBuffer,
+        outputOffset: Int,
+        inputRows: Int,
+        family: DiTLinearFamily = .other
+    ) throws {
+        let m = inputRows
+        let n = weight.rows
+        let k = weight.columns
+        guard m > 0, n > 0, k > 0 else {
+            throw AnimapkError.validation("invalid QGEMM shape M=\(m) N=\(n) K=\(k)")
+        }
+        let isW4 = weight.storage == .w4
+        // Profile: 8x16 (128 threads) for wide outputs, 8x8 (64 threads) for
+        // narrow ones (the runbook's two simple profiles; no autotuner).
+        let wide = n >= Self.qgemmWideProfileMinN
+        let kernelName: String
+        if isW4 {
+            kernelName = wide ? "qgemm_8x16x64" : "qgemm_8x8x64"
+        } else {
+            kernelName = wide ? "qgemm_w8_8x16x64" : "qgemm_w8_8x8x64"
+        }
+        let pipeline = try context.pipeline(named: kernelName)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create QGEMM compute encoder")
+        }
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(input, offset: inputOffset, index: 0)
+        encoder.setBuffer(weight.packed, offset: weight.packedOffset, index: 1)
+        encoder.setBuffer(weight.scale, offset: weight.scaleOffset, index: 2)
+        encoder.setBuffer(weight.zero, offset: weight.zeroOffset, index: 3)
+        encoder.setBuffer(output, offset: outputOffset, index: 4)
+        var mM = UInt32(m), nN = UInt32(n), kK = UInt32(k)
+        var rowStride = UInt32(weight.packedRowStride)
+        var inputStride = UInt32(k)
+        var outputStride = UInt32(n)
+        encoder.setBytes(&mM, length: 4, index: 5)
+        encoder.setBytes(&nN, length: 4, index: 6)
+        encoder.setBytes(&kK, length: 4, index: 7)
+        encoder.setBytes(&rowStride, length: 4, index: 8)
+        encoder.setBytes(&inputStride, length: 4, index: 9)
+        encoder.setBytes(&outputStride, length: 4, index: 10)
+        let tm = wide ? 8 : 8
+        let tn = wide ? 16 : 8
+        let threads = wide ? 128 : 64
+        let groupX = (m + tm - 1) / tm
+        let groupY = (n + tn - 1) / tn
+        encoder.dispatchThreadgroups(
+            MTLSize(width: groupX, height: groupY, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1))
+        encoder.endEncoding()
+        // P2-E: count the QGEMM dispatch (simple integer; no GPU readback).
+        metrics?.recordQGEMMCall(family: family)
+    }
     private func encodeCopy(
         commandBuffer: MTLCommandBuffer, source: MTLBuffer, sourceOffset: Int,
         destination: MTLBuffer, destinationOffset: Int, columns: Int, rows: Int,

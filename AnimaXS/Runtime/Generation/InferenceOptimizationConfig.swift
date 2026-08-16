@@ -1,5 +1,27 @@
 import Foundation
 
+/// P8: runtime-selectable DiT linear (GEMM) backends (runbook §13).
+/// Defaults to `.dequantizedMPS` — the effective current behavior — so the
+/// known-good W4 path is byte-for-byte unchanged. The physical device
+/// selects the winner later; `currentBaseline` must keep the legacy path.
+enum DiTLinearBackend: String, Codable, CaseIterable {
+    /// Legacy path: dequantize the packed [N,K] weight ONCE into a reusable
+    /// fp16 scratch buffer, then tile input rows through MPS. The P0-P7
+    /// known-good behavior.
+    case dequantizedMPS
+    /// P8: direct packed W4/W8 GEMM (qgemm_8x8x64 / qgemm_8x16x64 tile
+    /// profiles). The W tile for one K group is decoded into threadgroup
+    /// memory and consumed immediately — no full [N,K] fp16 weight scratch.
+    /// M=1 matvec keeps the existing direct matvec kernels (never routed
+    /// here).
+    case directQuantized
+    /// P8: family-based hybrid dispatch. MLP up/down matrices (the largest
+    /// decompressed-weight scratch traffic) run the direct QGEMM; attention
+    /// projections and everything else keep the dequantized-MPS path until
+    /// A12 data proves otherwise.
+    case hybrid
+}
+
 /// Immutable, value-semantic runtime configuration captured for a single
 /// generation when Generate is pressed.
 ///
@@ -76,6 +98,14 @@ struct InferenceOptimizationConfig: Equatable {
     /// Only DiT attention is affected; Qwen/VAE/adapter attention always
     /// runs the legacy head-major path regardless of this selector.
     var attentionBackend: DiTAttentionBackend
+    /// P8: DiT linear (GEMM) backend selector. Defaults to `.dequantizedMPS`
+    /// — the effective current behavior — so the known-good W4 path is
+    /// byte-for-byte unchanged. `.directQuantized` runs every non-M=1 DiT
+    /// linear through the direct packed QGEMM; `.hybrid` routes only the
+    /// MLP up/down matrices (largest decompressed-weight scratch traffic)
+    /// through QGEMM and keeps attention projections on MPS until A12 data
+    /// proves otherwise. M=1 modulation matvecs are never affected.
+    var linearBackend: DiTLinearBackend
 
     static let currentBaseline = InferenceOptimizationConfig(
         linearTileRows: 128,
@@ -88,7 +118,8 @@ struct InferenceOptimizationConfig: Equatable {
         stridedTokenMajorAttention: false,
         crossKVCache: false,
         noCopyWeightSource: false,
-        attentionBackend: .legacyHeadMajorMPS
+        attentionBackend: .legacyHeadMajorMPS,
+        linearBackend: .dequantizedMPS
     )
 
     /// Sanitizes a tile-row value down to the nearest allowed value (or the

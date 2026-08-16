@@ -42,7 +42,8 @@ final class DiTFinalLayerExecutor {
         self.buffers = BufferPool(device: context.device)
         self.linear = LinearExecutor(
             context: context, tileRows: optimization.linearTileRows,
-            directMPSIO: optimization.directLinearMPSIO)
+            directMPSIO: optimization.directLinearMPSIO,
+            linearBackend: optimization.linearBackend)
         self.activationNumerics = activationNumerics
         self.monitor = monitor
     }

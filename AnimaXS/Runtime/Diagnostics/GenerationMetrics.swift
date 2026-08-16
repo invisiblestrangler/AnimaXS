@@ -104,6 +104,14 @@ struct GenerationMetrics: Equatable {
     /// (memcpy eliminated). Recorded on the no-copy path only; the copied path
     /// records 0 and keeps charging `weightCopyBytes`.
     var mmapNoCopyBytes: UInt64 = 0
+    /// P8: number of direct packed QGEMM dispatches across the run. See
+    /// `DiffusionStepMetrics.qgemmCalls`.
+    var qgemmCalls: Int = 0
+    /// P8: per-family QGEMM dispatch tallies (P8-E). Diagnostics-only.
+    var qgemmAttentionProjectionCalls: Int = 0
+    var qgemmMLPUpCalls: Int = 0
+    var qgemmMLPDownCalls: Int = 0
+    var qgemmOtherCalls: Int = 0
 
     // Weight streaming + Metal accounting (seconds)
     var weightCopyTime: Double = 0
@@ -473,6 +481,23 @@ final class MetricsCollector {
         metrics.crossKVMisses += 1
         if let index = activeStepIndex {
             metrics.stepMetrics[index].crossKVMisses += 1
+        }
+    }
+
+    /// P8: count a direct packed QGEMM dispatch. Accumulates into the active
+    /// step (per-step sums == globals invariant). The family is recorded so a
+    /// device log can show which matrices used the direct backend (P8-E).
+    func recordQGEMMCall(family: DiTLinearFamily) {
+        metrics.qgemmCalls += 1
+        if let index = activeStepIndex {
+            metrics.stepMetrics[index].qgemmCalls += 1
+        }
+        // Per-family tallies are diagnostics-only (cheap integer increments).
+        switch family {
+        case .attentionProjection: metrics.qgemmAttentionProjectionCalls += 1
+        case .mlpUp: metrics.qgemmMLPUpCalls += 1
+        case .mlpDown: metrics.qgemmMLPDownCalls += 1
+        case .other: metrics.qgemmOtherCalls += 1
         }
     }
 

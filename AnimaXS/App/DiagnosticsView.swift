@@ -174,6 +174,12 @@ struct DiagnosticsView: View {
                 }
             }
             .disabled(isGenerating)
+            Picker("DiT linear backend (P8)", selection: linearBackendBinding) {
+                ForEach(DiTLinearBackend.allCases, id: \.self) { backend in
+                    Text(backend.rawValue).tag(backend)
+                }
+            }
+            .disabled(isGenerating)
             Button("Reset to current baseline") {
                 optimizationSettings.resetToBaseline()
             }
@@ -250,6 +256,12 @@ struct DiagnosticsView: View {
         Binding(
             get: { optimizationSettings.attentionBackend },
             set: { optimizationSettings.setAttentionBackend($0) })
+    }
+
+    private var linearBackendBinding: Binding<DiTLinearBackend> {
+        Binding(
+            get: { optimizationSettings.linearBackend },
+            set: { optimizationSettings.setLinearBackend($0) })
     }
 
     @ViewBuilder
