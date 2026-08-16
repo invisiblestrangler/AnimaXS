@@ -34,6 +34,10 @@ final class DiffusionSampler {
     /// measures monitoring overhead). The final CPU finite guard stays on
     /// regardless — a non-finite latent still fails safely.
     private let monitor: NumericalMonitor?
+    /// P5: per-generation cross-attention K/V cache (nil when the toggle is off
+    /// or allocation failed). Owned here so its lifetime is exactly one
+    /// generation; never persisted across prompts.
+    private let crossKVCache: CrossKVCache?
     private let stateLock = NSLock()
     private var running = false
 
@@ -50,8 +54,27 @@ final class DiffusionSampler {
     init(context: MetalContext, file: AnimapkFile,
          attentionNumerics: AttentionNumerics = .legacy,
          activationNumerics: ActivationNumerics = .legacy,
-         optimization: InferenceOptimizationConfig = .currentBaseline) throws {
+         optimization: InferenceOptimizationConfig = .currentBaseline,
+         numerics: DiTNumericsPolicy? = nil) throws {
         self.context = context
+        // When the pack-derived policy is supplied it selects the numerical
+        // fidelity (W8-v2 => BF16 emulation, W4 => legacy). It is derived from
+        // the resolved variant id, never from the app-owned filename.
+        let resolvedActivation: ActivationNumerics
+        let resolvedAttention: AttentionNumerics
+        if let numerics {
+            switch numerics {
+            case .w4Legacy:
+                resolvedActivation = .legacy
+                resolvedAttention = .legacy
+            case .w8BF16Emulated:
+                resolvedActivation = .bf16Compute
+                resolvedAttention = .bf16Compute
+            }
+        } else {
+            resolvedActivation = activationNumerics
+            resolvedAttention = attentionNumerics
+        }
         // Numerical monitoring OFF removes monitor/probe work from the
         // production path (the final CPU finite guard is retained). ON keeps
         // the current production monitor exactly.
@@ -59,12 +82,17 @@ final class DiffusionSampler {
             ? try NumericalMonitor(context: context) : nil
         self.monitor = monitor
         preparation = try DiTPreparationExecutor(
-            context: context, file: file, activationNumerics: activationNumerics,
-            monitor: monitor)
+            context: context, file: file, activationNumerics: resolvedActivation,
+            monitor: monitor, optimization: optimization)
+        // P5: per-generation cross-attention K/V cache. Created when the toggle
+        // is on; if the device cannot allocate the buffer it fails gracefully
+        // to nil and the legacy per-step projection path runs (never crashes).
+        let cache = optimization.crossKVCache ? CrossKVCache(device: context.device) : nil
+        self.crossKVCache = cache
         forward = try DitForward(
-            context: context, file: file, attentionNumerics: attentionNumerics,
-            activationNumerics: activationNumerics, monitor: monitor,
-            optimization: optimization)
+            context: context, file: file, attentionNumerics: resolvedAttention,
+            activationNumerics: resolvedActivation, monitor: monitor,
+            optimization: optimization, crossKVCache: cache)
         euler = EulerSampler(context: context, monitor: monitor)
         buffers = BufferPool(device: context.device)
 
@@ -119,6 +147,19 @@ final class DiffusionSampler {
         try beginRun()
         defer { endRun() }
         monitor?.beginRun()
+        // Publish numerical-monitor bookkeeping in a defer so it is recorded on
+        // FAILURE as well as success (a thrown step must still surface its
+        // collected warnings). We only publish state the monitor has already
+        // completed — no GPU readback of an unfinished command buffer here.
+        defer {
+            if let monitor {
+                metrics?.setNumericalWarnings(monitor.warningCount())
+                metrics?.setNumericalDetails(monitor.warningDetails())
+            } else {
+                // Monitor OFF: warnings were not collected — never report "0".
+                metrics?.setNumericalMonitoringDisabled(true)
+            }
+        }
         guard (0...ModelConstants.samplerSteps).contains(startStep) else {
             throw AnimapkError.validation(
                 "startStep \(startStep) out of range 0...\(ModelConstants.samplerSteps)")
@@ -152,6 +193,16 @@ final class DiffusionSampler {
         // [0, startStep); only execute the remaining sigma transitions.
         for step in startStep..<EulerSampler.sigmas.count - 1 {
             metrics?.beginStep(step)
+            // P2: a step that throws is still recorded as a PARTIAL step
+            // (completed == false) with its partial durations/counters, so a
+            // device log can attribute a slowdown to the failing step (e.g.
+            // the W8 failure case). On success the explicit endStep below
+            // keeps the historical timing point (before the checkpoint
+            // callback); the defer only fires on failure.
+            var completedForMetrics = false
+            defer {
+                if !completedForMetrics { metrics?.endStep(completed: false) }
+            }
             let sigma = EulerSampler.sigmas[step]
             let nextSigma = EulerSampler.sigmas[step + 1]
             try await preparation.execute(
@@ -185,16 +236,10 @@ final class DiffusionSampler {
                 // (block/stage/condition) is added by the numerical monitor.
                 throw numericalFailure(step: step)
             }
-            metrics?.endStep()
+            metrics?.endStep(completed: true)
+            completedForMetrics = true
             try stepCompleted?(step, sigma, nextSigma, denoised, next)
             swap(&latent, &next)
-        }
-        if let monitor {
-            metrics?.setNumericalWarnings(monitor.warningCount())
-            metrics?.setNumericalDetails(monitor.warningDetails())
-        } else {
-            // Monitor OFF: warnings were not collected — never report "0".
-            metrics?.setNumericalMonitoringDisabled(true)
         }
         try await copy(latent, to: outputLatent, bytes: bytes)
     }
@@ -235,13 +280,33 @@ final class DiffusionSampler {
 
     private func numericalFailure(step: Int) -> NumericalFailure {
         if let monitor, let issue = monitor.earliestIssue {
-            return NumericalFailure.attributed(
-                step: issue.step, totalSteps: ModelConstants.samplerSteps,
-                block: issue.block ?? 1, totalBlocks: DiTBlockLocator.blockCount,
-                stage: issue.probe.stageLabel, condition: issue.stats.condition)
+            return Self.attributedFailure(from: issue)
         }
         return NumericalFailure.eulerOutput(
             step: step + 1, totalSteps: ModelConstants.samplerSteps)
+    }
+
+    /// Maps a numerical-monitor first-issue to a failure with the correct
+    /// location. Final-layer probes are attributed as "final layer" (never a
+    /// fabricated block); block probes use the attributed block; otherwise the
+    /// post-Euler guard is the location.
+    private static func attributedFailure(
+        from issue: NumericalMonitor.FirstIssue
+    ) -> NumericalFailure {
+        if issue.probe.isFinalLayer {
+            return NumericalFailure.finalLayer(
+                step: issue.step, totalSteps: ModelConstants.samplerSteps,
+                totalBlocks: DiTBlockLocator.blockCount,
+                stage: issue.probe.stageLabel, condition: issue.stats.condition)
+        }
+        if let block = issue.block {
+            return NumericalFailure.attributed(
+                step: issue.step, totalSteps: ModelConstants.samplerSteps,
+                block: block, totalBlocks: DiTBlockLocator.blockCount,
+                stage: issue.probe.stageLabel, condition: issue.stats.condition)
+        }
+        return NumericalFailure.eulerOutput(
+            step: issue.step, totalSteps: ModelConstants.samplerSteps)
     }
 
     /// Test seam: the failure produced when the Euler finite guard fires with
@@ -251,10 +316,7 @@ final class DiffusionSampler {
         step: Int, monitor: NumericalMonitor?
     ) -> NumericalFailure {
         if let monitor, let issue = monitor.earliestIssue {
-            return NumericalFailure.attributed(
-                step: issue.step, totalSteps: ModelConstants.samplerSteps,
-                block: issue.block ?? 1, totalBlocks: DiTBlockLocator.blockCount,
-                stage: issue.probe.stageLabel, condition: issue.stats.condition)
+            return attributedFailure(from: issue)
         }
         return NumericalFailure.eulerOutput(
             step: step + 1, totalSteps: ModelConstants.samplerSteps)

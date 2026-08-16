@@ -29,9 +29,18 @@ final class InferenceOptimizationCoordinatorTests: XCTestCase {
 
     private func testModels() -> ResolvedModels {
         ResolvedModels(
-            textEncoder: URL(fileURLWithPath: "/tmp/qwen.animapk"),
-            dit: URL(fileURLWithPath: "/tmp/dit.animapk"),
-            vae: URL(fileURLWithPath: "/tmp/vae.animapk"))
+            textEncoderURL: URL(fileURLWithPath: "/tmp/qwen.animapk"),
+            textEncoderVariant: ModelVariantDescriptor(
+                id: "textEncoder", displayFilename: "qwen3-0.6b-xsmax-w8.animapk",
+                size: 635_305_984,
+                sha256: "ba59e4d1797de5f6512aeafcecf3f38e1f62a47313a2a400b949c9018d84ceab"),
+            ditURL: URL(fileURLWithPath: "/tmp/dit.animapk"),
+            ditVariant: ModelManifest.ditW4,
+            vaeURL: URL(fileURLWithPath: "/tmp/vae.animapk"),
+            vaeVariant: ModelVariantDescriptor(
+                id: "vae", displayFilename: "qwen-image-vae-xsmax-fp16.animapk",
+                size: 256_163_840,
+                sha256: "10171af0b826927b75fecf4482aaa0e268254874e694a0788ebdd8c4254fc447"))
     }
 
     /// Captures the optimization config handed to the diffusion stage.
@@ -45,7 +54,8 @@ final class InferenceOptimizationCoordinatorTests: XCTestCase {
         }
         func makeDiffusion(
             context: MetalContext, fileURL: URL,
-            optimization: InferenceOptimizationConfig
+            optimization: InferenceOptimizationConfig,
+            numerics: DiTNumericsPolicy
         ) throws -> DiffusionStage {
             capturedConfig = optimization
             return ProbeSampler()
@@ -191,7 +201,8 @@ final class InferenceOptimizationCoordinatorTests: XCTestCase {
         }
         func makeDiffusion(
             context: MetalContext, fileURL: URL,
-            optimization: InferenceOptimizationConfig
+            optimization: InferenceOptimizationConfig,
+            numerics: DiTNumericsPolicy
         ) throws -> DiffusionStage {
             let sampler = SuspendSampler()
             self.sampler = sampler

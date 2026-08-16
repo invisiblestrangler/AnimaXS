@@ -18,12 +18,16 @@ final class DiTPreparationExecutor {
     private let buffers: BufferPool
     private let activationNumerics: ActivationNumerics
     private let monitor: NumericalMonitor?
+    /// Immutable optimization snapshot (captured at Generate). Used for the
+    /// P6 no-copy weight source toggle and linear tile config.
+    private let optimization: InferenceOptimizationConfig
     /// Run telemetry collector (nil in tests / diagnostic-only construction).
     var metrics: MetricsCollector?
 
     init(context: MetalContext, file: AnimapkFile,
          activationNumerics: ActivationNumerics = .legacy,
-         monitor: NumericalMonitor? = nil) throws {
+         monitor: NumericalMonitor? = nil,
+         optimization: InferenceOptimizationConfig = .currentBaseline) throws {
         let locator = try DiTPreparationLocator(file: file)
         guard file.quantGroup == 64 else {
             throw AnimapkError.validation("DiT preparation requires quant group 64")
@@ -31,8 +35,12 @@ final class DiTPreparationExecutor {
         self.context = context
         self.file = file
         self.locator = locator
+        self.optimization = optimization
         self.streamer = try WeightStreamer(device: context.device, capacity: Int(locator.range.length))
-        self.linear = LinearExecutor(context: context)
+        self.linear = LinearExecutor(
+            context: context, tileRows: optimization.linearTileRows,
+            directMPSIO: optimization.directLinearMPSIO,
+            linearBackend: optimization.linearBackend)
         self.buffers = BufferPool(device: context.device)
         self.activationNumerics = activationNumerics
         self.monitor = monitor
@@ -52,10 +60,17 @@ final class DiTPreparationExecutor {
             throw AnimapkError.validation("invalid DiT preparation input")
         }
         let copyStart = ProcessInfo.processInfo.systemUptime
-        try streamer.load(locator.range, from: file)
-        metrics?.recordWeightCopy(bytes: Int(locator.range.length),
-                                  seconds: ProcessInfo.processInfo.systemUptime - copyStart)
-        let weights = try DiTPreparationWeights(range: locator.range, ring: streamer.ring)
+        let result = try streamer.load(
+            locator.range, from: file,
+            mode: optimization.noCopyWeightSource ? .noCopy : .copied)
+        if result.mode == .noCopy {
+            // P6: preparation memcpy eliminated — record the no-copy bytes.
+            metrics?.recordMmapNoCopyBytes(result.noCopyBytes)
+        } else {
+            metrics?.recordWeightCopy(bytes: Int(locator.range.length),
+                                      seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+        }
+        let weights = try DiTPreparationWeights(range: locator.range, ring: streamer.buffer(for: 0))
         let raw = makeTimestep(sigma)
         guard let command = context.commandQueue.makeCommandBuffer() else {
             throw AnimapkError.validation("failed to create DiT preparation command buffer")
@@ -188,7 +203,7 @@ final class DiTPreparationExecutor {
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(input, offset: 0, index: 0)
         encoder.setBuffer(output, offset: 0, index: 1)
-        encoder.setBuffer(streamer.ring, offset: weightOffset, index: 2)
+        encoder.setBuffer(streamer.buffer(for: 0), offset: weightOffset, index: 2)
         encoder.setBytes(&columns, length: 4, index: 3)
         encoder.setBytes(&epsilon, length: 4, index: 4)
         encoder.setBytes(&useWeight, length: 4, index: 5)

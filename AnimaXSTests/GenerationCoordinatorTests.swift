@@ -149,7 +149,8 @@ final class GenerationCoordinatorTests: XCTestCase {
         }
         func makeDiffusion(
             context: MetalContext, fileURL: URL,
-            optimization: InferenceOptimizationConfig
+            optimization: InferenceOptimizationConfig,
+            numerics: DiTNumericsPolicy
         ) throws -> DiffusionStage {
             lock.lock(); calls.append(Call(stage: "sampler", url: fileURL)); lock.unlock()
             return ProbeSampler(onExecute: samplerOnExecute)
@@ -169,9 +170,18 @@ final class GenerationCoordinatorTests: XCTestCase {
 
     private func testModels() -> ResolvedModels {
         ResolvedModels(
-            textEncoder: URL(fileURLWithPath: "/tmp/qwen.animapk"),
-            dit: URL(fileURLWithPath: "/tmp/dit.animapk"),
-            vae: URL(fileURLWithPath: "/tmp/vae.animapk"))
+            textEncoderURL: URL(fileURLWithPath: "/tmp/qwen.animapk"),
+            textEncoderVariant: ModelVariantDescriptor(
+                id: "textEncoder", displayFilename: "qwen3-0.6b-xsmax-w8.animapk",
+                size: 635_305_984,
+                sha256: "ba59e4d1797de5f6512aeafcecf3f38e1f62a47313a2a400b949c9018d84ceab"),
+            ditURL: URL(fileURLWithPath: "/tmp/dit.animapk"),
+            ditVariant: ModelManifest.ditW4,
+            vaeURL: URL(fileURLWithPath: "/tmp/vae.animapk"),
+            vaeVariant: ModelVariantDescriptor(
+                id: "vae", displayFilename: "qwen-image-vae-xsmax-fp16.animapk",
+                size: 256_163_840,
+                sha256: "10171af0b826927b75fecf4482aaa0e268254874e694a0788ebdd8c4254fc447"))
     }
 
     // MARK: - Three-URL production topology
@@ -192,10 +202,10 @@ final class GenerationCoordinatorTests: XCTestCase {
         // Adapter and sampler must both receive the DiT URL.
         let adapter = factory.calls.first { $0.stage == "adapter" }!
         let sampler = factory.calls.first { $0.stage == "sampler" }!
-        XCTAssertEqual(adapter.url, models.dit, "adapter reads the DiT pack")
-        XCTAssertEqual(sampler.url, models.dit, "sampler reads the DiT pack")
-        XCTAssertEqual(factory.calls.first { $0.stage == "qwen" }!.url, models.textEncoder)
-        XCTAssertEqual(factory.calls.first { $0.stage == "vae" }!.url, models.vae)
+        XCTAssertEqual(adapter.url, models.dit.url, "adapter reads the DiT pack")
+        XCTAssertEqual(sampler.url, models.dit.url, "sampler reads the DiT pack")
+        XCTAssertEqual(factory.calls.first { $0.stage == "qwen" }!.url, models.textEncoder.url)
+        XCTAssertEqual(factory.calls.first { $0.stage == "vae" }!.url, models.vae.url)
     }
 
     // MARK: - Seed forwarding
@@ -232,7 +242,8 @@ final class GenerationCoordinatorTests: XCTestCase {
         }
         func makeDiffusion(
             context: MetalContext, fileURL: URL,
-            optimization: InferenceOptimizationConfig
+            optimization: InferenceOptimizationConfig,
+            numerics: DiTNumericsPolicy
         ) throws -> DiffusionStage {
             let sampler = ProbeSampler()
             self.sampler = sampler
@@ -351,7 +362,8 @@ final class GenerationCoordinatorTests: XCTestCase {
         }
         func makeDiffusion(
             context: MetalContext, fileURL: URL,
-            optimization: InferenceOptimizationConfig
+            optimization: InferenceOptimizationConfig,
+            numerics: DiTNumericsPolicy
         ) throws -> DiffusionStage {
             ProbeSampler()
         }
@@ -437,7 +449,8 @@ final class GenerationCoordinatorTests: XCTestCase {
         }
         func makeDiffusion(
             context: MetalContext, fileURL: URL,
-            optimization: InferenceOptimizationConfig
+            optimization: InferenceOptimizationConfig,
+            numerics: DiTNumericsPolicy
         ) throws -> DiffusionStage {
             lock.lock(); calls.append(Call(stage: "sampler")); lock.unlock()
             let sampler = BlockingSampler()
@@ -848,7 +861,8 @@ final class GenerationCoordinatorTests: XCTestCase {
         }
         func makeDiffusion(
             context: MetalContext, fileURL: URL,
-            optimization: InferenceOptimizationConfig
+            optimization: InferenceOptimizationConfig,
+            numerics: DiTNumericsPolicy
         ) throws -> DiffusionStage {
             let sampler = LifecycleSampler()
             self.sampler = sampler
@@ -860,6 +874,56 @@ final class GenerationCoordinatorTests: XCTestCase {
     }
 
     // MARK: - Stage lifetime release
+
+    // P1-F: a thrown diffusion stage must still record a nonzero diffusion time
+    // (the measured() helper closes the stage timer on throw), instead of being
+    // silently folded into "Other".
+    func testThrownDiffusionStageRecordsNonzeroDiffusionTime() async throws {
+        let context = try makeContext()
+        final class ThrowingSampler: DiffusionStage {
+            func execute(
+                initialLatent: MTLBuffer, crossContext: MTLBuffer, outputLatent: MTLBuffer,
+                startStep: Int,
+                blockProgress: ((Int, Int) throws -> Void)?,
+                stepCompleted: ((Int, Float, Float, MTLBuffer, MTLBuffer) throws -> Void)?
+            ) async throws {
+                throw AnimapkError.validation("synthetic diffusion failure")
+            }
+        }
+        final class ThrowingFactory: GenerationStageFactory {
+            func makePromptEncoder(context: MetalContext, fileURL: URL) throws -> PromptEncoderStage {
+                ProbeEncoder()
+            }
+            func makeContextAdapter(context: MetalContext, fileURL: URL) throws -> ContextAdapterStage {
+                ProbeAdapter()
+            }
+            func makeDiffusion(
+                context: MetalContext, fileURL: URL,
+                optimization: InferenceOptimizationConfig,
+                numerics: DiTNumericsPolicy
+            ) throws -> DiffusionStage {
+                ThrowingSampler()
+            }
+            func makeVAE(context: MetalContext, fileURL: URL) throws -> VAEDecodeStage {
+                ProbeVAE()
+            }
+        }
+        let engine = GenerationEngine(context: context, factory: ThrowingFactory())
+        let metrics = MetricsCollector()
+        do {
+            _ = try await engine.generate(
+                prompt: "test", seed: 1, models: testModels(),
+                metrics: metrics, optimization: .currentBaseline)
+            XCTFail("expected the throwing sampler to fail the generate call")
+        } catch {
+            // Expected: the thrown diffusion failure propagates.
+        }
+        let snapshot = metrics.snapshot()
+        // The diffusion stage timer must have been closed by the measured()
+        // defer, so diffusion time is nonzero even though diffusion threw.
+        XCTAssertGreaterThan(snapshot.diffusion, 0,
+                             "a thrown diffusion stage must record nonzero diffusion time")
+    }
 
     func testHeavyStageObjectsAreReleasedAfterTheirStage() async throws {
         let context = try makeContext()
@@ -903,7 +967,8 @@ final class GenerationCoordinatorTests: XCTestCase {
         }
         func makeDiffusion(
             context: MetalContext, fileURL: URL,
-            optimization: InferenceOptimizationConfig
+            optimization: InferenceOptimizationConfig,
+            numerics: DiTNumericsPolicy
         ) throws -> DiffusionStage {
             let probe = ProbeSampler()
             register(probe)

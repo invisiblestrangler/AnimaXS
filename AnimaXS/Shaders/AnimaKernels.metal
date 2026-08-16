@@ -98,6 +98,19 @@ kernel void half_to_float(
 
 // Round-to-nearest-even BF16 boundary while retaining fp32 storage. Preserve
 // infinities and NaNs rather than allowing the integer bias to alter them.
+// Shared by round_f32_to_bf16 and every fused kernel that must reproduce the
+// exact same boundary (P3-A/P3-B): one definition, no duplicated logic.
+inline float round_f32_to_bf16_value(float value)
+{
+    uint bits = as_type<uint>(value);
+    uint exponent = bits & 0x7f800000u;
+    if (exponent != 0x7f800000u) {
+        bits += 0x00007fffu + ((bits >> 16) & 1u);
+        bits &= 0xffff0000u;
+    }
+    return as_type<float>(bits);
+}
+
 kernel void round_f32_to_bf16(
     device const float *source [[buffer(0)]],
     device float *destination [[buffer(1)]],
@@ -105,13 +118,7 @@ kernel void round_f32_to_bf16(
     uint gid [[thread_position_in_grid]])
 {
     if (gid >= count) return;
-    uint bits = as_type<uint>(source[gid]);
-    uint exponent = bits & 0x7f800000u;
-    if (exponent != 0x7f800000u) {
-        bits += 0x00007fffu + ((bits >> 16) & 1u);
-        bits &= 0xffff0000u;
-    }
-    destination[gid] = as_type<float>(bits);
+    destination[gid] = round_f32_to_bf16_value(source[gid]);
 }
 
 // Round a fp16 value through BF16 while retaining the Apple5-friendly fp16
@@ -275,6 +282,109 @@ kernel void gelu(
     out[gid] = 0.5f * x * (1.0f + erf_f32(x * 0.7071067811865475f));
 }
 
+// Exact GELU expression shared by every GELU kernel (fp32 in/out) so the
+// fused half kernels cannot drift from the reference `gelu` math.
+inline float gelu_f32(float x)
+{
+    return 0.5f * x * (1.0f + erf_f32(x * 0.7071067811865475f));
+}
+
+// Stats ABI shared by every probe kernel in this file (see the probe section
+// for the full layout). Declared here, before their first use, so all fused
+// P3-A/P3-B probe kernels and the classic probe kernels can reference them.
+constant uint NUM_FLAG_NAN          = 1u << 0;
+constant uint NUM_FLAG_POS_INF      = 1u << 1;
+constant uint NUM_FLAG_NEG_INF      = 1u << 2;
+constant uint NUM_FLAG_HALF_OVERFLOW = 1u << 3;
+constant uint NUM_FLAG_RESULT_NAN   = 1u << 4;
+constant uint NUM_FLAG_RESULT_INF   = 1u << 5;
+constant uint NUM_SLOT_UINTS        = 4u;
+
+// ---------------------------------------------------------------------------
+// P3-B: in-place GELU on fp16 MLP hidden activations with fp32 register
+// arithmetic. Replaces the legacy sequence half_to_float → gelu(f32) →
+// round_f32_to_bf16 → float_to_half with a single pass:
+//   y = gelu_f32(float(values[i]))
+//   y = round_f32_to_bf16_value(y)          (only when bf16Boundary)
+//   values[i] = half(y)
+// Safe in-place: each thread reads exactly one element before writing it.
+// ---------------------------------------------------------------------------
+kernel void dit_gelu_half_inplace(
+    device half *values [[buffer(0)]],
+    constant uint &count [[buffer(1)]],
+    constant uint &bf16Boundary [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if (gid >= count) return;
+    float y = gelu_f32(float(values[gid]));
+    if (bf16Boundary != 0) y = round_f32_to_bf16_value(y);
+    values[gid] = half(y);
+}
+
+// P3-B probe variant: identical math plus float_to_half_probe health stats on
+// the value fed to half() (i.e. after the BF16 boundary, matching the legacy
+// probed conversion path).
+kernel void dit_gelu_half_inplace_probe(
+    device half *values [[buffer(0)]],
+    constant uint &count [[buffer(1)]],
+    constant uint &bf16Boundary [[buffer(2)]],
+    device uint *stats [[buffer(3)]],
+    constant uint &probeSlot [[buffer(4)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]])
+{
+    threadgroup uint partialFlags[256];
+    threadgroup uint partialMax[256];
+    threadgroup uint partialIndex[256];
+    uint base = group.x * 256;
+    uint i = base + tid;
+    uint localFlags = 0;
+    uint localMax = 0;
+    uint localIndex = 0xFFFFFFFFu;
+    if (i < count) {
+        float y = gelu_f32(float(values[i]));
+        if (bf16Boundary != 0) y = round_f32_to_bf16_value(y);
+        values[i] = half(y);
+        if (isnan(y)) {
+            localFlags |= NUM_FLAG_NAN;
+            localIndex = min(localIndex, i);
+        } else if (isinf(y)) {
+            localFlags |= (y > 0.0f) ? NUM_FLAG_POS_INF : NUM_FLAG_NEG_INF;
+            localIndex = min(localIndex, i);
+        } else {
+            float a = fabs(y);
+            if (a > 65504.0f) {
+                localFlags |= NUM_FLAG_HALF_OVERFLOW;
+                localIndex = min(localIndex, i);
+            }
+            uint bits = as_type<uint>(a);
+            if (bits > localMax) localMax = bits;
+        }
+    }
+    partialFlags[tid] = localFlags;
+    partialMax[tid] = localMax;
+    partialIndex[tid] = localIndex;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            partialFlags[tid] |= partialFlags[tid + stride];
+            partialMax[tid] = max(partialMax[tid], partialMax[tid + stride]);
+            partialIndex[tid] = min(partialIndex[tid], partialIndex[tid + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0 && partialFlags[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        uint slotBase = probeSlot * NUM_SLOT_UINTS;
+        atomic_fetch_or_explicit(&atom[slotBase + 0], partialFlags[0], memory_order_relaxed);
+        atomic_fetch_min_explicit(&atom[slotBase + 2], partialIndex[0], memory_order_relaxed);
+    }
+    if (tid == 0 && partialMax[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        atomic_fetch_max_explicit(&atom[probeSlot * NUM_SLOT_UINTS + 1], partialMax[0], memory_order_relaxed);
+    }
+}
+
 kernel void silu(
     device const float *in  [[buffer(0)]],
     device float       *out [[buffer(1)]],
@@ -348,6 +458,166 @@ kernel void modulate_f32(
     if (gid >= count) return;
     uint column = gid % N;
     out[gid] = normalized[gid] * (1.0f + scale[column]) + shift[column];
+}
+
+// ---------------------------------------------------------------------------
+// P3-A: fused LayerNorm + AdaLN modulation + optional BF16 compute boundary +
+// fp16 conversion in ONE pass. Replaces the legacy three-pass sequence
+// layernorm_f32_to_f32 → modulate_f32 → (round_f32_to_bf16 + float_to_half)
+// while preserving its exact reduction structure, modulation indexing
+// (scale at offset modulationOffset, shift at offset 0), boundary placement,
+// and conversion semantics.
+//
+// Legacy equivalence (all fp32):
+//   norm    = (residual - mean) * rsqrt(var + eps)
+//   mod     = norm * (1 + scale) + shift
+//   bf16    = round_f32_to_bf16_value(mod)            (only when bf16Boundary)
+//   output  = half(bf16)
+// ---------------------------------------------------------------------------
+kernel void dit_layernorm_modulate_to_half(
+    device const float *residual      [[buffer(0)]],
+    device const float *modulation    [[buffer(1)]],
+    device half       *output         [[buffer(2)]],
+    constant uint     &N              [[buffer(3)]],
+    constant float    &eps            [[buffer(4)]],
+    constant uint     &rows           [[buffer(5)]],
+    constant uint     &modulationOffset [[buffer(6)]],
+    constant uint     &bf16Boundary   [[buffer(7)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint3 threads [[threads_per_threadgroup]])
+{
+    uint row = group.x;
+    if (row >= rows) return;
+    uint threadCount = threads.x;
+    threadgroup float partial[256];
+    float sum = 0.0f;
+    for (uint i = tid; i < N; i += threadCount) sum += residual[row * N + i];
+    partial[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float mean = partial[0] / float(N);
+    float squareSum = 0.0f;
+    for (uint i = tid; i < N; i += threadCount) {
+        float centered = residual[row * N + i] - mean;
+        squareSum = fma(centered, centered, squareSum);
+    }
+    partial[tid] = squareSum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inv = rsqrt(partial[0] / float(N) + eps);
+    // EXACT modulate_f32 indexing: scale at modulationOffset, shift at 0.
+    device const float *scale = modulation + modulationOffset;
+    device const float *shift = modulation;
+    for (uint i = tid; i < N; i += threadCount) {
+        float normalized = (residual[row * N + i] - mean) * inv;
+        float modulated = normalized * (1.0f + scale[i]) + shift[i];
+        if (bf16Boundary != 0) modulated = round_f32_to_bf16_value(modulated);
+        output[row * N + i] = half(modulated);
+    }
+}
+
+// P3-A probe variant: identical math plus the float_to_half_probe health
+// stats (NaN/±Inf/|v| > 65504) accumulated into the shared stats buffer.
+// The health check runs on the value fed to half(), i.e. after the BF16
+// boundary, matching the legacy probed path.
+kernel void dit_layernorm_modulate_to_half_probe(
+    device const float *residual      [[buffer(0)]],
+    device const float *modulation    [[buffer(1)]],
+    device half       *output         [[buffer(2)]],
+    constant uint     &N              [[buffer(3)]],
+    constant float    &eps            [[buffer(4)]],
+    constant uint     &rows           [[buffer(5)]],
+    constant uint     &modulationOffset [[buffer(6)]],
+    constant uint     &bf16Boundary   [[buffer(7)]],
+    device uint       *stats          [[buffer(8)]],
+    constant uint     &probeSlot      [[buffer(9)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint3 threads [[threads_per_threadgroup]])
+{
+    uint row = group.x;
+    if (row >= rows) return;
+    uint threadCount = threads.x;
+    threadgroup float partial[256];
+    float sum = 0.0f;
+    for (uint i = tid; i < N; i += threadCount) sum += residual[row * N + i];
+    partial[tid] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float mean = partial[0] / float(N);
+    float squareSum = 0.0f;
+    for (uint i = tid; i < N; i += threadCount) {
+        float centered = residual[row * N + i] - mean;
+        squareSum = fma(centered, centered, squareSum);
+    }
+    partial[tid] = squareSum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inv = rsqrt(partial[0] / float(N) + eps);
+    threadgroup uint partialFlags[256];
+    threadgroup uint partialMax[256];
+    threadgroup uint partialIndex[256];
+    device const float *scale = modulation + modulationOffset;
+    device const float *shift = modulation;
+    uint localFlags = 0;
+    uint localMax = 0;
+    uint localIndex = 0xFFFFFFFFu;
+    for (uint i = tid; i < N; i += threadCount) {
+        float normalized = (residual[row * N + i] - mean) * inv;
+        float modulated = normalized * (1.0f + scale[i]) + shift[i];
+        if (bf16Boundary != 0) modulated = round_f32_to_bf16_value(modulated);
+        output[row * N + i] = half(modulated);
+        if (isnan(modulated)) {
+            localFlags |= NUM_FLAG_NAN;
+            localIndex = min(localIndex, row * N + i);
+        } else if (isinf(modulated)) {
+            localFlags |= (modulated > 0.0f) ? NUM_FLAG_POS_INF : NUM_FLAG_NEG_INF;
+            localIndex = min(localIndex, row * N + i);
+        } else {
+            float a = fabs(modulated);
+            if (a > 65504.0f) {
+                localFlags |= NUM_FLAG_HALF_OVERFLOW;
+                localIndex = min(localIndex, row * N + i);
+            }
+            uint bits = as_type<uint>(a);
+            if (bits > localMax) localMax = bits;
+        }
+    }
+    partialFlags[tid] = localFlags;
+    partialMax[tid] = localMax;
+    partialIndex[tid] = localIndex;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            partialFlags[tid] |= partialFlags[tid + stride];
+            partialMax[tid] = max(partialMax[tid], partialMax[tid + stride]);
+            partialIndex[tid] = min(partialIndex[tid], partialIndex[tid + stride]);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0 && partialFlags[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        uint slotBase = probeSlot * NUM_SLOT_UINTS;
+        atomic_fetch_or_explicit(&atom[slotBase + 0], partialFlags[0], memory_order_relaxed);
+        atomic_fetch_min_explicit(&atom[slotBase + 2], partialIndex[0], memory_order_relaxed);
+    }
+    if (tid == 0 && partialMax[0] != 0) {
+        device atomic_uint *atom = (device atomic_uint *)stats;
+        atomic_fetch_max_explicit(&atom[probeSlot * NUM_SLOT_UINTS + 1], partialMax[0], memory_order_relaxed);
+    }
 }
 
 // MPS branches are fp16, but gates and residual arithmetic remain fp32.
@@ -632,6 +902,120 @@ kernel void fp16_matvec_f32(
     }
     if (tid == 0) out[row] = partial[0];
 }
+
+// ---------------------------------------------------------------------------
+// P8: direct packed quantized GEMM (runbook §13). The packed W4/W8 weight
+// [N,K] is consumed DIRECTLY — the W tile for one K group (K=64) is decoded
+// into threadgroup memory and reused across the TM activation rows, so the
+// full [N,K] fp16 weight scratch of the dequantized-MPS path is never
+// allocated. Decode semantics are EXACTLY those of dequant_w4_to_half /
+// dequant_w8_to_half (group K = 64, q unsigned, even-K low nibble / odd-K
+// high nibble for W4, value = q*scale + zero, scale/zero fp16 per (row,
+// group)). Input is [M,K] fp16 row-major; output is [M,N] fp16 row-major
+// written as half(FP32 accumulator). Threads are laid out TM×TN — one thread
+// per output element — with the K reduction vectorized 4 halves at a time.
+// Profiles: qgemm_8x8x64 (TM=8, TN=8, 64 threads) and qgemm_8x16x64 (TM=8,
+// TN=16, 128 threads).
+// ---------------------------------------------------------------------------
+// Direct packed W4/W8 GEMM (P8). Quant group K = 64, so TK = 64. Each K
+// group's [TN][64] W tile is decoded ONCE into threadgroup memory and reused
+// across TM activation rows; accumulation is FP32; output is half. Two tile
+// profiles: 8x8 (64 threads) and 8x16 (128 threads). Generated as concrete
+// kernels via a macro because MSL does not allow template-parameter structs.
+// The W4/W8 decode matches dequant_w4_to_half / dequant_w8_to_half exactly.
+#define QGEMM_KERNEL(KNAME, TM, TN, ISW4)                                             \
+kernel void KNAME(                                                                    \
+    device const half   *input       [[buffer(0)]],  /* [M, K] fp16 */                \
+    device const uchar  *packed      [[buffer(1)]],  /* [N, packedRowStride] */       \
+    device const half   *scale       [[buffer(2)]],  /* [N, groupsPerRow] */          \
+    device const half   *zero        [[buffer(3)]],  /* [N, groupsPerRow] */          \
+    device half         *output      [[buffer(4)]],  /* [M, N] fp16 */                \
+    constant uint       &M           [[buffer(5)]],                                  \
+    constant uint       &N           [[buffer(6)]],                                  \
+    constant uint       &K           [[buffer(7)]],                                  \
+    constant uint       &rowStride   [[buffer(8)]],                                  \
+    constant uint       &inputStride [[buffer(9)]],                                  \
+    constant uint       &outputStride [[buffer(10)]],                                \
+    uint3 group [[threadgroup_position_in_grid]],                                    \
+    uint tid [[thread_index_in_threadgroup]])                                        \
+{                                                                                     \
+    constexpr uint TK = 64;                                                          \
+    threadgroup half aTile[TM * TK];                                                 \
+    threadgroup half wTile[TN * TK];                                                 \
+    uint mBase = group.x * TM;                                                       \
+    uint nBase = group.y * TN;                                                       \
+    if (mBase >= M || nBase >= N) return;                                            \
+    uint mCount = min((uint)TM, M - mBase);                                                \
+    uint nCount = min((uint)TN, N - nBase);                                                \
+    uint groupsPerRow = (K + W4_GROUP - 1) / W4_GROUP;                               \
+    uint mRow = tid / TN;                                                            \
+    uint nCol = tid % TN;                                                            \
+    uint row = mBase + mRow;                                                         \
+    uint wRow = nBase + nCol;                                                        \
+    float acc = 0.0f;                                                                \
+    uint kBase = 0;                                                                  \
+    while (kBase < K) {                                                              \
+        uint kCount = min((uint)TK, K - kBase);                                            \
+        for (uint k = nCol; k < TK; k += TN) {                                       \
+            if (k < kCount) {                                                        \
+                aTile[mRow * TK + k] = input[row * inputStride + kBase + k];         \
+            } else {                                                                 \
+                aTile[mRow * TK + k] = 0;                                            \
+            }                                                                        \
+        }                                                                            \
+        {                                                                            \
+            uint packedBase = wRow * rowStride;                                      \
+            uint paramBase = wRow * groupsPerRow;                                    \
+            uint g = kBase / W4_GROUP;                                               \
+            half sc = scale[paramBase + g];                                          \
+            half ze = zero[paramBase + g];                                           \
+            if (ISW4) {                                                              \
+                for (uint i = 0; i < TK / TM; ++i) {                                 \
+                    uint k = mRow * (TK / TM) + i;                                   \
+                    if (k < kCount) {                                                \
+                        uchar byte = packed[packedBase + ((kBase + k) >> 1)];        \
+                        uint q = ((kBase + k) & 1) == 0 ? uint(byte & 0x0F) : uint(byte >> 4); \
+                        wTile[nCol * TK + k] = half(float(q) * float(sc) + float(ze)); \
+                    } else {                                                         \
+                        wTile[nCol * TK + k] = 0;                                    \
+                    }                                                                \
+                }                                                                    \
+            } else {                                                                 \
+                for (uint i = 0; i < TK / TM; ++i) {                                 \
+                    uint k = mRow * (TK / TM) + i;                                   \
+                    if (k < kCount) {                                                \
+                        uint q = uint(packed[packedBase + kBase + k]);               \
+                        wTile[nCol * TK + k] = half(float(q) * float(sc) + float(ze)); \
+                    } else {                                                         \
+                        wTile[nCol * TK + k] = 0;                                    \
+                    }                                                                \
+                }                                                                    \
+            }                                                                        \
+        }                                                                            \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                             \
+        for (uint k = 0; k < TK; k += 4) {                                           \
+            float a0 = float(aTile[mRow * TK + k + 0]);                              \
+            float a1 = float(aTile[mRow * TK + k + 1]);                              \
+            float a2 = float(aTile[mRow * TK + k + 2]);                              \
+            float a3 = float(aTile[mRow * TK + k + 3]);                              \
+            uint wBase = nCol * TK + k;                                              \
+            acc = fma(a0, float(wTile[wBase + 0]), acc);                             \
+            acc = fma(a1, float(wTile[wBase + 1]), acc);                             \
+            acc = fma(a2, float(wTile[wBase + 2]), acc);                             \
+            acc = fma(a3, float(wTile[wBase + 3]), acc);                             \
+        }                                                                            \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                             \
+        kBase += TK;                                                                 \
+    }                                                                                \
+    if (mRow < mCount && nCol < nCount) {                                            \
+        output[row * outputStride + nBase + nCol] = half(acc);                       \
+    }                                                                                \
+}
+
+QGEMM_KERNEL(qgemm_8x8x64, 8, 8, true)
+QGEMM_KERNEL(qgemm_8x16x64, 8, 16, true)
+QGEMM_KERNEL(qgemm_w8_8x8x64, 8, 8, false)
+QGEMM_KERNEL(qgemm_w8_8x16x64, 8, 16, false)
 
 // Stable row softmax. Scores/probabilities are fp16 at MPS boundaries, while
 // max, exp, and sum are evaluated and reduced in fp32.
@@ -1182,14 +1566,8 @@ kernel void vae_position_to_rgba8(
 // gate_add probe adds:
 //   bit4 result (residual) became NaN
 //   bit5 result (residual) became +/-Inf
-// ---------------------------------------------------------------------------
-constant uint NUM_FLAG_NAN          = 1u << 0;
-constant uint NUM_FLAG_POS_INF      = 1u << 1;
-constant uint NUM_FLAG_NEG_INF      = 1u << 2;
-constant uint NUM_FLAG_HALF_OVERFLOW = 1u << 3;
-constant uint NUM_FLAG_RESULT_NAN   = 1u << 4;
-constant uint NUM_FLAG_RESULT_INF   = 1u << 5;
-constant uint NUM_SLOT_UINTS        = 4u;
+// (The NUM_FLAG_* constants themselves are declared near the P3-A kernels,
+// before their first use.)
 
 // fp32 -> fp16 conversion that also records input-health stats. Replaces
 // float_to_half at probed call sites; identical conversion semantics.
@@ -1628,5 +2006,393 @@ kernel void probe_f32_stats(
     if (tid == 0 && partialMax[0] != 0) {
         device atomic_uint *atom = (device atomic_uint *)stats;
         atomic_fetch_max_explicit(&atom[probeSlot * NUM_SLOT_UINTS + 1], partialMax[0], memory_order_relaxed);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P7-A: streaming/online-softmax attention kernels.
+//
+// The strided token-major MPS path (P4) materializes a full fp16
+// [queryTile, keyCount] score tile. P7-A keeps MPS for QK and PV but
+// processes keys in CHUNKS so only a [queryTile, keyChunk] score tile is
+// ever live, and carries the online-softmax state between chunks. All chunks
+// of a query tile encode into the SAME block command buffer: chunk (k+1)
+// reads state written by chunk k purely via GPU ordering (each chunk is a
+// separate encoder; encoder boundaries act as barriers), so there is NO
+// per-chunk wait and NO extra command-buffer completion.
+//
+// State buffer layout (per query row; chunkCount rows, e.g. 128; all FP32):
+//   runningMax[row]     — running max of scaled scores
+//   runningSum[row]     — running sum of exp(score - runningMax)
+//   runningAlpha[row]   — rescale factor exp(oldMax - newMax) of the LAST
+//                         prepare pass (1.0 on the first chunk)
+//   accumulator[row * headDim + d] — running output (alpha-rescaled)
+// The PV result of every chunk is accumulated into the FP32 accumulator —
+// NEVER into an fp16 accumulator — and only the final chunk divides by the
+// running sum and rounds to half.
+// ---------------------------------------------------------------------------
+
+// P7-A: given the fp16 scores of ONE key chunk (row-major [rows, rowStride]
+// halves; rowStride = chunkColumns for the tight MPS score tile), update the
+// running online-softmax state and rewrite the scores tile in place to the
+// RESCALED chunk probabilities (exp(score - newMax) * alpha). One threadgroup
+// per query row; threads reduce over the chunk columns.
+kernel void streaming_softmax_prepare(
+    device half       *scores       [[buffer(0)]],   // in/out [rows, rowStride]
+    device float      *runningMax   [[buffer(1)]],   // in/out [rows]
+    device float      *runningSum   [[buffer(2)]],   // in/out [rows]
+    device float      *runningAlpha [[buffer(3)]],   // out [rows]
+    constant uint     &rows         [[buffer(4)]],
+    constant uint     &columns      [[buffer(5)]],   // chunkColumns (Bk)
+    constant uint     &rowStride    [[buffer(6)]],   // padded row stride (halves)
+    constant uint     &firstChunk   [[buffer(7)]],   // 1 on the first chunk
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint3 threads [[threads_per_threadgroup]])
+{
+    uint row = group.x;
+    if (row >= rows) return;
+    uint threadCount = threads.x;
+    threadgroup float partial[256];
+
+    // Chunk-local max (fp32).
+    float localMax = -INFINITY;
+    for (uint column = tid; column < columns; column += threadCount) {
+        localMax = max(localMax, float(scores[row * rowStride + column]));
+    }
+    partial[tid] = localMax;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] = max(partial[tid], partial[tid + stride]);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float chunkMax = partial[0];
+
+    // Merge with the running max (online-softmax rescale).
+    float oldMax = runningMax[row];
+    float newMax = firstChunk != 0 ? chunkMax : max(oldMax, chunkMax);
+    float alpha = firstChunk != 0 ? 1.0f : exp(oldMax - newMax);
+    runningMax[row] = newMax;
+    if (tid == 0) runningAlpha[row] = alpha;
+
+    // Rewrite this chunk's scores to exp(score - newMax) * alpha and add the
+    // chunk's row sum (fp32) into the running sum.
+    float localSum = 0.0f;
+    for (uint column = tid; column < columns; column += threadCount) {
+        float p = exp(float(scores[row * rowStride + column]) - newMax) * alpha;
+        scores[row * rowStride + column] = half(p);
+        localSum += p;
+    }
+    partial[tid] = localSum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) runningSum[row] = firstChunk != 0 ? partial[0] : runningSum[row] + partial[0];
+}
+
+// P7-A: rescale the running FP32 output accumulator by this chunk's alpha
+// (stored by the prepare pass) and accumulate the fp16 chunk PV result:
+// acc = alpha * acc + float(chunkOut). The PV result is row-major
+// [rows, headDim] with rowBytes = headDim * 2 (tight). Threads iterate over
+// the [rows, headDim] tile.
+kernel void streaming_chunk_accumulate(
+    device const half *chunkOut     [[buffer(0)]],   // MPS PV result [rows, headDim]
+    device float      *accumulator  [[buffer(1)]],   // in/out [rows, headDim]
+    device const float *runningAlpha [[buffer(2)]],  // [rows] alpha of this chunk
+    constant uint     &rows         [[buffer(3)]],
+    constant uint     &headDim      [[buffer(4)]],
+    constant uint     &firstChunk   [[buffer(5)]],   // 1 on the first chunk
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= headDim || gid.y >= rows) return;
+    uint index = gid.y * headDim + gid.x;
+    accumulator[index] = (firstChunk != 0)
+        ? float(chunkOut[index])
+        : fma(runningAlpha[gid.y], accumulator[index], float(chunkOut[index]));
+}
+
+// P7-A: finalize one query tile of streaming attention:
+// output = half(acc / runningSum) into a TOKEN-MAJOR [rows, tokenStride]
+// buffer (each head owns headDim contiguous columns; column base head*headDim
+// is included in the buffer offset chosen by the caller). One thread per
+// [row, headDim] element.
+kernel void streaming_softmax_finalize(
+    device const float *accumulator  [[buffer(0)]],
+    device const float *runningSum   [[buffer(1)]],
+    device half        *output       [[buffer(2)]],   // token-major [rows, tokenStride]
+    constant uint      &rows         [[buffer(3)]],
+    constant uint      &headDim      [[buffer(4)]],
+    constant uint      &tokenStride  [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= headDim || gid.y >= rows) return;
+    float sum = runningSum[gid.y];
+    float value = sum > 0.0f ? accumulator[gid.y * headDim + gid.x] / sum : 0.0f;
+    output[gid.y * tokenStride + gid.x] = half(value);
+}
+
+// ---------------------------------------------------------------------------
+// P7-B: DiT-specialized pure-Metal Flash-style online attention.
+//
+// STRICTLY DiT-specialized (NOT a generic transformer library):
+//   - headDim == 128 only, heads == 16, non-causal
+//   - token-major Q/K/V `[rows, tokenStride]` half buffers (tokenStride 2048)
+//   - token-major output, FP32 score/softmax/output accumulation
+// Any other shape must be rejected by the Swift side BEFORE this kernel runs.
+//
+// A12-safe: NO simdgroup_matrix, NO Metal 3. Score dots use `simd_sum` over
+// the 32 lanes of a SIMD group (threadExecutionWidth == 32 is required); each
+// lane owns 4 of the 128 headDim dims. Online-softmax running max/sum and the
+// output accumulator are FP32; running-max/rescale is MANDATORY (never a raw
+// exp(score), never an fp16 denominator/accumulator).
+//
+// Profile h128_q4_k32: 4 query rows per threadgroup, 4 SIMD groups (128
+// threads), K/V tile 32 keys. Each SIMD group computes ONE query row; every
+// lane of the group maintains IDENTICAL running max/sum scalars (simd_max
+// broadcasts, and the per-lane chunk sums are identical because every lane
+// computes the full score via simd_sum), so no lane shuffles are needed for
+// the final normalization. Lane d of the SIMD group owns output dim
+// (d * 32 + lane), matching the dot layout (dim d*32+lane), so the PV
+// accumulation needs no lane data movement either.
+// ---------------------------------------------------------------------------
+
+// P7-B: DiT Flash attention, headDim=128, 4 query rows/threadgroup, K=32.
+// Output is token-major [queryCount, tokenStride]; each head owns headDim
+// contiguous columns of every row (column base = head * 128).
+kernel void dit_flash_attention_h128_q4_k32(
+    device const half *query    [[buffer(0)]],  // [queryCount, tokenStride]
+    device const half *key      [[buffer(1)]],  // [keyCount, tokenStride]
+    device const half *value    [[buffer(2)]],  // [keyCount, tokenStride]
+    device half       *output   [[buffer(3)]],  // [queryCount, tokenStride]
+    constant uint     &queryCount [[buffer(4)]],
+    constant uint     &keyCount   [[buffer(5)]],
+    constant uint     &tokenStride [[buffer(6)]],
+    constant float    &scale      [[buffer(7)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint simdLane [[thread_index_in_simdgroup]])
+{
+    constexpr uint HEAD_DIM = 128;
+    constexpr uint K_TILE = 32;
+    constexpr uint SIMD_GROUPS = 4;      // 128 threads / 32 lanes
+    constexpr uint THREADS = 128;
+
+    uint lane = simdLane;                 // 0..31
+    // `simd` is 0..3 (simdgroup_index_in_threadgroup) → query row within group.
+    uint head = group.z;                  // head index (grid.z = heads)
+    uint queryRow = group.x * SIMD_GROUPS + simd;
+    if (queryRow >= queryCount) return;
+
+    // Threadgroup K/V tile: [K_TILE][HEAD_DIM] halves, 8 KiB each (16 KiB total).
+    threadgroup half kTile[K_TILE * HEAD_DIM];
+    threadgroup half vTile[K_TILE * HEAD_DIM];
+
+    // `tid` is 0..127 (thread_index_in_threadgroup).
+    uint headColBase = head * HEAD_DIM;   // column base of this head in the token row
+
+    // Running online-softmax state (FP32, IDENTICAL on every lane).
+    float rowMax = -INFINITY;
+    float rowSum = 0.0f;
+    // FP32 output accumulator: lane d of the SIMD group owns output dim
+    // (d * 32 + lane), 4 dims per lane.
+    float acc[HEAD_DIM / 32];             // 4 floats per lane
+
+    #pragma unroll
+    for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+        acc[d] = 0.0f;
+    }
+
+    uint keyBase = 0;
+    while (keyBase < keyCount) {
+        // Cooperative load of the K/V tile [K_TILE][HEAD_DIM] into threadgroup
+        // memory (16 KiB total for the K=32 profile).
+        #pragma unroll
+        for (uint i = 0; i < (K_TILE * HEAD_DIM) / THREADS; ++i) {
+            uint index = tid + i * THREADS;
+            uint kRow = keyBase + index / HEAD_DIM;
+            uint kCol = index % HEAD_DIM;
+            if (kRow < keyCount) {
+                kTile[index] = key[kRow * tokenStride + headColBase + kCol];
+                vTile[index] = value[kRow * tokenStride + headColBase + kCol];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        uint kCount = min(K_TILE, keyCount - keyBase);
+
+        // Pass 1: chunk-local max of the scaled scores for this query row.
+        // Each lane computes a 4-dim partial dot; simd_max reduces (and
+        // broadcasts) the chunk max over the 32 lanes.
+        float localMax = -INFINITY;
+                for (uint k = 0; k < K_TILE; ++k) {
+            if (k >= kCount) break;
+            float dot = 0.0f;
+            #pragma unroll
+            for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+                dot = fma(float(kTile[k * HEAD_DIM + d * 32 + lane]),
+                          float(query[queryRow * tokenStride + headColBase + d * 32 + lane]), dot);
+            }
+            localMax = max(localMax, dot * scale);
+        }
+        float chunkMax = simd_max(localMax);   // identical on all lanes
+
+        // Online-softmax rescale (running max/sum in FP32; MANDATORY).
+        float newMax = (keyBase == 0) ? chunkMax : max(rowMax, chunkMax);
+        float alpha = (keyBase == 0) ? 1.0f : exp(rowMax - newMax);
+        rowMax = newMax;
+
+        // Rescale the OLD accumulator BEFORE adding this chunk's contribution.
+        #pragma unroll
+        for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+            acc[d] = acc[d] * alpha;
+        }
+
+        // Pass 2: chunk probabilities + PV accumulation. The full score is
+        // recomputed per lane as a partial dot, then `simd_sum` broadcasts the
+        // FULL dot to every lane, so p = exp(score*scale - newMax) is
+        // identical on all lanes and no score shuffle is needed.
+        float chunkSum = 0.0f;
+                for (uint k = 0; k < K_TILE; ++k) {
+            if (k >= kCount) break;
+            float dot = 0.0f;
+            #pragma unroll
+            for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+                dot = fma(float(kTile[k * HEAD_DIM + d * 32 + lane]),
+                          float(query[queryRow * tokenStride + headColBase + d * 32 + lane]), dot);
+            }
+            float p = exp(simd_sum(dot) * scale - newMax);
+            chunkSum += p;
+            #pragma unroll
+            for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+                acc[d] = fma(p, float(vTile[k * HEAD_DIM + d * 32 + lane]), acc[d]);
+            }
+        }
+        // chunkSum is identical on every lane (identical p sequence), so every
+        // lane updates rowSum identically — no broadcast required.
+        rowSum = rowSum * alpha + chunkSum;
+
+        // The next chunk's cooperative load must not overwrite the tile while
+        // any lane is still reading it.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        keyBase += K_TILE;
+    }
+
+    // Finalize: output = half(acc / rowSum), token-major write.
+    float inverseSum = 1.0f / rowSum;
+    #pragma unroll
+    for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+        output[queryRow * tokenStride + headColBase + d * 32 + lane] = half(acc[d] * inverseSum);
+    }
+}
+
+// P7-B: K=16 profile of the same DiT Flash attention. Same threadgroup shape
+// (4 query rows, 128 threads) with a smaller K/V tile (4 KiB K + 4 KiB V) for
+// devices/pipelines whose threadgroup memory or occupancy prefers it. The math
+// is byte-identical to the K=32 profile — only the key chunk size changes.
+kernel void dit_flash_attention_h128_q4_k16(
+    device const half *query    [[buffer(0)]],
+    device const half *key      [[buffer(1)]],
+    device const half *value    [[buffer(2)]],
+    device half       *output   [[buffer(3)]],
+    constant uint     &queryCount [[buffer(4)]],
+    constant uint     &keyCount   [[buffer(5)]],
+    constant uint     &tokenStride [[buffer(6)]],
+    constant float    &scale      [[buffer(7)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint simdLane [[thread_index_in_simdgroup]])
+{
+    constexpr uint HEAD_DIM = 128;
+    constexpr uint K_TILE = 16;
+    constexpr uint SIMD_GROUPS = 4;
+    constexpr uint THREADS = 128;
+
+    uint lane = simdLane;
+    uint head = group.z;                  // head index (grid.z = heads)
+    uint queryRow = group.x * SIMD_GROUPS + simd;
+    if (queryRow >= queryCount) return;
+
+    threadgroup half kTile[K_TILE * HEAD_DIM];
+    threadgroup half vTile[K_TILE * HEAD_DIM];
+
+    uint headColBase = head * HEAD_DIM;
+
+    float rowMax = -INFINITY;
+    float rowSum = 0.0f;
+    float acc[HEAD_DIM / 32];
+
+    #pragma unroll
+    for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+        acc[d] = 0.0f;
+    }
+
+    uint keyBase = 0;
+    while (keyBase < keyCount) {
+        #pragma unroll
+        for (uint i = 0; i < (K_TILE * HEAD_DIM) / THREADS; ++i) {
+            uint index = tid + i * THREADS;
+            uint kRow = keyBase + index / HEAD_DIM;
+            uint kCol = index % HEAD_DIM;
+            if (kRow < keyCount) {
+                kTile[index] = key[kRow * tokenStride + headColBase + kCol];
+                vTile[index] = value[kRow * tokenStride + headColBase + kCol];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        uint kCount = min(K_TILE, keyCount - keyBase);
+
+        float localMax = -INFINITY;
+                for (uint k = 0; k < K_TILE; ++k) {
+            if (k >= kCount) break;
+            float dot = 0.0f;
+            #pragma unroll
+            for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+                dot = fma(float(kTile[k * HEAD_DIM + d * 32 + lane]),
+                          float(query[queryRow * tokenStride + headColBase + d * 32 + lane]), dot);
+            }
+            localMax = max(localMax, dot * scale);
+        }
+        float chunkMax = simd_max(localMax);
+
+        float newMax = (keyBase == 0) ? chunkMax : max(rowMax, chunkMax);
+        float alpha = (keyBase == 0) ? 1.0f : exp(rowMax - newMax);
+        rowMax = newMax;
+
+        #pragma unroll
+        for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+            acc[d] = acc[d] * alpha;
+        }
+
+        float chunkSum = 0.0f;
+                for (uint k = 0; k < K_TILE; ++k) {
+            if (k >= kCount) break;
+            float dot = 0.0f;
+            #pragma unroll
+            for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+                dot = fma(float(kTile[k * HEAD_DIM + d * 32 + lane]),
+                          float(query[queryRow * tokenStride + headColBase + d * 32 + lane]), dot);
+            }
+            float p = exp(simd_sum(dot) * scale - newMax);
+            chunkSum += p;
+            #pragma unroll
+            for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+                acc[d] = fma(p, float(vTile[k * HEAD_DIM + d * 32 + lane]), acc[d]);
+            }
+        }
+        rowSum = rowSum * alpha + chunkSum;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        keyBase += K_TILE;
+    }
+
+    float inverseSum = 1.0f / rowSum;
+    #pragma unroll
+    for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+        output[queryRow * tokenStride + headColBase + d * 32 + lane] = half(acc[d] * inverseSum);
     }
 }

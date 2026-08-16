@@ -35,10 +35,103 @@ struct ModelManifestEntry: Codable, Equatable {
     }
 }
 
+/// Runtime descriptor for one accepted model pack variant.
+///
+/// Unlike `ModelVariant` (which is the persisted receipt shape), this carries
+/// the human-visible variant id ("w4" or "w8-v2") and the display filename so
+/// telemetry can report which pack actually ran even though the app-owned
+/// local file is always named after the W4 slot.
+struct ModelVariantDescriptor: Hashable {
+    let id: String
+    let displayFilename: String
+    let size: UInt64
+    let sha256: String
+}
+
+/// The numerical-fidelity policy for a DiT pack, derived from the resolved
+/// pack variant id — never from the app-owned local filename.
+///
+/// - `w4Legacy`: the known-good current W4 path (FP16 boundaries as today).
+/// - `w8BF16Emulated`: the W8-v2 pack whose source semantics require a
+///   BF16-like range at compute boundaries. On Apple5/A12 (no native BF16
+///   storage) this is emulated as BF16 RNE rounding while retaining FP32
+///   storage, mapping onto the existing `ActivationNumerics` BF16 machinery.
+enum DiTNumericsPolicy: String, Equatable {
+    case w4Legacy
+    case w8BF16Emulated
+
+    static func fromVariantID(_ id: String) -> DiTNumericsPolicy {
+        id == "w8-v2" ? .w8BF16Emulated : .w4Legacy
+    }
+}
+
 enum ModelManifest {
     static let releaseTag = "model-assets-v1"
     private static let releaseBase = URL(
         string: "https://github.com/invisiblestrangler/AnimaXS/releases/download/\(releaseTag)/")!
+
+    /// Descriptor for the primary (W4) DiT variant.
+    static let ditW4 = ModelVariantDescriptor(
+        id: "w4",
+        displayFilename: "anima-turbo-v1.0-xsmax-w4.animapk",
+        size: 1_179_435_008,
+        sha256: "ba1ce615f03665812f05088f9239f0cb23591a0811067d57fa51773abf6f0d25")
+
+    /// Descriptor for the alternate (W8-v2) DiT variant.
+    static let ditW8V2 = ModelVariantDescriptor(
+        id: "w8-v2",
+        displayFilename: "anima-turbo-v1.0-xsmax-w8-v2.animapk",
+        size: 2_232_975_360,
+        sha256: "8b63c7fd9b5872805e5a2ba799ab6d79989c54a6a89a4f34edf022c59c9ed130")
+
+    /// Matches `matchedSize` + `matchedSHA256` against the entry's primary
+    /// variant then accepted alternates, returning the corresponding
+    /// `ModelVariantDescriptor`. Throws when neither matches.
+    static func descriptor(
+        for entry: ModelManifestEntry, matchedSize: UInt64, matchedSHA256: String
+    ) throws -> ModelVariantDescriptor {
+        let normalizedSHA = matchedSHA256.lowercased()
+        // Primary match
+        if entry.size == matchedSize, entry.sha256.lowercased() == normalizedSHA {
+            return ModelVariantDescriptor(
+                id: primaryVariantID(for: entry),
+                displayFilename: entry.filename,
+                size: entry.size,
+                sha256: entry.sha256.lowercased())
+        }
+        // Alternate match
+        for (index, alt) in entry.alternates.enumerated() {
+            if alt.size == matchedSize, alt.sha256.lowercased() == normalizedSHA {
+                return alternateDescriptor(for: entry, alternateIndex: index, variant: alt)
+            }
+        }
+        throw AnimapkError.validation(
+            "no manifest variant matches size \(matchedSize) / SHA-256 for \(entry.component.rawValue)")
+    }
+
+    /// The variant id for the primary variant of an entry. The DiT entry's
+    /// primary is "w4"; all other entries have a single variant so their
+    /// primary id is the component name.
+    private static func primaryVariantID(for entry: ModelManifestEntry) -> String {
+        if entry.component == .dit { return ditW4.id }
+        return entry.component.rawValue
+    }
+
+    /// The descriptor for an alternate variant. Only the DiT entry has
+    /// alternates; the W8-v2 alternate is identified by its known descriptor.
+    private static func alternateDescriptor(
+        for entry: ModelManifestEntry, alternateIndex: Int, variant: ModelVariant
+    ) -> ModelVariantDescriptor {
+        if entry.component == .dit, alternateIndex == 0 {
+            return ditW8V2
+        }
+        // Fallback for any future alternate: synthesize a descriptor.
+        return ModelVariantDescriptor(
+            id: "\(entry.component.rawValue)-alt\(alternateIndex + 1)",
+            displayFilename: entry.filename,
+            size: variant.size,
+            sha256: variant.sha256.lowercased())
+    }
 
     static let entries: [ModelManifestEntry] = [
         // The DiT slot accepts either the W4 or the W8-v2 pack. Whichever is

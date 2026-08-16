@@ -226,6 +226,367 @@ final class AttentionExecutorTests: XCTestCase {
         XCTAssertEqual(collector.snapshot().attentionQueryTiles, 4)
     }
 
+    // MARK: - P4 strided token-major attention (§9)
+
+    /// P4: strided token-major attention must reproduce the legacy head-major
+    /// result. The token-major buffer is [queryCount, modelDim] with heads
+    /// occupying headDim contiguous columns per row; values are DISTINGUISHABLE
+    /// per token/head so a layout mistake (head mixing, wrong stride, wrong
+    /// offset) shows up as a large error.
+    func testStridedTokenMajorMatchesLegacyHeadMajor() async throws {
+        let context = try requireContext()
+        // Use a production-realistic headDim=128 so the strided per-head MPS
+        // matrix offsets (head * headDim * 2 bytes) and rowBytes are 256-byte
+        // aligned, exactly as in the DiT shape. A smaller headDim would produce
+        // unaligned offsets that MPSMatrix rejects/corrupts.
+        let heads = 2, headDim = 128, modelDim = heads * headDim
+        let queryCount = 7, keyCount = 5
+        func tokenMajorValues(rows: Int) -> [Float16] {
+            (0..<(rows * modelDim)).map { index in
+                let token = index / modelDim
+                let head = (index % modelDim) / headDim
+                let column = index % headDim
+                return Float16(Float(token * 1000 + head * 100 + column) / 997 - 0.5)
+            }
+        }
+        let query = tokenMajorValues(rows: queryCount)
+        let key = tokenMajorValues(rows: keyCount)
+        let value = tokenMajorValues(rows: keyCount)
+
+        let qBuffer = makeHalfBuffer(query, context: context)
+        let kBuffer = makeHalfBuffer(key, context: context)
+        let vBuffer = makeHalfBuffer(value, context: context)
+
+        // Reference: legacy head-major path with manually transposed buffers.
+        let qHead = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * modelDim * 2, options: .storageModeShared))
+        let kHead = try XCTUnwrap(context.device.makeBuffer(
+            length: keyCount * modelDim * 2, options: .storageModeShared))
+        let vHead = try XCTUnwrap(context.device.makeBuffer(
+            length: keyCount * modelDim * 2, options: .storageModeShared))
+        let referenceOut = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * modelDim * 2, options: .storageModeShared))
+        try encodeHeadMajor(
+            context: context, input: qBuffer, output: qHead,
+            rows: queryCount, heads: heads, headDim: headDim)
+        try encodeHeadMajor(
+            context: context, input: kBuffer, output: kHead,
+            rows: keyCount, heads: heads, headDim: headDim)
+        try encodeHeadMajor(
+            context: context, input: vBuffer, output: vHead,
+            rows: keyCount, heads: heads, headDim: headDim)
+        try await AttentionExecutor(context: context).execute(
+            query: qHead, key: kHead, value: vHead, output: referenceOut,
+            heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim)
+        // The legacy path writes HEAD-MAJOR [heads, rows, headDim]; the strided
+        // path writes TOKEN-MAJOR [rows, modelDim]. Transpose the reference back
+        // to token-major so the two layouts are directly comparable.
+        let referenceTokenMajor = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * modelDim * 2, options: .storageModeShared))
+        try encodeHeadMajor(
+            context: context, input: referenceOut, output: referenceTokenMajor,
+            rows: queryCount, heads: heads, headDim: headDim, direction: 0)
+        let reference = readHalf(referenceTokenMajor, count: queryCount * modelDim)
+
+        // Strided token-major path (P4): same buffers, no transposes.
+        let stridedOut = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * modelDim * 2, options: .storageModeShared))
+        try await AttentionExecutor(context: context).execute(
+            query: qBuffer, key: kBuffer, value: vBuffer, output: stridedOut,
+            heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
+            layout: .tokenMajor(tokenStride: modelDim))
+        let strided = readHalf(stridedOut, count: queryCount * modelDim)
+
+        for index in strided.indices {
+            XCTAssertEqual(strided[index], reference[index], accuracy: 0.002,
+                           "P4 strided token-major diverges at \(index)")
+        }
+        print("ATTENTION_STRIDED_TOKEN_MAJOR=PASS heads=\(heads) Q=\(queryCount) K=\(keyCount) modelDim=\(modelDim)")
+    }
+
+    /// P7-A: the streaming/online-softmax MPS backend must be numerically
+    /// equivalent to the strided token-major MPS reference (which P4 proved
+    /// equals legacy head-major) on the same token-major input. Uses an
+    /// aligned headDim=128 shape so the strided MPS head offsets are valid.
+    func testStreamingMPSMatchesStridedReference() async throws {
+        let context = try requireContext()
+        let heads = 2, headDim = 128, modelDim = heads * headDim
+        let queryCount = 5, keyCount = 7
+        let stride = modelDim
+        var q = [Float16](repeating: 0, count: queryCount * stride)
+        var k = [Float16](repeating: 0, count: keyCount * stride)
+        var v = [Float16](repeating: 0, count: keyCount * stride)
+        for token in 0..<queryCount {
+            for col in 0..<stride {
+                q[token * stride + col] = Float16(sin(Float(token * 31 + col)) * 0.3)
+            }
+        }
+        for token in 0..<keyCount {
+            for col in 0..<stride {
+                k[token * stride + col] = Float16(cos(Float(token * 17 + col)) * 0.3)
+                v[token * stride + col] = Float16(Float(token % 5) / 5)
+            }
+        }
+        let qBuf = makeHalfBuffer(q, context: context)
+        let kBuf = makeHalfBuffer(k, context: context)
+        let vBuf = makeHalfBuffer(v, context: context)
+        let refOut = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * stride * 2, options: .storageModeShared))
+        let streamOut = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * stride * 2, options: .storageModeShared))
+        // Strided reference (P4-proven == legacy).
+        try await AttentionExecutor(context: context).execute(
+            query: qBuf, key: kBuf, value: vBuf, output: refOut,
+            heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
+            layout: .tokenMajor(tokenStride: stride))
+        // Streaming online-softmax MPS (P7-A).
+        try await AttentionExecutor(context: context, attentionBackend: .streamingMPS).execute(
+            query: qBuf, key: kBuf, value: vBuf, output: streamOut,
+            heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
+            layout: .tokenMajor(tokenStride: stride))
+        let ref = readHalf(refOut, count: queryCount * stride)
+        let stream = readHalf(streamOut, count: queryCount * stride)
+        for index in ref.indices {
+            XCTAssertEqual(stream[index], ref[index], accuracy: 0.01,
+                           "streaming MPS diverges at \(index)")
+        }
+        print("ATTENTION_STREAMING_MPS=PASS heads=\(heads) Q=\(queryCount) K=\(keyCount)")
+    }
+
+    /// P7-B: the DiT-specialized pure-Metal Flash backend must be numerically
+    /// equivalent to the strided reference on the DiT shape (heads=16,
+    /// headDim=128, token-major 2048) with small token counts for speed.
+    func testMetalFlashMatchesStridedReference() async throws {
+        let context = try requireContext()
+        let heads = 16, headDim = 128, modelDim = heads * headDim
+        let queryCount = 4, keyCount = 8
+        let stride = modelDim
+        var q = [Float16](repeating: 0, count: queryCount * stride)
+        var k = [Float16](repeating: 0, count: keyCount * stride)
+        var v = [Float16](repeating: 0, count: keyCount * stride)
+        for token in 0..<queryCount {
+            for col in 0..<stride {
+                q[token * stride + col] = Float16(sin(Float(token * 13 + col) * 0.02))
+            }
+        }
+        for token in 0..<keyCount {
+            for col in 0..<stride {
+                k[token * stride + col] = Float16(cos(Float(token * 7 + col) * 0.02))
+                v[token * stride + col] = Float16(Float(token % 7) / 7)
+            }
+        }
+        let qBuf = makeHalfBuffer(q, context: context)
+        let kBuf = makeHalfBuffer(k, context: context)
+        let vBuf = makeHalfBuffer(v, context: context)
+        let refOut = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * stride * 2, options: .storageModeShared))
+        let flashOut = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * stride * 2, options: .storageModeShared))
+        try await AttentionExecutor(context: context).execute(
+            query: qBuf, key: kBuf, value: vBuf, output: refOut,
+            heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
+            layout: .tokenMajor(tokenStride: stride))
+        try await AttentionExecutor(context: context, attentionBackend: .metalFlash).execute(
+            query: qBuf, key: kBuf, value: vBuf, output: flashOut,
+            heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
+            layout: .tokenMajor(tokenStride: stride))
+        let ref = readHalf(refOut, count: queryCount * stride)
+        let flash = readHalf(flashOut, count: queryCount * stride)
+        for index in ref.indices {
+            XCTAssertEqual(flash[index], ref[index], accuracy: 0.01,
+                           "metal Flash diverges at \(index)")
+        }
+        print("ATTENTION_METAL_FLASH=PASS heads=\(heads) Q=\(queryCount) K=\(keyCount)")
+    }
+
+    /// P7-B: the DiT-specialized Flash backend must reject a non-DiT shape
+    /// (e.g. headDim != 128) loudly, never silently corrupt.
+    func testMetalFlashRejectsNonDiTHeadDim() async throws {
+        let context = try requireContext()
+        let heads = 4, headDim = 32, modelDim = heads * headDim
+        let queryCount = 4, keyCount = 4
+        let qBuf = makeHalfBuffer([Float16](repeating: 0, count: queryCount * modelDim), context: context)
+        let kBuf = makeHalfBuffer([Float16](repeating: 0, count: keyCount * modelDim), context: context)
+        let vBuf = makeHalfBuffer([Float16](repeating: 0, count: keyCount * modelDim), context: context)
+        let out = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * modelDim * 2, options: .storageModeShared))
+        do {
+            try await AttentionExecutor(context: context, attentionBackend: .metalFlash).execute(
+                query: qBuf, key: kBuf, value: vBuf, output: out,
+                heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
+                layout: .tokenMajor(tokenStride: modelDim))
+            XCTFail("metalFlash must reject a non-DiT headDim")
+        } catch {
+            // Expected: the backend refuses the unsupported shape.
+        }
+        print("ATTENTION_METAL_FLASH_REJECT_NON_DIT=PASS")
+    }
+
+    /// P4: full DiT shape descriptors — self 1024/1024 and cross 1024/512 —
+    /// with tokenStride 2048. Executes real attention at full shape.
+    func testStridedTokenMajorFullDiTShapes() async throws {
+        let context = try requireContext()
+        let heads = 16, headDim = 128, modelDim = 2048
+        func tokenMajorValues(rows: Int) -> [Float16] {
+            (0..<(rows * modelDim)).map { index in
+                Float16(Float((index * 7 + 3) % 1009) / 2000 - 0.25)
+            }
+        }
+        let query = tokenMajorValues(rows: 1024)
+        let selfKeyValue = tokenMajorValues(rows: 1024)
+        let crossKeyValue = tokenMajorValues(rows: 512)
+        let qBuffer = makeHalfBuffer(query, context: context)
+        let selfKV = makeHalfBuffer(selfKeyValue, context: context)
+        let crossKV = makeHalfBuffer(crossKeyValue, context: context)
+        let layout = AttentionInputLayout.tokenMajor(tokenStride: modelDim)
+
+        for (name, keyCount, kv) in [("self", 1024, selfKV), ("cross", 512, crossKV)] {
+            let output = try XCTUnwrap(context.device.makeBuffer(
+                length: 1024 * modelDim * 2, options: .storageModeShared))
+            try await AttentionExecutor(context: context).execute(
+                query: qBuffer, key: kv, value: kv, output: output,
+                heads: heads, queryCount: 1024, keyCount: keyCount, headDim: headDim,
+                layout: layout)
+            let actual = readHalf(output, count: 1024 * modelDim)
+            XCTAssertTrue(actual.allSatisfy(\.isFinite), "\(name) attention produced non-finite values")
+            XCTAssertGreaterThan(actual.reduce(0) { $0 + abs($1) }, 0, "\(name) attention output must not be all zero")
+            print("ATTENTION_STRIDED_\(name.uppercased())=PASS Q=1024 K=\(keyCount) modelDim=2048")
+        }
+    }
+
+    /// P4: no head mixing — each head reads exactly its headDim contiguous
+    /// columns of every token row. Uniform K/V forces output = uniform V, so
+    /// this only proves plumbing; the parity test above proves numerics.
+    func testStridedTokenMajorNoHeadMixing() async throws {
+        let context = try requireContext()
+        let heads = 2, headDim = 4, modelDim = heads * headDim
+        let rows = 3
+        // Token-major values where every head of every token differs.
+        var values = [Float16](repeating: 0, count: rows * modelDim)
+        for token in 0..<rows {
+            for head in 0..<heads {
+                for column in 0..<headDim {
+                    values[token * modelDim + head * headDim + column] =
+                        Float16(Float(token * 10 + head) + Float(column) / 10)
+                }
+            }
+        }
+        // Q = all zeros (uniform scores), V = token-major distinct values.
+        let zeros = [Float16](repeating: 0, count: rows * modelDim)
+        let qBuffer = makeHalfBuffer(zeros, context: context)
+        let vBuffer = makeHalfBuffer(values, context: context)
+        // K all zeros: with Q=0 every score is 0, softmax uniform over key rows.
+        let kBuffer = makeHalfBuffer(zeros, context: context)
+        let output = try XCTUnwrap(context.device.makeBuffer(
+            length: rows * modelDim * 2, options: .storageModeShared))
+        try await AttentionExecutor(context: context).execute(
+            query: qBuffer, key: kBuffer, value: vBuffer, output: output,
+            heads: heads, queryCount: rows, keyCount: rows, headDim: headDim,
+            layout: .tokenMajor(tokenStride: modelDim))
+        let actual = readHalf(output, count: rows * modelDim)
+        // Output = mean over key rows of V per head; head h output lives in
+        // columns [h*headDim, (h+1)*headDim) of each token row.
+        for token in 0..<rows {
+            for head in 0..<heads {
+                for column in 0..<headDim {
+                    var expected: Float = 0
+                    for keyRow in 0..<rows {
+                        expected += Float(values[keyRow * modelDim + head * headDim + column])
+                    }
+                    expected /= Float(rows)
+                    XCTAssertEqual(actual[token * modelDim + head * headDim + column],
+                                   expected, accuracy: 0.05,
+                                   "head \(head) column \(column) of token \(token) mixed")
+                }
+            }
+        }
+        print("ATTENTION_STRIDED_NO_HEAD_MIXING=PASS heads=\(heads) headDim=\(headDim)")
+    }
+
+    /// P4 metrics: the strided token-major backend must not record any
+    /// transpose bytes, and must still count query tiles (2 heads × tiles).
+    func testStridedTokenMajorRecordsZeroTransposeBytes() async throws {
+        let context = try requireContext()
+        let heads = 2, headDim = 8, modelDim = heads * headDim
+        let queryCount = 130, keyCount = 64
+        let zeros = [Float16](repeating: 0, count: queryCount * modelDim)
+        let zeroKey = [Float16](repeating: 0, count: keyCount * modelDim)
+        let value = [Float16](repeating: 1, count: keyCount * modelDim)
+        let output = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * modelDim * 2, options: .storageModeShared))
+        let collector = MetricsCollector()
+        let executor = AttentionExecutor(context: context, tileRows: 128)
+        executor.metrics = collector
+        try await executor.execute(
+            query: makeHalfBuffer(zeros, context: context),
+            key: makeHalfBuffer(zeroKey, context: context),
+            value: makeHalfBuffer(value, context: context), output: output,
+            heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
+            layout: .tokenMajor(tokenStride: modelDim))
+        let snapshot = collector.snapshot()
+        XCTAssertEqual(snapshot.transposeBytes, 0,
+                       "strided token-major backend must not record transpose traffic")
+        XCTAssertEqual(snapshot.attentionQueryTiles, 4,
+                       "2 heads × ceil(130/128) = 4 tiles")
+        print("ATTENTION_STRIDED_TRANSPOSE_BYTES=PASS transposeBytes=\(snapshot.transposeBytes)")
+    }
+
+    /// P4-F: the strided backend must FAIL loudly on unsupported numerics
+    /// combinations instead of silently corrupting the layout.
+    func testStridedTokenMajorRejectsUnsupportedCombinations() async throws {
+        let context = try requireContext()
+        let heads = 2, headDim = 4, modelDim = heads * headDim
+        let buffer = try XCTUnwrap(context.device.makeBuffer(
+            length: 4 * modelDim * 2, options: .storageModeShared))
+        // fp32ScoresAndSoftmax is not supported on the strided path.
+        do {
+            try await AttentionExecutor(context: context, numerics: .fp32ScoresAndSoftmax).execute(
+                query: buffer, key: buffer, value: buffer, output: buffer,
+                heads: heads, queryCount: 4, keyCount: 4, headDim: headDim,
+                layout: .tokenMajor(tokenStride: modelDim))
+            XCTFail("fp32ScoresAndSoftmax on token-major layout must throw")
+        } catch let AnimapkError.validation(message) {
+            XCTAssertTrue(message.contains("token-major"), "unexpected message: \(message)")
+        }
+        // GQA is not expressible in token-major without a strided K/V gather.
+        do {
+            try await AttentionExecutor(context: context).execute(
+                query: buffer, key: buffer, value: buffer, output: buffer,
+                heads: heads, queryCount: 4, keyCount: 4, headDim: headDim,
+                keyValueHeads: 1, layout: .tokenMajor(tokenStride: modelDim))
+            XCTFail("GQA with token-major layout must throw")
+        } catch let AnimapkError.validation(message) {
+            XCTAssertTrue(message.contains("keyValueHeads == heads"), "unexpected message: \(message)")
+        }
+        print("ATTENTION_STRIDED_REJECTS_UNSUPPORTED=PASS")
+    }
+
+    /// P4-B helper: transpose a token-major [rows, heads*headDim] buffer into
+    /// head-major [heads, rows, headDim] using the production kernel.
+    private func encodeHeadMajor(
+        context: MetalContext, input: MTLBuffer, output: MTLBuffer,
+        rows: Int, heads: Int, headDim: Int, direction: UInt32 = 1
+    ) throws {
+        let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let pipeline = try context.pipeline(named: "transpose_token_head_half")
+        let encoder = try XCTUnwrap(command.makeComputeCommandEncoder())
+        var t = UInt32(rows), h = UInt32(heads), d = UInt32(headDim)
+        var dir = direction
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(input, offset: 0, index: 0)
+        encoder.setBuffer(output, offset: 0, index: 1)
+        encoder.setBytes(&t, length: 4, index: 2)
+        encoder.setBytes(&h, length: 4, index: 3)
+        encoder.setBytes(&d, length: 4, index: 4)
+        encoder.setBytes(&dir, length: 4, index: 5)
+        encoder.dispatchThreads(MTLSize(width: rows * heads * headDim, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        encoder.endEncoding()
+        command.commit()
+        command.waitUntilCompleted()
+        XCTAssertNil(command.error)
+    }
+
     private func attentionRow(
         row: Int, query: [Float16], key: [Float16], value: [Float16],
         keyCount: Int, dim: Int

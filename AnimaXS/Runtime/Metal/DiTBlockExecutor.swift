@@ -4,6 +4,44 @@ import Metal
 import Darwin
 #endif
 
+/// P5: generation-local cache of the invariant cross-attention K/V for every
+/// DiT block. Cross context is fixed for a generation, so after the first
+/// executed step each block's cross K/V (post-projection, post-static-boundary,
+/// post-K-RMSNorm) are reused instead of being re-projected every step. EXACT
+/// reuse — no approximation; Q stays dynamic and is never cached.
+///
+/// One contiguous `.storageModePrivate` buffer (~112 MiB for 28 blocks). The
+/// CPU never reads it. If allocation fails the cache is nil and callers fall
+/// back to the legacy per-step projection path (the experiment fails
+/// gracefully, never crashes). The cache belongs to ONE `DiffusionSampler` /
+/// one generation; it is never persisted across prompts and never enters a
+/// checkpoint.
+final class CrossKVCache {
+    static let tensorBytes =
+        DiTBlockExecutor.contextTokens * DiTBlockExecutor.dim
+        * MemoryLayout<Float16>.stride
+    static let blockStride = tensorBytes * 2  // K + V per block
+    static let blockCount = ModelConstants.ditBlocks
+
+    let buffer: MTLBuffer
+    private(set) var ready = [Bool](repeating: false, count: blockCount)
+
+    /// Creates the cache. Returns nil if the device cannot allocate it.
+    init?(device: MTLDevice,
+          options: MTLResourceOptions = .storageModePrivate) {
+        let length = CrossKVCache.blockCount * CrossKVCache.blockStride
+        guard let buffer = device.makeBuffer(length: length, options: options) else {
+            return nil
+        }
+        self.buffer = buffer
+    }
+
+    func kOffset(block: Int) -> Int { block * Self.blockStride }
+    func vOffset(block: Int) -> Int { kOffset(block: block) + Self.tensorBytes }
+    func isReady(_ block: Int) -> Bool { ready[block] }
+    func markReady(_ block: Int) { ready[block] = true }
+}
+
 /// Exact fixed-shape MiniTrainDIT block executed with one streamed block range.
 /// Legacy mode keeps residual/modulation/gates in fp32 and projection/attention
 /// boundaries in fp16. `bf16Compute` emulates the reference BF16 model dtype
@@ -32,6 +70,13 @@ final class DiTBlockExecutor {
     private let attention: AttentionExecutor
     private let activationNumerics: ActivationNumerics
     private let monitor: NumericalMonitor?
+    /// Immutable optimization snapshot for this executor's lifetime (captured
+    /// at Generate). Controls the P3-A/P3-B fused paths.
+    private let optimization: InferenceOptimizationConfig
+    /// P5: per-generation cross-attention K/V cache (nil when the toggle is off
+    /// or the buffer could not be allocated). Shared across all steps of one
+    /// generation; never persisted.
+    private let crossKVCache: CrossKVCache?
     /// Run telemetry collector (nil in tests / diagnostic-only construction).
     /// Propagated to the child linear/attention executors so their cheap tile
     /// counters land in the SAME run metrics object (never a separate one).
@@ -51,7 +96,8 @@ final class DiTBlockExecutor {
          attentionNumerics: AttentionNumerics = .legacy,
          activationNumerics: ActivationNumerics = .legacy,
          monitor: NumericalMonitor? = nil,
-         optimization: InferenceOptimizationConfig = .currentBaseline) throws {
+         optimization: InferenceOptimizationConfig = .currentBaseline,
+         crossKVCache: CrossKVCache? = nil) throws {
         let locator = try DiTBlockLocator(file: file)
         guard let maximum = locator.blocks.map(\.length).max(), maximum <= UInt64(Int.max) else {
             throw AnimapkError.validation("invalid DiT execution ranges")
@@ -59,6 +105,8 @@ final class DiTBlockExecutor {
         self.context = context
         self.file = file
         self.locator = locator
+        self.optimization = optimization
+        self.crossKVCache = crossKVCache
         // Ping-pong ON keeps the existing two-slot streamer; OFF measures the
         // same generation with one slot and no look-ahead prefetch.
         let slotCount = optimization.pingPongWeightStreaming ? 2 : 1
@@ -66,14 +114,16 @@ final class DiTBlockExecutor {
         self.buffers = BufferPool(device: context.device)
         self.linear = LinearExecutor(
             context: context, tileRows: optimization.linearTileRows,
-            directMPSIO: optimization.directLinearMPSIO)
+            directMPSIO: optimization.directLinearMPSIO,
+            linearBackend: optimization.linearBackend)
         self.activationNumerics = activationNumerics
         self.monitor = monitor
         let effectiveAttention = activationNumerics == .bf16Compute && attentionNumerics == .legacy
             ? .bf16Compute : attentionNumerics
         self.attention = AttentionExecutor(
             context: context, tileRows: optimization.attentionTileRows,
-            numerics: effectiveAttention, monitor: monitor)
+            numerics: effectiveAttention, monitor: monitor,
+            attentionBackend: optimization.attentionBackend)
     }
 
     /// Mutates `residual` in place. All input buffers are tightly packed and use these types:
@@ -105,10 +155,17 @@ final class DiTBlockExecutor {
         // iteration) already placed them in this slot.
         if streamer.loadedLogicalIndexes[slot] != blockIndex {
             let copyStart = ProcessInfo.processInfo.systemUptime
-            try streamer.load(range, from: file, slot: slot)
-            metrics?.recordWeightCopy(
-                bytes: Int(range.length),
-                seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+            let result = try streamer.load(
+                range, from: file, slot: slot,
+                mode: optimization.noCopyWeightSource ? .noCopy : .copied)
+            if result.mode == .noCopy {
+                // P6: memcpy eliminated — prove it in the metrics.
+                metrics?.recordMmapNoCopyBytes(result.noCopyBytes)
+            } else {
+                metrics?.recordWeightCopy(
+                    bytes: Int(range.length),
+                    seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+            }
         }
         let encodeStart = ProcessInfo.processInfo.systemUptime
         let weights = try BlockWeights(range: range, ring: streamer.buffer(for: slot))
@@ -121,13 +178,15 @@ final class DiTBlockExecutor {
         try encodeComputeBoundary(command, siluEmb, count: Self.dim)
         try encodeAttentionBranch(command, residual: residual, crossContext: crossContext,
                                   rope: rope, siluEmb: siluEmb, adalnLora: adalnLora,
-                                  weights: weights, cross: false, slot: slot)
+                                  weights: weights, cross: false, slot: slot,
+                                  blockIndex: blockIndex)
         let selfSnapshot = try diagnosticBranchCompleted.map { _ in
             try encodeSnapshot(command, source: residual, key: "dit.diagnostic.afterSelf.f32")
         }
         try encodeAttentionBranch(command, residual: residual, crossContext: crossContext,
                                   rope: rope, siluEmb: siluEmb, adalnLora: adalnLora,
-                                  weights: weights, cross: true, slot: slot)
+                                  weights: weights, cross: true, slot: slot,
+                                  blockIndex: blockIndex)
         let crossSnapshot = try diagnosticBranchCompleted.map { _ in
             try encodeSnapshot(command, source: residual, key: "dit.diagnostic.afterCross.f32")
         }
@@ -160,10 +219,17 @@ final class DiTBlockExecutor {
             do {
                 let nextRange = try locator.block(prefetchIndex)
                 let copyStart = ProcessInfo.processInfo.systemUptime
-                try streamer.load(nextRange, from: file, slot: prefetchSlot)
-                metrics?.recordWeightCopy(
-                    bytes: Int(nextRange.length),
-                    seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+                let result = try streamer.load(
+                    nextRange, from: file, slot: prefetchSlot,
+                    mode: optimization.noCopyWeightSource ? .noCopy : .copied)
+                if result.mode == .noCopy {
+                    // P6: prefetch memcpy eliminated — record the no-copy bytes.
+                    metrics?.recordMmapNoCopyBytes(result.noCopyBytes)
+                } else {
+                    metrics?.recordWeightCopy(
+                        bytes: Int(nextRange.length),
+                        seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+                }
             } catch {
                 prefetchError = error
             }
@@ -195,10 +261,17 @@ final class DiTBlockExecutor {
     func prefetch(blockIndex: Int, slot: Int) throws {
         let range = try locator.block(blockIndex)
         let copyStart = ProcessInfo.processInfo.systemUptime
-        try streamer.load(range, from: file, slot: slot)
-        metrics?.recordWeightCopy(
-            bytes: Int(range.length),
-            seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+        let result = try streamer.load(
+            range, from: file, slot: slot,
+            mode: optimization.noCopyWeightSource ? .noCopy : .copied)
+        if result.mode == .noCopy {
+            // P6: prologue memcpy eliminated — record the no-copy bytes.
+            metrics?.recordMmapNoCopyBytes(result.noCopyBytes)
+        } else {
+            metrics?.recordWeightCopy(
+                bytes: Int(range.length),
+                seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+        }
     }
 
     private func encodeSnapshot(
@@ -217,88 +290,196 @@ final class DiTBlockExecutor {
     private func encodeAttentionBranch(
         _ command: MTLCommandBuffer, residual: MTLBuffer, crossContext: MTLBuffer,
         rope: MTLBuffer, siluEmb: MTLBuffer, adalnLora: MTLBuffer,
-        weights: BlockWeights, cross: Bool, slot: Int
+        weights: BlockWeights, cross: Bool, slot: Int, blockIndex: Int
     ) throws {
         let modulation = try encodeModulation(
             command, siluEmb: siluEmb, adalnLora: adalnLora,
             w1: cross ? weights.modCross1 : weights.modSelf1,
             w2: cross ? weights.modCross2 : weights.modSelf2)
-        let norm = buffer("dit.norm.f32", Self.tokens * Self.dim, Float.self)
-        let modulated = buffer("dit.modulated.f32", Self.tokens * Self.dim, Float.self)
         let projectionInput = buffer("dit.projectionInput.f16", Self.tokens * Self.dim, Float16.self)
-        try encodeLayerNorm(command, input: residual, output: norm, rows: Self.tokens, columns: Self.dim)
-        try encodeModulate(command, normalized: norm, modulation: modulation,
-                           output: modulated, count: Self.tokens * Self.dim)
-        try encodeFloatToComputeHalf(command, input: modulated, output: projectionInput,
-                                      count: Self.tokens * Self.dim,
-                                      probe: cross ? .crossProjectionInput : .selfProjectionInput)
+        if optimization.fusedNormModulation {
+            // P3-A: one fused pass (LayerNorm + AdaLN + BF16 boundary + fp16
+            // conversion). No dit.norm.f32 / dit.modulated.f32 intermediates.
+            try encodeFusedNormModulate(command, residual: residual, modulation: modulation,
+                                        output: projectionInput, rows: Self.tokens,
+                                        columns: Self.dim,
+                                        probe: cross ? .crossProjectionInput : .selfProjectionInput)
+            // P3: the fused pass no longer materializes the two fp32
+            // intermediates (norm + modulated), so record that saved traffic.
+            metrics?.recordFusedTrafficSaved(
+                UInt64(Self.tokens * Self.dim * MemoryLayout<Float>.stride) * 2)
+        } else {
+            // Legacy three-pass path, kept exactly for A/B.
+            let norm = buffer("dit.norm.f32", Self.tokens * Self.dim, Float.self)
+            let modulated = buffer("dit.modulated.f32", Self.tokens * Self.dim, Float.self)
+            try encodeLayerNorm(command, input: residual, output: norm, rows: Self.tokens, columns: Self.dim)
+            try encodeModulate(command, normalized: norm, modulation: modulation,
+                               output: modulated, count: Self.tokens * Self.dim)
+            try encodeFloatToComputeHalf(command, input: modulated, output: projectionInput,
+                                         count: Self.tokens * Self.dim,
+                                         probe: cross ? .crossProjectionInput : .selfProjectionInput)
+        }
 
         let qToken = buffer("dit.q.token.f16", Self.tokens * Self.dim, Float16.self)
-        let qHead = buffer("dit.q.head.f16", Self.tokens * Self.dim, Float16.self)
         let kTokenCount = (cross ? Self.contextTokens : Self.tokens) * Self.dim
         let kToken = buffer("dit.k.token.f16", kTokenCount, Float16.self)
-        let kHead = buffer("dit.k.head.f16", kTokenCount, Float16.self)
         let vToken = buffer("dit.v.token.f16", kTokenCount, Float16.self)
-        let vHead = buffer("dit.v.head.f16", kTokenCount, Float16.self)
+        // P4: the strided token-major backend feeds the token-major Q/K/V
+        // buffers DIRECTLY to MPS via strided per-head views, so the four
+        // head-major transpose buffers/kernels are not allocated or encoded.
+        // The legacy head-major path stays byte-for-byte for A/B.
+        // P7: the backend selector picks between the P4 strided MPS path,
+        // the P7-A streaming online-softmax MPS path, and the P7-B pure-Metal
+        // Flash path. `.legacyHeadMajorMPS` always uses the transposed
+        // head-major layout below; `.stridedTokenMajorMPS` honors the P4
+        // boolean so turning the toggle off still selects the legacy path.
+        let strided: Bool
+        switch optimization.attentionBackend {
+        case .legacyHeadMajorMPS:
+            strided = false
+        case .stridedTokenMajorMPS:
+            strided = optimization.stridedTokenMajorAttention
+        case .streamingMPS, .metalFlash:
+            // P7 backends REQUIRE the token-major layout; when the P4 toggle
+            // is off they must not silently fall back to the transposed path
+            // (that would change what the device measures).
+            guard optimization.stridedTokenMajorAttention else {
+                throw AnimapkError.validation(
+                    "P7 attention backend \(optimization.attentionBackend.rawValue) requires the strided token-major toggle to be ON")
+            }
+            strided = true
+        }
         let queryWeight = cross ? weights.crossQ : weights.selfQ
         let keyWeight = cross ? weights.crossK : weights.selfK
         let valueWeight = cross ? weights.crossV : weights.selfV
         try linear.encode(commandBuffer: command, input: projectionInput,
-                          weight: queryWeight, output: qToken, inputRows: Self.tokens)
+                          weight: queryWeight, output: qToken, inputRows: Self.tokens,
+                          family: .attentionProjection)
         let keyInput = cross ? crossContext : projectionInput
         let keyRows = cross ? Self.contextTokens : Self.tokens
-        try linear.encode(commandBuffer: command, input: keyInput,
-                          weight: keyWeight, output: kToken, inputRows: keyRows)
-        try linear.encode(commandBuffer: command, input: keyInput,
-                          weight: valueWeight, output: vToken, inputRows: keyRows)
+        // P5: cache the invariant cross K/V across diffusion steps. On a hit we
+        // skip the cross K/V projection + static boundary + K RMSNorm and blit
+        // the cached (post-transform) K/V into the scratch buffers, so the
+        // downstream attention sees byte-identical inputs by construction. Q is
+        // always projected fresh (it is dynamic per step).
+        let cacheEnabled = cross && optimization.crossKVCache
+        let cacheHit = cacheEnabled && (crossKVCache?.isReady(blockIndex) ?? false)
+        if cacheHit, let cache = crossKVCache {
+            // Blit cached K/V into the scratch buffers (exact; the cache holds
+            // the state right before attention for this block).
+            if let encoder = command.makeBlitCommandEncoder() {
+                encoder.copy(from: cache.buffer, sourceOffset: cache.kOffset(block: blockIndex),
+                             to: kToken, destinationOffset: 0, size: kTokenCount * MemoryLayout<Float16>.stride)
+                encoder.copy(from: cache.buffer, sourceOffset: cache.vOffset(block: blockIndex),
+                             to: vToken, destinationOffset: 0, size: kTokenCount * MemoryLayout<Float16>.stride)
+                encoder.endEncoding()
+            }
+            metrics?.recordCrossKVHit()
+        } else {
+            try linear.encode(commandBuffer: command, input: keyInput,
+                              weight: keyWeight, output: kToken, inputRows: keyRows,
+                              family: .attentionProjection)
+            try linear.encode(commandBuffer: command, input: keyInput,
+                              weight: valueWeight, output: vToken, inputRows: keyRows,
+                              family: .attentionProjection)
+            try encodeHalfComputeBoundary(command, kToken, count: kTokenCount)
+            try encodeHalfComputeBoundary(command, vToken, count: kTokenCount)
+            if NumericalMonitor.detailedProbesEnabled, let monitor {
+                try monitor.encodeProbe(command, values: kToken, count: kTokenCount,
+                                        probe: cross ? .crossKToken : .selfKToken)
+                try monitor.encodeProbe(command, values: vToken, count: kTokenCount,
+                                        probe: cross ? .crossVToken : .selfVToken)
+            }
+            if cross {
+                try encodeRMSHeads(command, input: kToken, weightOffset: weights.crossKNorm,
+                                   output: kToken, rows: Self.contextTokens * Self.heads, slot: slot)
+            } else {
+                try encodeRMSRoPE(command, input: kToken, weightOffset: weights.selfKNorm,
+                                  rope: rope, output: kToken, slot: slot)
+            }
+            try encodeHalfComputeBoundary(command, kToken, count: kTokenCount)
+            // First use of this block's cross K/V: store the post-transform
+            // K/V into the cache for reuse by later steps.
+            if cacheEnabled, let cache = crossKVCache {
+                if let encoder = command.makeBlitCommandEncoder() {
+                    encoder.copy(from: kToken, sourceOffset: 0, to: cache.buffer,
+                                 destinationOffset: cache.kOffset(block: blockIndex),
+                                 size: kTokenCount * MemoryLayout<Float16>.stride)
+                    encoder.copy(from: vToken, sourceOffset: 0, to: cache.buffer,
+                                 destinationOffset: cache.vOffset(block: blockIndex),
+                                 size: kTokenCount * MemoryLayout<Float16>.stride)
+                    encoder.endEncoding()
+                }
+                cache.markReady(blockIndex)
+                metrics?.recordCrossKVMiss()
+            }
+        }
         try encodeHalfComputeBoundary(command, qToken, count: Self.tokens * Self.dim)
-        try encodeHalfComputeBoundary(command, kToken, count: kTokenCount)
-        try encodeHalfComputeBoundary(command, vToken, count: kTokenCount)
         if NumericalMonitor.detailedProbesEnabled, let monitor {
             try monitor.encodeProbe(command, values: qToken, count: Self.tokens * Self.dim,
                                     probe: cross ? .crossQToken : .selfQToken)
-            try monitor.encodeProbe(command, values: kToken, count: kTokenCount,
-                                    probe: cross ? .crossKToken : .selfKToken)
-            try monitor.encodeProbe(command, values: vToken, count: kTokenCount,
-                                    probe: cross ? .crossVToken : .selfVToken)
         }
-
+        // Q is always dynamic. Self Q uses RoPE; cross Q uses RMS norm.
         if cross {
             try encodeRMSHeads(command, input: qToken, weightOffset: weights.crossQNorm,
                                output: qToken, rows: Self.tokens * Self.heads, slot: slot)
-            try encodeRMSHeads(command, input: kToken, weightOffset: weights.crossKNorm,
-                               output: kToken, rows: Self.contextTokens * Self.heads, slot: slot)
         } else {
             try encodeRMSRoPE(command, input: qToken, weightOffset: weights.selfQNorm,
                               rope: rope, output: qToken, slot: slot)
-            try encodeRMSRoPE(command, input: kToken, weightOffset: weights.selfKNorm,
-                              rope: rope, output: kToken, slot: slot)
         }
         try encodeHalfComputeBoundary(command, qToken, count: Self.tokens * Self.dim)
-        try encodeHalfComputeBoundary(command, kToken, count: kTokenCount)
-        try encodeTranspose(command, input: qToken, output: qHead,
-                            tokens: Self.tokens, toHeadMajor: true)
-        try encodeTranspose(command, input: kToken, output: kHead,
-                            tokens: keyRows, toHeadMajor: true)
-        try encodeTranspose(command, input: vToken, output: vHead,
-                            tokens: keyRows, toHeadMajor: true)
-        let attendedHead = buffer("dit.attended.head.f16", Self.tokens * Self.dim, Float16.self)
-        let attendedToken = buffer("dit.attended.token.f16", Self.tokens * Self.dim, Float16.self)
-        try attention.encode(commandBuffer: command, query: qHead, key: kHead, value: vHead,
-                             output: attendedHead, heads: Self.heads, queryCount: Self.tokens,
-                             keyCount: keyRows, headDim: Self.headDim,
-                             probe: cross ? .crossScores : .selfScores)
-        try encodeHalfComputeBoundary(command, attendedHead, count: Self.tokens * Self.dim)
-        if NumericalMonitor.detailedProbesEnabled, let monitor {
-            try monitor.encodeProbe(command, values: attendedHead, count: Self.tokens * Self.dim,
-                                    probe: cross ? .crossAttended : .selfAttended)
+
+        let attendedToken: MTLBuffer
+        if strided {
+            // P4: MPS strided token-major attention — Q/K/V and the attended
+            // output all stay in the token-major layout; no transposes.
+            let attended = buffer("dit.attended.token.f16", Self.tokens * Self.dim, Float16.self)
+            try attention.encode(
+                commandBuffer: command, query: qToken, key: kToken, value: vToken,
+                output: attended, heads: Self.heads, queryCount: Self.tokens,
+                keyCount: keyRows, headDim: Self.headDim,
+                probe: cross ? .crossScores : .selfScores,
+                layout: .tokenMajor(tokenStride: Self.dim))
+            // The strided backend materializes the attended token-major output
+            // directly, so the boundary/probe land on it (the legacy path keeps
+            // them on the head-major buffer, exactly as before, for A/B).
+            try encodeHalfComputeBoundary(command, attended, count: Self.tokens * Self.dim)
+            if NumericalMonitor.detailedProbesEnabled, let monitor {
+                try monitor.encodeProbe(command, values: attended, count: Self.tokens * Self.dim,
+                                        probe: cross ? .crossAttended : .selfAttended)
+            }
+            attendedToken = attended
+        } else {
+            // Legacy head-major path: transpose in, attend, transpose out.
+            let qHead = buffer("dit.q.head.f16", Self.tokens * Self.dim, Float16.self)
+            let kHead = buffer("dit.k.head.f16", kTokenCount, Float16.self)
+            let vHead = buffer("dit.v.head.f16", kTokenCount, Float16.self)
+            try encodeTranspose(command, input: qToken, output: qHead,
+                                tokens: Self.tokens, toHeadMajor: true)
+            try encodeTranspose(command, input: kToken, output: kHead,
+                                tokens: keyRows, toHeadMajor: true)
+            try encodeTranspose(command, input: vToken, output: vHead,
+                                tokens: keyRows, toHeadMajor: true)
+            let attendedHead = buffer("dit.attended.head.f16", Self.tokens * Self.dim, Float16.self)
+            try attention.encode(commandBuffer: command, query: qHead, key: kHead, value: vHead,
+                                 output: attendedHead, heads: Self.heads, queryCount: Self.tokens,
+                                 keyCount: keyRows, headDim: Self.headDim,
+                                 probe: cross ? .crossScores : .selfScores)
+            try encodeHalfComputeBoundary(command, attendedHead, count: Self.tokens * Self.dim)
+            if NumericalMonitor.detailedProbesEnabled, let monitor {
+                try monitor.encodeProbe(command, values: attendedHead, count: Self.tokens * Self.dim,
+                                        probe: cross ? .crossAttended : .selfAttended)
+            }
+            let attended = buffer("dit.attended.token.f16", Self.tokens * Self.dim, Float16.self)
+            try encodeTranspose(command, input: attendedHead, output: attended,
+                                tokens: Self.tokens, toHeadMajor: false)
+            attendedToken = attended
         }
-        try encodeTranspose(command, input: attendedHead, output: attendedToken,
-                            tokens: Self.tokens, toHeadMajor: false)
         let branch = buffer("dit.branch.f16", Self.tokens * Self.dim, Float16.self)
         try linear.encode(commandBuffer: command, input: attendedToken,
                           weight: cross ? weights.crossO : weights.selfO,
-                          output: branch, inputRows: Self.tokens)
+                          output: branch, inputRows: Self.tokens,
+                          family: .attentionProjection)
         try encodeHalfComputeBoundary(command, branch, count: Self.tokens * Self.dim)
         if NumericalMonitor.detailedProbesEnabled, let monitor {
             try monitor.encodeProbe(command, values: branch, count: Self.tokens * Self.dim,
@@ -321,35 +502,63 @@ final class DiTBlockExecutor {
     ) throws {
         let modulation = try encodeModulation(command, siluEmb: siluEmb, adalnLora: adalnLora,
                                               w1: weights.modMLP1, w2: weights.modMLP2)
-        let norm = buffer("dit.norm.f32", Self.tokens * Self.dim, Float.self)
-        let modulated = buffer("dit.modulated.f32", Self.tokens * Self.dim, Float.self)
         let projectionInput = buffer("dit.projectionInput.f16", Self.tokens * Self.dim, Float16.self)
-        try encodeLayerNorm(command, input: residual, output: norm, rows: Self.tokens, columns: Self.dim)
-        try encodeModulate(command, normalized: norm, modulation: modulation,
-                           output: modulated, count: Self.tokens * Self.dim)
-        try encodeFloatToComputeHalf(command, input: modulated, output: projectionInput,
-                                      count: Self.tokens * Self.dim, probe: .mlpProjectionInput)
-        let hiddenHalf = buffer("dit.hidden.f16", Self.tokens * Self.hidden, Float16.self)
-        let hiddenFloat = buffer("dit.hidden.f32", Self.tokens * Self.hidden, Float.self)
-        try linear.encode(commandBuffer: command, input: projectionInput,
-                          weight: weights.mlp1, output: hiddenHalf, inputRows: Self.tokens)
-        try encodeHalfComputeBoundary(command, hiddenHalf, count: Self.tokens * Self.hidden)
-        try encodeConvert(command, kernel: "half_to_float", input: hiddenHalf,
-                          output: hiddenFloat, count: Self.tokens * Self.hidden)
-        try encodeUnary(command, kernel: "gelu", input: hiddenFloat,
-                        output: hiddenFloat, count: Self.tokens * Self.hidden)
-        try encodeComputeBoundary(command, hiddenFloat, count: Self.tokens * Self.hidden)
-        if let monitor {
-            try encodeProbeConvert(command, input: hiddenFloat, output: hiddenHalf,
-                                   count: Self.tokens * Self.hidden,
-                                   monitor: monitor, probe: .mlpHiddenToHalf)
+        if optimization.fusedNormModulation {
+            // P3-A: one fused pass (LayerNorm + AdaLN + BF16 boundary + fp16
+            // conversion). No dit.norm.f32 / dit.modulated.f32 intermediates.
+            try encodeFusedNormModulate(command, residual: residual, modulation: modulation,
+                                        output: projectionInput, rows: Self.tokens,
+                                        columns: Self.dim, probe: .mlpProjectionInput)
         } else {
-            try encodeConvert(command, kernel: "float_to_half", input: hiddenFloat,
-                              output: hiddenHalf, count: Self.tokens * Self.hidden)
+            // Legacy three-pass path, kept exactly for A/B.
+            let norm = buffer("dit.norm.f32", Self.tokens * Self.dim, Float.self)
+            let modulated = buffer("dit.modulated.f32", Self.tokens * Self.dim, Float.self)
+            try encodeLayerNorm(command, input: residual, output: norm, rows: Self.tokens, columns: Self.dim)
+            try encodeModulate(command, normalized: norm, modulation: modulation,
+                               output: modulated, count: Self.tokens * Self.dim)
+            try encodeFloatToComputeHalf(command, input: modulated, output: projectionInput,
+                                         count: Self.tokens * Self.dim, probe: .mlpProjectionInput)
+        }
+        let hiddenHalf = buffer("dit.hidden.f16", Self.tokens * Self.hidden, Float16.self)
+        try linear.encode(commandBuffer: command, input: projectionInput,
+                          weight: weights.mlp1, output: hiddenHalf, inputRows: Self.tokens,
+                          family: .mlpUp)
+        try encodeHalfComputeBoundary(command, hiddenHalf, count: Self.tokens * Self.hidden)
+        if optimization.fusedMLPActivation {
+            // P3-B: in-place GELU on the fp16 hidden activations (fp32 register
+            // arithmetic, optional BF16 rounding). No dit.hidden.f32 (~32 MiB)
+            // intermediate and no conversion passes.
+            try encodeFusedGELUHalf(command, values: hiddenHalf,
+                                    count: Self.tokens * Self.hidden, probe: .mlpHiddenToHalf)
+            // P3: the fused path no longer materializes the fp32 hidden GELU
+            // intermediate, so record that saved traffic.
+            metrics?.recordFusedTrafficSaved(
+                UInt64(Self.tokens * Self.hidden * MemoryLayout<Float>.stride))
+        } else {
+            // Legacy path, kept exactly for A/B.
+            let hiddenFloat = buffer("dit.hidden.f32", Self.tokens * Self.hidden, Float.self)
+            try encodeConvert(command, kernel: "half_to_float", input: hiddenHalf,
+                              output: hiddenFloat, count: Self.tokens * Self.hidden)
+            // P2-C: f16→f32 conversion traffic (bytes written, counted once).
+            metrics?.recordConversionBytes(UInt64(Self.tokens * Self.hidden * MemoryLayout<Float>.stride))
+            try encodeUnary(command, kernel: "gelu", input: hiddenFloat,
+                            output: hiddenFloat, count: Self.tokens * Self.hidden)
+            try encodeComputeBoundary(command, hiddenFloat, count: Self.tokens * Self.hidden)
+            if let monitor {
+                try encodeProbeConvert(command, input: hiddenFloat, output: hiddenHalf,
+                                       count: Self.tokens * Self.hidden,
+                                       monitor: monitor, probe: .mlpHiddenToHalf)
+            } else {
+                try encodeConvert(command, kernel: "float_to_half", input: hiddenFloat,
+                                  output: hiddenHalf, count: Self.tokens * Self.hidden)
+            }
+            // P2-C: f32→f16 conversion traffic (bytes written, counted once).
+            metrics?.recordConversionBytes(UInt64(Self.tokens * Self.hidden * MemoryLayout<Float16>.stride))
         }
         let branch = buffer("dit.branch.f16", Self.tokens * Self.dim, Float16.self)
         try linear.encode(commandBuffer: command, input: hiddenHalf,
-                          weight: weights.mlp2, output: branch, inputRows: Self.tokens)
+                          weight: weights.mlp2, output: branch, inputRows: Self.tokens,
+                          family: .mlpDown)
         try encodeHalfComputeBoundary(command, branch, count: Self.tokens * Self.dim)
         if NumericalMonitor.detailedProbesEnabled, let monitor {
             try monitor.encodeProbe(command, values: branch, count: Self.tokens * Self.dim,
@@ -392,6 +601,8 @@ final class DiTBlockExecutor {
             try encodeConvert(command, kernel: "float_to_half", input: input,
                               output: output, count: count)
         }
+        // P2-C: f32→f16 conversion traffic (bytes written, counted once).
+        metrics?.recordConversionBytes(UInt64(count * MemoryLayout<Float16>.stride))
     }
 
     /// float_to_half with in-kernel numerical-health recording. The probe
@@ -526,6 +737,67 @@ final class DiTBlockExecutor {
         encoder.endEncoding()
     }
 
+    /// P3-A: one fused pass replacing layernorm → modulate → boundary → toHalf.
+    /// The modulation buffer uses the EXACT legacy layout (scale at
+    /// `modulationOffset` = dim*4, shift at offset 0). The optional BF16
+    /// rounding sits between modulation and the fp16 conversion, matching the
+    /// legacy `encodeFloatToComputeHalf` boundary placement. When a monitor is
+    /// present the probe kernel records the same stats as the legacy
+    /// `float_to_half_probe` pass, on the value fed to `half()`.
+    private func encodeFusedNormModulate(
+        _ command: MTLCommandBuffer, residual: MTLBuffer, modulation: MTLBuffer,
+        output: MTLBuffer, rows: Int, columns: Int, probe: NumericalMonitor.Probe
+    ) throws {
+        let kernel = monitor == nil ? "dit_layernorm_modulate_to_half" : "dit_layernorm_modulate_to_half_probe"
+        let pipeline = try context.pipeline(named: kernel)
+        guard let encoder = command.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create fused LayerNorm/modulate encoder")
+        }
+        var n = UInt32(columns), epsilon = Self.eps, rowCount = UInt32(rows)
+        var modulationOffset = UInt32(Self.dim * MemoryLayout<Float>.stride)
+        var boundary: UInt32 = emulatesBF16 ? 1 : 0
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(residual, offset: 0, index: 0)
+        encoder.setBuffer(modulation, offset: 0, index: 1)
+        encoder.setBuffer(output, offset: 0, index: 2)
+        encoder.setBytes(&n, length: 4, index: 3)
+        encoder.setBytes(&epsilon, length: 4, index: 4)
+        encoder.setBytes(&rowCount, length: 4, index: 5)
+        encoder.setBytes(&modulationOffset, length: 4, index: 6)
+        encoder.setBytes(&boundary, length: 4, index: 7)
+        if let monitor {
+            monitor.bindProbe(encoder, probe: probe, statsIndex: 8, slotIndex: 9)
+        }
+        encoder.dispatchThreadgroups(MTLSize(width: rows, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        encoder.endEncoding()
+    }
+
+    /// P3-B: in-place GELU on the fp16 MLP hidden activations (fp32 register
+    /// arithmetic + optional BF16 rounding). With a monitor the probe kernel
+    /// records the same stats as the legacy `mlpHiddenToHalf` conversion.
+    private func encodeFusedGELUHalf(
+        _ command: MTLCommandBuffer, values: MTLBuffer, count: Int,
+        probe: NumericalMonitor.Probe
+    ) throws {
+        let kernel = monitor == nil ? "dit_gelu_half_inplace" : "dit_gelu_half_inplace_probe"
+        let pipeline = try context.pipeline(named: kernel)
+        guard let encoder = command.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create fused GELU half encoder")
+        }
+        var elementCount = UInt32(count)
+        var boundary: UInt32 = emulatesBF16 ? 1 : 0
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(values, offset: 0, index: 0)
+        encoder.setBytes(&elementCount, length: 4, index: 1)
+        encoder.setBytes(&boundary, length: 4, index: 2)
+        if let monitor {
+            monitor.bindProbe(encoder, probe: probe, statsIndex: 3, slotIndex: 4)
+        }
+        dispatchProbe(encoder, pipeline: pipeline, count: count)
+        encoder.endEncoding()
+    }
+
     private func encodeRMSRoPE(
         _ command: MTLCommandBuffer, input: MTLBuffer, weightOffset: Int,
         rope: MTLBuffer, output: MTLBuffer, slot: Int
@@ -588,6 +860,9 @@ final class DiTBlockExecutor {
         encoder.setBytes(&direction, length: 4, index: 5)
         dispatch1D(encoder, pipeline: pipeline, count: count)
         encoder.endEncoding()
+        // P2-C: logical transpose traffic — fp16 elements materialized,
+        // counted once (bytes written). Arithmetic counter, not a GPU readback.
+        metrics?.recordTransposeBytes(UInt64(count * MemoryLayout<Float16>.stride))
     }
 
     private func encodeGateAdd(

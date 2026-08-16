@@ -193,6 +193,88 @@ final class DiTBlockExecutorTests: XCTestCase {
         return (packs, oracle)
     }
 
+    // MARK: - P5 cross-attention K/V cache
+
+    /// P5: a fresh cache starts empty (every block not ready) and per-block
+    /// readiness is tracked independently.
+    func testCrossKVCacheStartsEmptyAndTracksReadyPerBlock() throws {
+        let context = try requireContext()
+        guard let cache = CrossKVCache(device: context.device,
+                                       options: .storageModeShared) else {
+            throw XCTSkip("CrossKVCache could not be allocated")
+        }
+        for block in 0..<CrossKVCache.blockCount {
+            XCTAssertFalse(cache.isReady(block), "block \(block) must start not-ready")
+        }
+        cache.markReady(3)
+        cache.markReady(17)
+        XCTAssertTrue(cache.isReady(3))
+        XCTAssertTrue(cache.isReady(17))
+        XCTAssertFalse(cache.isReady(0))
+        XCTAssertFalse(cache.isReady(28 - 1))
+    }
+
+    /// P5: cache offsets/size are one contiguous buffer, K and V per block,
+    /// sized for the DiT cross shape (512 × 2048 half = 2 MiB each).
+    func testCrossKVCacheOffsetsAndSize() throws {
+        let context = try requireContext()
+        guard let cache = CrossKVCache(device: context.device,
+                                       options: .storageModeShared) else {
+            throw XCTSkip("CrossKVCache could not be allocated")
+        }
+        let tensorBytes = 512 * 2048 * MemoryLayout<Float16>.stride
+        XCTAssertEqual(CrossKVCache.tensorBytes, tensorBytes)
+        XCTAssertEqual(CrossKVCache.blockStride, tensorBytes * 2)
+        XCTAssertEqual(CrossKVCache.blockCount, 28)
+        // Block b's K lives at b*blockStride; V immediately after K.
+        for block in 0..<CrossKVCache.blockCount {
+            XCTAssertEqual(cache.kOffset(block: block), block * CrossKVCache.blockStride)
+            XCTAssertEqual(cache.vOffset(block: block),
+                           block * CrossKVCache.blockStride + CrossKVCache.tensorBytes)
+        }
+        // One contiguous buffer sized for all blocks (no 56 independent buffers).
+        XCTAssertEqual(cache.buffer.length, 28 * CrossKVCache.blockStride)
+    }
+
+    /// P5: the production cache is `.storageModePrivate` (CPU never reads it).
+    func testCrossKVCacheStorageModePrivateByDefault() throws {
+        let context = try requireContext()
+        guard let cache = CrossKVCache(device: context.device) else {
+            throw XCTSkip("CrossKVCache could not be allocated")
+        }
+        XCTAssertEqual(cache.buffer.storageMode, .private)
+    }
+
+    /// P5: a cache write then read back reproduces the exact bytes (exact
+    /// blit copy, no approximation). Uses the K region for one block.
+    func testCrossKVCacheWriteReadBackIsExact() throws {
+        let context = try requireContext()
+        guard let cache = CrossKVCache(device: context.device,
+                                       options: .storageModeShared) else {
+            throw XCTSkip("CrossKVCache could not be allocated")
+        }
+        let count = 512 * 2048
+        let src = try XCTUnwrap(context.device.makeBuffer(
+            length: count * MemoryLayout<Float16>.stride, options: .storageModeShared))
+        let pattern = (0..<count).map { Float16(Float($0 % 1000) / 100) }
+        src.contents().bindMemory(to: Float16.self, capacity: count).update(from: pattern, count: count)
+        let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let encoder = try XCTUnwrap(command.makeBlitCommandEncoder())
+        encoder.copy(from: src, sourceOffset: 0, to: cache.buffer,
+                     destinationOffset: cache.kOffset(block: 5), size: count * 2)
+        encoder.endEncoding()
+        command.commit()
+        command.waitUntilCompleted()
+        XCTAssertNil(command.error)
+        let read = cache.buffer.contents().advanced(by: cache.kOffset(block: 5))
+            .bindMemory(to: Float16.self, capacity: count)
+        for i in 0..<count where i % 997 == 0 {
+            XCTAssertEqual(read[i].bitPattern, pattern[i].bitPattern, "index \(i)")
+        }
+        cache.markReady(5)
+        XCTAssertTrue(cache.isReady(5))
+    }
+
     private func fixtureFloats(_ name: String, in directory: URL) throws -> [Float] {
         let data = try Data(contentsOf: directory.appendingPathComponent(name))
         guard data.count.isMultiple(of: 4) else { throw AnimapkError.validation("invalid oracle file") }

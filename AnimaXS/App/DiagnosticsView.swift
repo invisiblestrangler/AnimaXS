@@ -140,6 +140,15 @@ struct DiagnosticsView: View {
             Text("Applies to the next fresh generation. Use Generate, not Resume, for performance comparisons.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Picker("Preset (P9)", selection: presetBinding) {
+                ForEach(InferencePreset.allCases, id: \.self) { preset in
+                    Text(preset.label).tag(preset)
+                }
+            }
+            .disabled(isGenerating)
+            Text("A preset sets every control below at once. Adjusting individual controls below refines it; nothing here is claimed fastest until the physical XS Max is measured.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             Picker("Linear tile rows", selection: linearTileSelection) {
                 ForEach(InferenceOptimizationConfig.allowedTileRows, id: \.self) { rows in
                     Text("\(rows)").tag(rows)
@@ -158,6 +167,28 @@ struct DiagnosticsView: View {
                 .disabled(isGenerating)
             Toggle("Numerical monitor", isOn: numericalMonitorBinding)
                 .disabled(isGenerating)
+            Toggle("Fused LayerNorm+AdaLN+to-half", isOn: fusedNormModulationBinding)
+                .disabled(isGenerating)
+            Toggle("Fused MLP in-place GELU", isOn: fusedMLPActivationBinding)
+                .disabled(isGenerating)
+            Toggle("Strided token-major attention (P4)", isOn: stridedTokenMajorAttentionBinding)
+                .disabled(isGenerating)
+            Toggle("Cross-attention K/V cache (P5)", isOn: crossKVCacheBinding)
+                .disabled(isGenerating)
+            Toggle("Mmap no-copy weight source (P6, experimental)", isOn: noCopyWeightSourceBinding)
+                .disabled(isGenerating)
+            Picker("DiT attention backend (P7)", selection: attentionBackendBinding) {
+                ForEach(DiTAttentionBackend.allCases, id: \.self) { backend in
+                    Text(backend.rawValue).tag(backend)
+                }
+            }
+            .disabled(isGenerating)
+            Picker("DiT linear backend (P8)", selection: linearBackendBinding) {
+                ForEach(DiTLinearBackend.allCases, id: \.self) { backend in
+                    Text(backend.rawValue).tag(backend)
+                }
+            }
+            .disabled(isGenerating)
             Button("Reset to current baseline") {
                 optimizationSettings.resetToBaseline()
             }
@@ -168,6 +199,16 @@ struct DiagnosticsView: View {
                     .foregroundStyle(.orange)
             }
         }
+    }
+
+    /// P9: binding for the preset picker. `activePreset` is `nil` once the
+    /// user refines an individual control, but the picker needs a concrete
+    /// selection — default to `.baseline` for display. Picking always applies
+    /// the chosen preset via `setPreset`.
+    private var presetBinding: Binding<InferencePreset> {
+        Binding(
+            get: { optimizationSettings.activePreset ?? .baseline },
+            set: { optimizationSettings.setPreset($0) })
     }
 
     private var linearTileSelection: Binding<Int> {
@@ -198,6 +239,48 @@ struct DiagnosticsView: View {
         Binding(
             get: { optimizationSettings.numericalMonitoring },
             set: { optimizationSettings.setNumericalMonitoring($0) })
+    }
+
+    private var fusedNormModulationBinding: Binding<Bool> {
+        Binding(
+            get: { optimizationSettings.fusedNormModulation },
+            set: { optimizationSettings.setFusedNormModulation($0) })
+    }
+
+    private var fusedMLPActivationBinding: Binding<Bool> {
+        Binding(
+            get: { optimizationSettings.fusedMLPActivation },
+            set: { optimizationSettings.setFusedMLPActivation($0) })
+    }
+
+    private var stridedTokenMajorAttentionBinding: Binding<Bool> {
+        Binding(
+            get: { optimizationSettings.stridedTokenMajorAttention },
+            set: { optimizationSettings.setStridedTokenMajorAttention($0) })
+    }
+
+    private var crossKVCacheBinding: Binding<Bool> {
+        Binding(
+            get: { optimizationSettings.crossKVCache },
+            set: { optimizationSettings.setCrossKVCache($0) })
+    }
+
+    private var noCopyWeightSourceBinding: Binding<Bool> {
+        Binding(
+            get: { optimizationSettings.noCopyWeightSource },
+            set: { optimizationSettings.setNoCopyWeightSource($0) })
+    }
+
+    private var attentionBackendBinding: Binding<DiTAttentionBackend> {
+        Binding(
+            get: { optimizationSettings.attentionBackend },
+            set: { optimizationSettings.setAttentionBackend($0) })
+    }
+
+    private var linearBackendBinding: Binding<DiTLinearBackend> {
+        Binding(
+            get: { optimizationSettings.linearBackend },
+            set: { optimizationSettings.setLinearBackend($0) })
     }
 
     @ViewBuilder

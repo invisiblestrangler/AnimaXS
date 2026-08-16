@@ -19,13 +19,17 @@ final class DiTFinalLayerExecutor {
     private let linear: LinearExecutor
     private let activationNumerics: ActivationNumerics
     private let monitor: NumericalMonitor?
+    /// Immutable optimization snapshot (captured at Generate). Used for the
+    /// P6 no-copy weight source toggle and linear tile config.
+    private let optimization: InferenceOptimizationConfig
     /// Run telemetry collector (nil in tests / diagnostic-only construction).
     var metrics: MetricsCollector?
     private var emulatesBF16: Bool { activationNumerics == .bf16Compute }
 
     init(context: MetalContext, file: AnimapkFile,
          activationNumerics: ActivationNumerics = .legacy,
-         monitor: NumericalMonitor? = nil) throws {
+         monitor: NumericalMonitor? = nil,
+         optimization: InferenceOptimizationConfig = .currentBaseline) throws {
         let range = try DiTFinalLayerLocator(file: file).range
         guard range.length <= UInt64(Int.max) else {
             throw AnimapkError.validation("DiT final layer range is too large")
@@ -33,9 +37,13 @@ final class DiTFinalLayerExecutor {
         self.context = context
         self.file = file
         self.range = range
+        self.optimization = optimization
         self.streamer = try WeightStreamer(device: context.device, capacity: Int(range.length))
         self.buffers = BufferPool(device: context.device)
-        self.linear = LinearExecutor(context: context)
+        self.linear = LinearExecutor(
+            context: context, tileRows: optimization.linearTileRows,
+            directMPSIO: optimization.directLinearMPSIO,
+            linearBackend: optimization.linearBackend)
         self.activationNumerics = activationNumerics
         self.monitor = monitor
     }
@@ -48,9 +56,17 @@ final class DiTFinalLayerExecutor {
     ) async throws {
         try validate(residual: residual, emb: emb, adalnLora: adalnLora, velocity: velocity)
         let copyStart = ProcessInfo.processInfo.systemUptime
-        try streamer.load(range, from: file)
-        metrics?.recordWeightCopy(bytes: Int(range.length), seconds: ProcessInfo.processInfo.systemUptime - copyStart)
-        let weights = try FinalWeights(range: range, ring: streamer.ring)
+        let result = try streamer.load(
+            range, from: file,
+            mode: optimization.noCopyWeightSource ? .noCopy : .copied)
+        if result.mode == .noCopy {
+            // P6: final-layer memcpy eliminated — record the no-copy bytes.
+            metrics?.recordMmapNoCopyBytes(result.noCopyBytes)
+        } else {
+            metrics?.recordWeightCopy(bytes: Int(range.length),
+                                      seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+        }
+        let weights = try FinalWeights(range: range, ring: streamer.buffer(for: 0))
         guard let command = context.commandQueue.makeCommandBuffer() else {
             throw AnimapkError.validation("failed to create final-layer command buffer")
         }
@@ -68,19 +84,38 @@ final class DiTFinalLayerExecutor {
         try encodeComputeBoundary(command, modulation, count: Self.modulationSize)
 
         // predict2.py:930 casts the large fp32 residual to cross-attention dtype
-        // before FinalLayer. Make that fp16 boundary explicit before fp32-stat LayerNorm.
-        let residualHalf = buffer("final.residual.f16", Self.tokens * Self.dim, Float16.self)
-        let boundaryFloat = buffer("final.boundary.f32", Self.tokens * Self.dim, Float.self)
+        // before FinalLayer. For W4 (legacy) that is an fp16 boundary followed by
+        // an fp32-stat LayerNorm — the known-good path. For W8-v2 (BF16 emulated),
+        // an FP16 conversion of the large residual would overflow above 65,504, so
+        // the residual is rounded to BF16 RNE while retained in fp32 storage, and
+        // LayerNorm runs in fp32 over those BF16-rounded values (source-faithful).
         let normalized = buffer("final.normalized.f32", Self.tokens * Self.dim, Float.self)
         let normalizedHalf = buffer("final.normalized.f16", Self.tokens * Self.dim, Float16.self)
         let normalizedBoundary = buffer(
             "final.normalizedBoundary.f32", Self.tokens * Self.dim, Float.self)
         let modulated = buffer("final.modulated.f32", Self.tokens * Self.dim, Float.self)
         let projectionInput = buffer("final.projectionInput.f16", Self.tokens * Self.dim, Float16.self)
-        try encodeProbeConvert(command, "float_to_half", residual, residualHalf,
-                               Self.tokens * Self.dim, probe: .finalResidualToHalf)
-        try encodeUnary(command, "half_to_float", residualHalf, boundaryFloat, Self.tokens * Self.dim)
-        try encodeLayerNorm(command, input: boundaryFloat, output: normalized)
+
+        if emulatesBF16 {
+            // W8-v2: BF16 RNE rounding of the large residual while stored in FP32,
+            // then LayerNorm in FP32 over the BF16-rounded values. The large
+            // residual is never converted to half here.
+            let boundaryFloat = buffer("final.boundary.f32", Self.tokens * Self.dim, Float.self)
+            try encodeUnary(command, "round_f32_to_bf16", residual, boundaryFloat,
+                            Self.tokens * Self.dim)
+            try encodeLayerNorm(command, input: boundaryFloat, output: normalized)
+        } else {
+            // W4 legacy: fp16 residual boundary then fp32-stat LayerNorm (unchanged).
+            let residualHalf = buffer("final.residual.f16", Self.tokens * Self.dim, Float16.self)
+            let boundaryFloat = buffer("final.boundary.f32", Self.tokens * Self.dim, Float.self)
+            try encodeProbeConvert(command, "float_to_half", residual, residualHalf,
+                                   Self.tokens * Self.dim, probe: .finalResidualToHalf)
+            try encodeUnary(command, "half_to_float", residualHalf, boundaryFloat,
+                            Self.tokens * Self.dim)
+            // P2-C: f16→f32 conversion traffic (bytes written, counted once).
+            metrics?.recordConversionBytes(UInt64(Self.tokens * Self.dim * MemoryLayout<Float>.stride))
+            try encodeLayerNorm(command, input: boundaryFloat, output: normalized)
+        }
         // torch.layer_norm preserves its fp16 input dtype. AdaLN then promotes the
         // rounded norm output when adding the fp32 shift/scale tensors.
         try encodeProbeConvert(command, "float_to_half", normalized, normalizedHalf,
@@ -88,6 +123,8 @@ final class DiTFinalLayerExecutor {
         try encodeHalfComputeBoundary(command, normalizedHalf, count: Self.tokens * Self.dim)
         try encodeUnary(command, "half_to_float", normalizedHalf, normalizedBoundary,
                         Self.tokens * Self.dim)
+        // P2-C: f16→f32 conversion traffic (bytes written, counted once).
+        metrics?.recordConversionBytes(UInt64(Self.tokens * Self.dim * MemoryLayout<Float>.stride))
         try encodeModulate(command, normalized: normalizedBoundary,
                            modulation: modulation, output: modulated)
         try encodeComputeBoundary(command, modulated, count: Self.tokens * Self.dim)
@@ -106,6 +143,8 @@ final class DiTFinalLayerExecutor {
         }
         try encodeUnary(command, "half_to_float", projectedHalf, projectedFloat,
                         Self.tokens * Self.projected)
+        // P2-C: f16→f32 conversion traffic (bytes written, counted once).
+        metrics?.recordConversionBytes(UInt64(Self.tokens * Self.projected * MemoryLayout<Float>.stride))
         try encodeUnpatchify(command, input: projectedFloat, output: velocity)
         if let monitor {
             try monitor.encodeProbeF32(command, values: velocity,
@@ -229,6 +268,7 @@ final class DiTFinalLayerExecutor {
     ) throws {
         guard let monitor else {
             try encodeUnary(command, name, input, output, count)
+            metrics?.recordConversionBytes(UInt64(count * MemoryLayout<Float16>.stride))
             return
         }
         let pipeline = try context.pipeline(named: "float_to_half_probe")
@@ -246,6 +286,8 @@ final class DiTFinalLayerExecutor {
             MTLSize(width: groups, height: 1, depth: 1),
             threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
         encoder.endEncoding()
+        // P2-C: f32→f16 conversion traffic (bytes written, counted once).
+        metrics?.recordConversionBytes(UInt64(count * MemoryLayout<Float16>.stride))
     }
 
     private func encodeComputeBoundary(

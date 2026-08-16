@@ -49,6 +49,46 @@ final class GenerationMetricsTests: XCTestCase {
         XCTAssertEqual(metrics.numericalWarnings, 2)
     }
 
+    /// P6: mmap no-copy bytes accumulate globally AND into the active step,
+    /// and appear in the summary text when nonzero.
+    func testMmapNoCopyBytesAccumulateGloballyAndPerStep() {
+        let collector = MetricsCollector()
+        collector.beginStep(0)
+        collector.recordMmapNoCopyBytes(38_993_920)
+        collector.endStep()
+        collector.beginStep(1)
+        collector.recordMmapNoCopyBytes(2_000)
+        collector.recordMmapNoCopyBytes(3_000)
+        collector.endStep()
+
+        let metrics = collector.snapshot()
+        XCTAssertEqual(metrics.mmapNoCopyBytes, 38_993_920 + 2_000 + 3_000)
+        XCTAssertEqual(metrics.stepMetrics[0].mmapNoCopyBytes, 38_993_920)
+        XCTAssertEqual(metrics.stepMetrics[1].mmapNoCopyBytes, 5_000)
+        let text = metrics.summaryText
+        XCTAssertTrue(text.contains("Weight bytes served mmap no-copy"))
+        XCTAssertTrue(text.contains("weight bytes mmap no-copy"))
+    }
+
+    /// P6: the no-copy path charges 0 weight-copy time; the copied path
+    /// records it via recordWeightCopy (regression guard for the A/B split).
+    func testMmapNoCopyDoesNotChargeWeightCopyTime() {
+        let collector = MetricsCollector()
+        collector.beginStep(0)
+        collector.recordMmapNoCopyBytes(38_993_920)
+        collector.endStep()
+        collector.beginStep(1)
+        collector.recordWeightCopy(bytes: 38_993_920, seconds: 0.05)
+        collector.endStep()
+
+        let metrics = collector.snapshot()
+        XCTAssertEqual(metrics.weightCopyTime, 0.05, accuracy: 0.0001)
+        XCTAssertEqual(metrics.weightCopyBytes, 38_993_920)
+        XCTAssertEqual(metrics.stepMetrics[0].weightCopySeconds, 0, accuracy: 0.0001)
+        XCTAssertEqual(metrics.stepMetrics[0].weightCopyBytes, 0)
+        XCTAssertEqual(metrics.stepMetrics[1].weightCopySeconds, 0.05, accuracy: 0.0001)
+    }
+
     func testSummaryTextShape() {
         let collector = MetricsCollector()
         collector.beginStep(0)
@@ -127,14 +167,194 @@ final class GenerationMetricsTests: XCTestCase {
         XCTAssertTrue(text.contains("Low Power Mode: off -> off"))
     }
 
-    /// The summary reports which DiT pack file ran and that checkpointing is
+    /// The summary reports which DiT pack variant ran and that checkpointing is
     /// always on (the DiT slot holds one verified pack).
     func testSummaryReportsDiTPackFilenameAndCheckpointing() {
         let collector = MetricsCollector()
-        collector.recordDiTPackFilename("anima-turbo-v1.0-xsmax-w8-v2.animapk")
+        collector.recordDiTPackIdentity(
+            id: "w8-v2",
+            filename: "anima-turbo-v1.0-xsmax-w8-v2.animapk",
+            sha256: "8b63c7fd9b5872805e5a2ba799ab6d79989c54a6a89a4f34edf022c59c9ed130",
+            bytes: 2_232_975_360)
         collector.finalize(totalWall: 100)
         let text = collector.snapshot().summaryText
         XCTAssertTrue(text.contains("DiT pack: anima-turbo-v1.0-xsmax-w8-v2.animapk"))
+        XCTAssertTrue(text.contains("(w8-v2)"))
         XCTAssertTrue(text.contains("Checkpointing: on"))
+    }
+
+    // P1-H: cancellation reason is published into the summary and distinguishes
+    // user/background/memory-warning cancellation.
+    func testCancellationReasonDistinguishable() {
+        let collector = MetricsCollector()
+        collector.recordCancellationReason(.memoryWarning)
+        collector.finalize(totalWall: 10)
+        let text = collector.snapshot().summaryText
+        XCTAssertTrue(text.contains("Cancellation: memoryWarning"))
+
+        let background = MetricsCollector()
+        background.recordCancellationReason(.background)
+        background.finalize(totalWall: 10)
+        XCTAssertTrue(background.snapshot().summaryText.contains("Cancellation: background"))
+
+        let user = MetricsCollector()
+        user.recordCancellationReason(.user)
+        user.finalize(totalWall: 10)
+        XCTAssertTrue(user.snapshot().summaryText.contains("Cancellation: user"))
+    }
+
+    // P1-G: numerical bookkeeping is published via metrics; a non-empty warning
+    // count is recorded (and the summary shows it), while monitor-OFF marks the
+    // run as disabled so it never reports a fake "0".
+    func testNumericalBookkeepingPublished() {
+        let collector = MetricsCollector()
+        collector.setNumericalWarnings(3)
+        collector.setNumericalDetails("block 5 self-attention scores")
+        collector.finalize(totalWall: 10)
+        let text = collector.snapshot().summaryText
+        XCTAssertTrue(text.contains("Numerical warnings: 3 (block 5 self-attention scores)"))
+
+        let disabled = MetricsCollector()
+        disabled.setNumericalMonitoringDisabled(true)
+        disabled.finalize(totalWall: 10)
+        let disabledText = disabled.snapshot().summaryText
+        XCTAssertTrue(disabledText.contains("Numerical monitor: off"))
+        XCTAssertTrue(disabledText.contains("Numerical warnings: not collected"))
+        XCTAssertFalse(disabledText.contains("Numerical warnings: 0"))
+    }
+
+    // P2-A: eight completed steps each appear in stepMetrics with wall time and
+    // completed == true.
+    func testRecordsAllEightCompletedSteps() {
+        let collector = MetricsCollector()
+        for step in 0..<8 {
+            collector.beginStep(step)
+            collector.recordGPUCommand(seconds: 0.5)
+            collector.endStep(completed: true)
+        }
+        let metrics = collector.snapshot()
+        XCTAssertEqual(metrics.stepMetrics.count, 8)
+        for entry in metrics.stepMetrics {
+            XCTAssertTrue(entry.completed)
+            XCTAssertEqual(entry.step, entry.step) // step index present
+        }
+        XCTAssertEqual(metrics.stepMetrics.map(\.step), [0, 1, 2, 3, 4, 5, 6, 7])
+    }
+
+    // P2-B: a step that throws is still recorded as a PARTIAL (uncompleted) step
+    // with a nonzero wall duration, so a failing step is attributable.
+    func testRecordsFailedPartialStep() {
+        let collector = MetricsCollector()
+        collector.beginStep(0)
+        collector.recordGPUCommand(seconds: 1.2)
+        // Simulate a mid-step throw: finalize with completed == false.
+        collector.endStep(completed: false)
+        let metrics = collector.snapshot()
+        XCTAssertEqual(metrics.stepMetrics.count, 1)
+        XCTAssertFalse(metrics.stepMetrics[0].completed)
+        XCTAssertGreaterThan(metrics.stepMetrics[0].gpuCommandSeconds, 0)
+    }
+
+    // P2-A: per-step sums reconcile with the global counters (the active-step
+    // accumulation must not double-count or drop traffic).
+    func testPerStepSumsMatchGlobals() {
+        let collector = MetricsCollector()
+        for step in 0..<8 {
+            collector.beginStep(step)
+            collector.recordGPUCommand(seconds: 1.0)
+            collector.recordConversionBytes(1024)
+            collector.recordDequantizedWeightBytesWritten(4096)
+            collector.endStep(completed: true)
+        }
+        // Two additional global-only records after the steps.
+        collector.recordGPUCommand(seconds: 0.5)
+        collector.recordConversionBytes(100)
+        let metrics = collector.snapshot()
+        // Per-step GPU sums + the trailing global record.
+        XCTAssertEqual(metrics.stepMetrics.reduce(0) { $0 + $1.gpuCommandSeconds }, 8.0, accuracy: 0.001)
+        XCTAssertEqual(metrics.gpuCommandTime, 8.5, accuracy: 0.001)
+        XCTAssertEqual(metrics.stepMetrics.reduce(0) { $0 + $1.conversionBytes }, 8 * 1024)
+        XCTAssertEqual(metrics.conversionBytes, 8 * 1024 + 100)
+        XCTAssertEqual(metrics.stepMetrics.reduce(0) { $0 + $1.dequantizedWeightBytesWritten }, 8 * 4096)
+        XCTAssertEqual(metrics.dequantizedWeightBytesWritten, 8 * 4096)
+    }
+
+    // P2-E: the summary renders a per-step table without crashing and the
+    // Diagnostics text remains usable when steps exist.
+    func testPerStepSummaryTableRenders() {
+        let collector = MetricsCollector()
+        for step in 0..<3 {
+            collector.beginStep(step)
+            collector.recordGPUCommand(seconds: 1.0)
+            collector.endStep(completed: true)
+        }
+        collector.finalize(totalWall: 30)
+        let text = collector.snapshot().summaryText
+        XCTAssertTrue(text.contains("Per-step"))
+        XCTAssertTrue(text.contains("Traffic/backend"))
+        XCTAssertFalse(text.isEmpty)
+    }
+
+    // P3: fused activation traffic saved is accumulated (global + active step)
+    // and reported in the summary. Proves a fused path eliminated traffic.
+    func testFusedTrafficSavedAccumulatesAndReports() {
+        let collector = MetricsCollector()
+        let normModulatedSaved = UInt64(1024 * 2048 * 4) * 2 // norm + modulated fp32
+        let hiddenFloatSaved = UInt64(1024 * 8192 * 4)       // hiddenFloat fp32
+        collector.beginStep(0)
+        collector.recordFusedTrafficSaved(normModulatedSaved)
+        collector.recordFusedTrafficSaved(hiddenFloatSaved)
+        collector.endStep(completed: true)
+        collector.finalize(totalWall: 10)
+        let metrics = collector.snapshot()
+        let expected = normModulatedSaved + hiddenFloatSaved
+        XCTAssertEqual(metrics.fusedTrafficSavedBytes, expected)
+        XCTAssertEqual(metrics.stepMetrics[0].fusedTrafficSavedBytes, expected)
+        XCTAssertTrue(metrics.summaryText.contains("fused activation traffic saved"))
+    }
+
+    // P5: cross-KV cache hits/misses accumulate globally AND into the active
+    // step; the summary reports them when nonzero. Models the production
+    // pattern: step 0 = 28 misses (first executed step fills the cache), each
+    // later step = 28 hits.
+    func testCrossKVHitMissAccumulatePerStepAndGlobally() {
+        let collector = MetricsCollector()
+        // First executed step: 28 misses (one per DiT block).
+        collector.beginStep(0)
+        for _ in 0..<28 { collector.recordCrossKVMiss() }
+        collector.endStep(completed: true)
+        // A later step: 28 hits.
+        collector.beginStep(1)
+        for _ in 0..<28 { collector.recordCrossKVHit() }
+        collector.endStep(completed: true)
+        collector.finalize(totalWall: 10)
+        let metrics = collector.snapshot()
+        XCTAssertEqual(metrics.crossKVMisses, 28)
+        XCTAssertEqual(metrics.crossKVHits, 28)
+        XCTAssertEqual(metrics.stepMetrics[0].crossKVMisses, 28)
+        XCTAssertEqual(metrics.stepMetrics[0].crossKVHits, 0)
+        XCTAssertEqual(metrics.stepMetrics[1].crossKVHits, 28)
+        XCTAssertEqual(metrics.stepMetrics[1].crossKVMisses, 0)
+        // Per-step sums reconcile with the globals (P2 gate).
+        XCTAssertEqual(metrics.stepMetrics.map(\.crossKVHits).reduce(0, +), metrics.crossKVHits)
+        XCTAssertEqual(metrics.stepMetrics.map(\.crossKVMisses).reduce(0, +), metrics.crossKVMisses)
+        XCTAssertTrue(metrics.summaryText.contains("cross-KV cache hits/misses: 28/28"))
+    }
+
+    // P8: direct QGEMM dispatches accumulate globally AND into the active step,
+    // and per-family tallies are recorded (P8-E).
+    func testQGEMMCallAccumulatesPerStepAndPerFamily() {
+        let collector = MetricsCollector()
+        collector.beginStep(0)
+        collector.recordQGEMMCall(family: .mlpUp)
+        collector.recordQGEMMCall(family: .mlpUp)
+        collector.recordQGEMMCall(family: .mlpDown)
+        collector.endStep(completed: true)
+        collector.finalize(totalWall: 5)
+        let metrics = collector.snapshot()
+        XCTAssertEqual(metrics.qgemmCalls, 3)
+        XCTAssertEqual(metrics.qgemmMLPUpCalls, 2)
+        XCTAssertEqual(metrics.qgemmMLPDownCalls, 1)
+        XCTAssertEqual(metrics.stepMetrics[0].qgemmCalls, 3)
     }
 }
