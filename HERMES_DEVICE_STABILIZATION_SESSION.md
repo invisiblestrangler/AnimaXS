@@ -17,8 +17,8 @@
 - [x] T10 Numerical-monitor label cleanup (verified + committed)
 - [x] T11 Docs/state correction (verified + committed)
 - [x] CI Gate A (PASS after T1)
-- [ ] CI Gate B (IN PROGRESS after T1-T11)
-- [ ] Full-inference W4/W8 gate
+- [x] CI Gate B (PASS after T1-T11, run 31940846369 at 86c5904)
+- [ ] Full-inference W4/W8 gate (IN PROGRESS)
 
 ## Commits
 - 90ca169 feat: remove checkpoint/resume from production entirely (T1 source)
@@ -36,10 +36,14 @@
 - f647908 fix: Diagnostics preset drift + central compatibility validator (T9)
 - 605300f fix: numerical-monitor gate/add probe labels identify the gate input boundary (T10)
 - de61aa6 docs: correct project state — device stabilization decisions recorded (T11)
+- bee68e5 fix: fatal-Metal classification compares raw NSError code to case rawValues (CI fix)
+- f26a1be fix: fatal-Metal test helper takes MTLCommandBufferError.Code (CI fix)
+- 86c5904 fix: correct Task 6 ModelStore single-flight tests for real store semantics (CI fix)
 
 ## CI Runs
 - bootstrap-project #31932812543: success (pbxproj regenerated for T1)
 - ci.yml Gate A #31932848703: success (project-consistency, iphone-build, simulator-tests)
+- ci.yml Gate B #31940846369: success (project-consistency, iphone-build, simulator-tests) at 86c5904
 
 ## Deviations
 - (none)
