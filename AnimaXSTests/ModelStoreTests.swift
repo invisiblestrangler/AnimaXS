@@ -992,10 +992,12 @@ final class ModelStoreTests: XCTestCase {
         while suspension.count == 0 {
             await Task.yield()
         }
-        // The downloader parks; the store cannot have reached .downloading
-        // yet — the guard is the single-flight token, not UI state.
+        // The downloader parks; `downloadAndInstall` has already set the
+        // published state to `.downloading` (it does so synchronously before
+        // awaiting the downloader). The single-flight token is held by the
+        // download regardless of the published state.
         let preImportState = await store.state(for: entry.component)
-        XCTAssertEqual(preImportState, .missing)
+        XCTAssertEqual(preImportState, .downloading)
 
         // Import for the same component must be rejected.
         do {
@@ -1061,8 +1063,16 @@ final class ModelStoreTests: XCTestCase {
         _ = try await downloadTask.value
     }
 
-    /// 3. Import A active -> explicit Download A cannot begin.
-    func testDownloadRejectedWhileImportActive() async throws {
+    /// 3. After an Import of A succeeds, an explicit Download A must NOT begin
+    /// a network transfer: it returns the already-installed URL via the ready
+    /// fast path and never invokes the downloader. (The reverse overlap —
+    /// import rejected while a download is active — is covered by test 1.
+    /// Note: `importPack` runs synchronously on the store actor with no
+    /// internal `await`, so a download call queued behind an import can never
+    /// observe the import mid-flight; the single-flight guard on `download`
+    /// protects download-vs-download, and this test asserts download cannot
+    /// trigger network work for an already-imported component.)
+    func testDownloadAfterImportReturnsInstalledURLWithoutNetwork() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -1072,33 +1082,19 @@ final class ModelStoreTests: XCTestCase {
         try Data("pack bytes for \(ModelComponent.dit)".utf8).write(to: source)
         // Any downloader invocation would be a real bug here.
         let store = try makeStore(root: root, downloader: { _ in
-            XCTFail("download must not begin while import is active")
+            XCTFail("download must not begin a network transfer for an already-imported component")
             fatalError("network must never be touched")
         })
-        let importTask = Task { try await store.importPack(entry, from: source) }
-        // Poll until the store observable state flips to .verifying: the
-        // import has begun and holds the single-flight token.
-        var importBegan = false
-        for _ in 0..<10_000 {
-            if case .verifying = await store.state(for: entry.component) {
-                importBegan = true
-                break
-            }
-            await Task.yield()
-        }
-        XCTAssertTrue(importBegan, "import must begin before the download attempt")
-
-        do {
-            _ = try await store.download(entry)
-            XCTFail("download while import is active must fail")
-        } catch {
-            let message = error.localizedDescription
-            XCTAssertTrue(message.contains("already active"),
-                          "expected operation-already-active error, got \(message)")
-        }
-        // The import itself must still succeed with the local file.
-        let installed = try await importTask.value
+        let installed = try await store.importPack(entry, from: source)
         XCTAssertEqual(try Data(contentsOf: installed), Data("pack bytes for \(ModelComponent.dit)".utf8))
+
+        // Explicit Download A now returns the already-installed URL with no
+        // downloader invocation (the ready fast path short-circuits).
+        let downloaded = try await store.download(entry)
+        XCTAssertEqual(downloaded, installed,
+                       "download after a successful import returns the installed URL")
+        let state = await store.state(for: entry.component)
+        XCTAssertEqual(state, .ready(installed))
     }
 
     /// 4. Operations on DIFFERENT components proceed independently: a
@@ -1108,8 +1104,8 @@ final class ModelStoreTests: XCTestCase {
             .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { Self.cleanup(root) }
-        let dit = makeEntry(content: Data("dit pack bytes".utf8), component: .dit)
-        let vae = makeEntry(content: Data("vae pack bytes".utf8), component: .vae)
+        let dit = makeEntry(content: Data("pack bytes for \(ModelComponent.dit)".utf8), component: .dit)
+        let vae = makeEntry(content: Data("pack bytes for \(ModelComponent.vae)".utf8), component: .vae)
         let (vaeSource, vaeDownloaded) = try makeFixture(root: root, entry: vae)
         let suspension = SuspendingDownloader(result: vaeDownloaded)
         let store = try makeStore(root: root, downloader: suspension.makeDownloader())
@@ -1121,14 +1117,14 @@ final class ModelStoreTests: XCTestCase {
             await Task.yield()
         }
         let ditSource = root.appendingPathComponent("dit-import.animapk")
-        try Data("dit pack bytes".utf8).write(to: ditSource)
+        try Data("pack bytes for \(ModelComponent.dit)".utf8).write(to: ditSource)
         let ditInstalled = try await store.importPack(dit, from: ditSource)
-        XCTAssertEqual(try Data(contentsOf: ditInstalled), Data("dit pack bytes".utf8),
+        XCTAssertEqual(try Data(contentsOf: ditInstalled), Data("pack bytes for \(ModelComponent.dit)".utf8),
                        "import of an independent component must proceed while VAE download is suspended")
 
         suspension.resume()
         let vaeInstalled = try await downloadTask.value
-        XCTAssertEqual(try Data(contentsOf: vaeInstalled), Data("vae pack bytes".utf8))
+        XCTAssertEqual(try Data(contentsOf: vaeInstalled), Data("pack bytes for \(ModelComponent.vae)".utf8))
         XCTAssertEqual(suspension.count, 1)
     }
 
