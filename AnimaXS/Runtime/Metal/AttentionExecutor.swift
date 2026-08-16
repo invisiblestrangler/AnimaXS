@@ -22,6 +22,29 @@ enum ActivationNumerics: String, CaseIterable {
     case bf16Compute = "bf16_compute"
 }
 
+/// P7: runtime-selectable DiT attention backends (runbook §12). All of them
+/// are exact (no approximation) implementations of scaled dot-product
+/// attention; they differ in HOW the scores/softmax/PV are computed. The
+/// physical device selects the winner later — the default keeps the
+/// known-good W4 behavior (see `InferenceOptimizationConfig`).
+enum DiTAttentionBackend: String, Codable, CaseIterable {
+    /// Legacy head-major MPS path (per-head transpose layout, full score
+    /// tile). The P0-P6 known-good behavior for every attention user.
+    case legacyHeadMajorMPS
+    /// P4: strided token-major MPS path (strided per-head MPSMatrix views,
+    /// no token↔head transposes, full score tile).
+    case stridedTokenMajorMPS
+    /// P7-A: streaming/online-softmax MPS — MPS QK/PV per KEY CHUNK with a
+    /// running FP32 max/sum and an FP32 output accumulator, so no full
+    /// `[queryTile, keyCount]` score tile is ever live.
+    case streamingMPS
+    /// P7-B: DiT-specialized pure-Metal Flash-style online attention
+    /// (headDim 128, heads 16, token-major, FP32 accumulation, simd_sum
+    /// score dots, running-max/rescale mandatory). Rejects unsupported
+    /// shapes loudly.
+    case metalFlash
+}
+
 /// Input/output buffer layout contract for the attention executor.
 ///
 /// - `.headMajor`: legacy `[heads, rows, headDim]` tightly packed buffers —
@@ -62,6 +85,11 @@ final class AttentionExecutor {
     /// P4: input/output layout contract. Defaults to the legacy head-major
     /// layout so Qwen/VAE/adapter attention is untouched.
     let layout: AttentionInputLayout
+    /// P7: DiT attention backend selector. Only consulted for token-major
+    /// DiT attention; Qwen/VAE/adapter (head-major) always run the legacy
+    /// MPS path. `.stridedTokenMajorMPS` maps to the P4 strided path and
+    /// honors the `stridedTokenMajorAttention` boolean at the caller.
+    let attentionBackend: DiTAttentionBackend
     /// Run telemetry collector (nil in tests / diagnostic-only construction).
     /// Receives the cheap query-tile counter (simple integer increment).
     var metrics: MetricsCollector?
@@ -69,7 +97,8 @@ final class AttentionExecutor {
     init(context: MetalContext, tileRows: Int = defaultTileRows,
          numerics: AttentionNumerics = .legacy,
          monitor: NumericalMonitor? = nil,
-         layout: AttentionInputLayout = .headMajor) {
+         layout: AttentionInputLayout = .headMajor,
+         attentionBackend: DiTAttentionBackend = .legacyHeadMajorMPS) {
         precondition(tileRows > 0)
         self.context = context
         self.buffers = BufferPool(device: context.device)
@@ -77,6 +106,7 @@ final class AttentionExecutor {
         self.tileRows = tileRows
         self.numerics = numerics
         self.layout = layout
+        self.attentionBackend = attentionBackend
     }
 
     func maximumScoreScratchBytes(keyCount: Int, queryCount: Int? = nil) throws -> Int {
@@ -148,6 +178,34 @@ final class AttentionExecutor {
             guard let tokenStride else {
                 throw AnimapkError.validation(
                     "P4 token-major attention requires a token stride")
+            }
+            switch attentionBackend {
+            case .streamingMPS:
+                // P7-A: streaming/online-softmax MPS — same strided per-head
+                // views, but keys are processed in chunks with a running
+                // FP32 max/sum and FP32 output accumulator.
+                try encodeStreamingTokenMajor(
+                    commandBuffer: commandBuffer, query: query, queryOffset: queryOffset,
+                    key: key, keyOffset: keyOffset, value: value, valueOffset: valueOffset,
+                    output: output, outputOffset: outputOffset,
+                    heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
+                    kvHeads: kvHeads, tokenStride: tokenStride, causal: causal, probe: probe,
+                    halfBytes: halfBytes, scale: scale)
+                return
+            case .metalFlash:
+                // P7-B: DiT-specialized pure-Metal Flash attention. Strict
+                // shape requirements; anything else throws (never corrupts).
+                try encodeMetalFlash(
+                    commandBuffer: commandBuffer, query: query, queryOffset: queryOffset,
+                    key: key, keyOffset: keyOffset, value: value, valueOffset: valueOffset,
+                    output: output, outputOffset: outputOffset,
+                    heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
+                    kvHeads: kvHeads, tokenStride: tokenStride, causal: causal,
+                    scoreScratch: scoreScratch, softmax: softmax, halfBytes: halfBytes,
+                    scoreRowBytes: scoreRowBytes, scale: scale)
+                return
+            case .legacyHeadMajorMPS, .stridedTokenMajorMPS:
+                break
             }
             try encodeTokenMajor(
                 commandBuffer: commandBuffer, query: query, queryOffset: queryOffset,
@@ -435,6 +493,243 @@ final class AttentionExecutor {
                 queryBase += rows
             }
         }
+    }
+
+    /// P7-A: streaming/online-softmax MPS attention over the strided
+    /// token-major layout (DiT). MPS computes QK^T and PV per KEY CHUNK
+    /// (Bk ∈ {64, 128, 256}); a tiny fp16 `[rows, Bk]` score tile is the only
+    /// live score memory. The online-softmax state (running max FP32, running
+    /// sum FP32, FP32 output accumulator) is carried across chunks by three
+    /// compute kernels; every chunk of every query tile encodes into the
+    /// SAME block command buffer — NO per-chunk wait, NO added command-buffer
+    /// completion. The output accumulator is NEVER fp16.
+    private func encodeStreamingTokenMajor(
+        commandBuffer: MTLCommandBuffer,
+        query: MTLBuffer, queryOffset: Int,
+        key: MTLBuffer, keyOffset: Int,
+        value: MTLBuffer, valueOffset: Int,
+        output: MTLBuffer, outputOffset: Int,
+        heads: Int, queryCount: Int, keyCount: Int, headDim: Int,
+        kvHeads: Int, tokenStride: Int,
+        causal: Bool, probe: NumericalMonitor.Probe?,
+        halfBytes: Int, scale: Double
+    ) throws {
+        // The online-softmax kernels are non-causal (DiT self/cross are
+        // non-causal); a causal streaming request would silently produce
+        // wrong results, so refuse loudly.
+        guard !causal else {
+            throw AnimapkError.validation("P7 streaming MPS attention requires non-causal attention")
+        }
+        _ = kvHeads  // == heads, validated by the token-major layout rules
+        let keyChunks = [64, 128, 256]
+        // Bound the chunk by the key count so a small test (e.g. K=5) still
+        // exercises a single chunk and never over-allocates.
+        let chunkColumns = keyChunks.first(where: { $0 <= keyCount }) ?? max(1, keyCount)
+        let prepare = try context.pipeline(named: "streaming_softmax_prepare")
+        let accumulate = try context.pipeline(named: "streaming_chunk_accumulate")
+        let finalize = try context.pipeline(named: "streaming_softmax_finalize")
+        let scoreScratch = buffers.buffer(
+            key: "attention.stream.scores.fp16",
+            bytes: try checkedProduct(tileRows, chunkColumns, halfBytes))
+        // FP32 online state: max/sum/alpha per query-tile row + output
+        // accumulator [tileRows, headDim]. Bounded by the real query count.
+        let maxTileRows = min(tileRows, queryCount)
+        let stateBytes = try checkedProduct(maxTileRows, MemoryLayout<Float>.stride)
+        let accumulatorBytes = try checkedProduct(maxTileRows, headDim, MemoryLayout<Float>.stride)
+        let runningMax = buffers.buffer(key: "attention.stream.max.f32", bytes: stateBytes)
+        let runningSum = buffers.buffer(key: "attention.stream.sum.f32", bytes: stateBytes)
+        let runningAlpha = buffers.buffer(key: "attention.stream.alpha.f32", bytes: stateBytes)
+        let accumulator = buffers.buffer(key: "attention.stream.acc.f32", bytes: accumulatorBytes)
+        let scaleFloat = Float(scale)
+        let reduction = reductionThreads(limit: prepare.maxTotalThreadsPerThreadgroup)
+
+        for head in 0..<heads {
+            let keyMatrix = tokenMajorHeadMatrix(
+                buffer: key, baseOffset: keyOffset, head: head,
+                rowBase: 0, rows: keyCount, tokenStride: tokenStride, headDim: headDim)
+            let valueMatrix = tokenMajorHeadMatrix(
+                buffer: value, baseOffset: valueOffset, head: head,
+                rowBase: 0, rows: keyCount, tokenStride: tokenStride, headDim: headDim)
+            var queryBase = 0
+            while queryBase < queryCount {
+                let rows = min(tileRows, queryCount - queryBase)
+                let queryMatrix = tokenMajorHeadMatrix(
+                    buffer: query, baseOffset: queryOffset, head: head,
+                    rowBase: queryBase, rows: rows, tokenStride: tokenStride, headDim: headDim)
+                let outputMatrix = tokenMajorHeadMatrix(
+                    buffer: output, baseOffset: outputOffset, head: head,
+                    rowBase: queryBase, rows: rows, tokenStride: tokenStride, headDim: headDim)
+                var chunkBase = 0
+                var chunkIndex = 0
+                while chunkBase < keyCount {
+                    let columns = min(chunkColumns, keyCount - chunkBase)
+                    let scoreMatrix = MPSMatrix(
+                        buffer: scoreScratch,
+                        descriptor: MPSMatrixDescriptor(rows: rows, columns: columns,
+                                                        rowBytes: columns * halfBytes, dataType: .float16))
+                    // QK^T for this chunk only (strided per-head views).
+                    MPSMatrixMultiplication(
+                        device: context.device, transposeLeft: false, transposeRight: true,
+                        resultRows: rows, resultColumns: columns, interiorColumns: headDim,
+                        alpha: scale, beta: 0).encode(
+                            commandBuffer: commandBuffer, leftMatrix: queryMatrix,
+                            rightMatrix: keyMatrix, resultMatrix: scoreMatrix)
+
+                    // Online-softmax prepare: update running max/sum, rewrite
+                    // the chunk scores to rescaled probabilities, store alpha.
+                    guard let prepareEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                        throw AnimapkError.validation("failed to create streaming attention prepare encoder")
+                    }
+                    var rowCount = UInt32(rows), colCount = UInt32(columns)
+                    var stride = UInt32(columns)
+                    var firstChunk = chunkIndex == 0 ? UInt32(1) : UInt32(0)
+                    prepareEncoder.setComputePipelineState(prepare)
+                    prepareEncoder.setBuffer(scoreScratch, offset: 0, index: 0)
+                    prepareEncoder.setBuffer(runningMax, offset: 0, index: 1)
+                    prepareEncoder.setBuffer(runningSum, offset: 0, index: 2)
+                    prepareEncoder.setBuffer(runningAlpha, offset: 0, index: 3)
+                    prepareEncoder.setBytes(&rowCount, length: 4, index: 4)
+                    prepareEncoder.setBytes(&colCount, length: 4, index: 5)
+                    prepareEncoder.setBytes(&stride, length: 4, index: 6)
+                    prepareEncoder.setBytes(&firstChunk, length: 4, index: 7)
+                    prepareEncoder.dispatchThreadgroups(
+                        MTLSize(width: rows, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: reduction, height: 1, depth: 1))
+                    prepareEncoder.endEncoding()
+
+                    // PV for this chunk (MPS).
+                    let chunkOutMatrix = MPSMatrix(
+                        buffer: buffers.buffer(
+                            key: "attention.stream.chunkOut.fp16",
+                            bytes: try checkedProduct(rows, headDim, halfBytes)),
+                        descriptor: MPSMatrixDescriptor(rows: rows, columns: headDim,
+                                                        rowBytes: headDim * halfBytes, dataType: .float16))
+                    MPSMatrixMultiplication(
+                        device: context.device, transposeLeft: false, transposeRight: false,
+                        resultRows: rows, resultColumns: headDim, interiorColumns: columns,
+                        alpha: 1, beta: 0).encode(
+                            commandBuffer: commandBuffer, leftMatrix: scoreMatrix,
+                            rightMatrix: valueMatrix, resultMatrix: chunkOutMatrix)
+
+                    // FP32 accumulate: acc = alpha * acc + float(chunkOut).
+                    guard let accEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                        throw AnimapkError.validation("failed to create streaming attention accumulate encoder")
+                    }
+                    accEncoder.setComputePipelineState(accumulate)
+                    accEncoder.setBuffer(chunkOutMatrix.buffer, offset: chunkOutMatrix.offset, index: 0)
+                    accEncoder.setBuffer(accumulator, offset: 0, index: 1)
+                    accEncoder.setBuffer(runningAlpha, offset: 0, index: 2)
+                    accEncoder.setBytes(&rowCount, length: 4, index: 3)
+                    var dim = UInt32(headDim)
+                    accEncoder.setBytes(&dim, length: 4, index: 4)
+                    accEncoder.setBytes(&firstChunk, length: 4, index: 5)
+                    let width = min(accumulate.threadExecutionWidth, accumulate.maxTotalThreadsPerThreadgroup)
+                    accEncoder.dispatchThreads(
+                        MTLSize(width: headDim, height: rows, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+                    accEncoder.endEncoding()
+
+                    chunkBase += columns
+                    chunkIndex += 1
+                }
+                // Finalize: output = half(acc / runningSum) into the
+                // token-major output view (strided write).
+                guard let finalizeEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                    throw AnimapkError.validation("failed to create streaming attention finalize encoder")
+                }
+                var rowCount = UInt32(rows), dim = UInt32(headDim)
+                var stride = UInt32(tokenStride)
+                finalizeEncoder.setComputePipelineState(finalize)
+                finalizeEncoder.setBuffer(accumulator, offset: 0, index: 0)
+                finalizeEncoder.setBuffer(runningSum, offset: 0, index: 1)
+                finalizeEncoder.setBuffer(outputMatrix.buffer, offset: outputMatrix.offset, index: 2)
+                finalizeEncoder.setBytes(&rowCount, length: 4, index: 3)
+                finalizeEncoder.setBytes(&dim, length: 4, index: 4)
+                finalizeEncoder.setBytes(&stride, length: 4, index: 5)
+                let width = min(finalize.threadExecutionWidth, finalize.maxTotalThreadsPerThreadgroup)
+                finalizeEncoder.dispatchThreads(
+                    MTLSize(width: headDim, height: rows, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+                finalizeEncoder.endEncoding()
+
+                // P2-C: the score tile and PV result materialized by MPS for
+                // this chunk (counted once each); the fp32 state traffic is
+                // internal to the backend and not double-counted.
+                metrics?.recordConversionBytes(UInt64(rows * chunkColumns * halfBytes))
+                metrics?.recordConversionBytes(UInt64(rows * headDim * halfBytes))
+                metrics?.recordAttentionQueryTile()
+                queryBase += rows
+            }
+        }
+    }
+
+    /// P7-B: DiT-specialized pure-Metal Flash-style online attention. Strict
+    /// shape gate: headDim == 128, heads == 16, non-causal, token-major with
+    /// tokenStride == heads * headDim, and the selected compute pipeline must
+    /// expose `threadExecutionWidth == 32` (the kernel's SIMD-group mapping
+    /// assumes 32 lanes). Anything else throws loudly — the backend never
+    /// runs on an unsupported shape. Qwen/VAE/adapter (head-major layout)
+    /// can never reach this path.
+    private func encodeMetalFlash(
+        commandBuffer: MTLCommandBuffer,
+        query: MTLBuffer, queryOffset: Int,
+        key: MTLBuffer, keyOffset: Int,
+        value: MTLBuffer, valueOffset: Int,
+        output: MTLBuffer, outputOffset: Int,
+        heads: Int, queryCount: Int, keyCount: Int, headDim: Int,
+        kvHeads: Int, tokenStride: Int,
+        causal: Bool, probe: NumericalMonitor.Probe?,
+        scoreScratch: MTLBuffer, softmax: MTLComputePipelineState,
+        halfBytes: Int, scoreRowBytes: Int, scale: Double
+    ) throws {
+        guard !causal, heads == 16, headDim == 128,
+              tokenStride == heads * headDim, kvHeads == heads else {
+            throw AnimapkError.validation(
+                "P7 Metal Flash attention is DiT-specialized: requires heads == 16, headDim == 128, non-causal, tokenStride == heads * headDim")
+        }
+        // A12-safe gate: the kernel's SIMD-group mapping assumes a 32-lane
+        // SIMD width. If the device/pipeline reports anything else, mark the
+        // backend unsupported for this device and refuse to run.
+        let pipeline = try context.pipeline(named: "dit_flash_attention_h128_q4_k32")
+        guard pipeline.threadExecutionWidth == 32 else {
+            throw AnimapkError.validation(
+                "P7 Metal Flash attention requires a 32-lane SIMD pipeline (threadExecutionWidth == 32); backend unsupported on this device")
+        }
+        // The K=16 profile is the fallback for devices whose threadgroup
+        // memory or occupancy prefers a smaller tile; it is selected at the
+        // call site and must pass the same SIMD gate.
+        let k16Pipeline = try context.pipeline(named: "dit_flash_attention_h128_q4_k16")
+        guard k16Pipeline.threadExecutionWidth == 32 else {
+            throw AnimapkError.validation(
+                "P7 Metal Flash attention requires a 32-lane SIMD pipeline (threadExecutionWidth == 32); backend unsupported on this device")
+        }
+        // One threadgroup covers 4 query rows; grid = (ceil(queryCount/4),
+        // 1, heads). group.z carries the head index into the kernel.
+        let groupsPerHead = (queryCount + 3) / 4
+        var queryCountU = UInt32(queryCount), keyCountU = UInt32(keyCount)
+        var tokenStrideU = UInt32(tokenStride)
+        var scaleF = Float(scale)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create Metal Flash attention encoder")
+        }
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(query, offset: queryOffset, index: 0)
+        encoder.setBuffer(key, offset: keyOffset, index: 1)
+        encoder.setBuffer(value, offset: valueOffset, index: 2)
+        encoder.setBuffer(output, offset: outputOffset, index: 3)
+        encoder.setBytes(&queryCountU, length: 4, index: 4)
+        encoder.setBytes(&keyCountU, length: 4, index: 5)
+        encoder.setBytes(&tokenStrideU, length: 4, index: 6)
+        encoder.setBytes(&scaleF, length: 4, index: 7)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: groupsPerHead, height: 1, depth: heads),
+            threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+        encoder.endEncoding()
+        // P2-C: every output element materialized once (the backend writes
+        // the token-major attended buffer directly); no score tile is ever
+        // materialized by the Flash path.
+        metrics?.recordConversionBytes(UInt64(queryCount * tokenStride * halfBytes))
+        metrics?.recordAttentionQueryTile()
     }
 
     /// P4-B: strided per-head matrix view of a token-major `[rows, tokenStride]`

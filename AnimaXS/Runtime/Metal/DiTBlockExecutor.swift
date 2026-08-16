@@ -121,7 +121,8 @@ final class DiTBlockExecutor {
             ? .bf16Compute : attentionNumerics
         self.attention = AttentionExecutor(
             context: context, tileRows: optimization.attentionTileRows,
-            numerics: effectiveAttention, monitor: monitor)
+            numerics: effectiveAttention, monitor: monitor,
+            attentionBackend: optimization.attentionBackend)
     }
 
     /// Mutates `residual` in place. All input buffers are tightly packed and use these types:
@@ -326,7 +327,27 @@ final class DiTBlockExecutor {
         // buffers DIRECTLY to MPS via strided per-head views, so the four
         // head-major transpose buffers/kernels are not allocated or encoded.
         // The legacy head-major path stays byte-for-byte for A/B.
-        let strided = optimization.stridedTokenMajorAttention
+        // P7: the backend selector picks between the P4 strided MPS path,
+        // the P7-A streaming online-softmax MPS path, and the P7-B pure-Metal
+        // Flash path. `.legacyHeadMajorMPS` always uses the transposed
+        // head-major layout below; `.stridedTokenMajorMPS` honors the P4
+        // boolean so turning the toggle off still selects the legacy path.
+        let strided: Bool
+        switch optimization.attentionBackend {
+        case .legacyHeadMajorMPS:
+            strided = false
+        case .stridedTokenMajorMPS:
+            strided = optimization.stridedTokenMajorAttention
+        case .streamingMPS, .metalFlash:
+            // P7 backends REQUIRE the token-major layout; when the P4 toggle
+            // is off they must not silently fall back to the transposed path
+            // (that would change what the device measures).
+            guard optimization.stridedTokenMajorAttention else {
+                throw AnimapkError.validation(
+                    "P7 attention backend \(optimization.attentionBackend.rawValue) requires the strided token-major toggle to be ON")
+            }
+            strided = true
+        }
         let queryWeight = cross ? weights.crossQ : weights.selfQ
         let keyWeight = cross ? weights.crossK : weights.selfK
         let valueWeight = cross ? weights.crossV : weights.selfV

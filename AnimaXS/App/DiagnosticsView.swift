@@ -168,6 +168,12 @@ struct DiagnosticsView: View {
                 .disabled(isGenerating)
             Toggle("Mmap no-copy weight source (P6, experimental)", isOn: noCopyWeightSourceBinding)
                 .disabled(isGenerating)
+            Picker("DiT attention backend (P7)", selection: attentionBackendBinding) {
+                ForEach(DiTAttentionBackend.allCases, id: \.self) { backend in
+                    Text(backend.rawValue).tag(backend)
+                }
+            }
+            .disabled(isGenerating)
             Button("Reset to current baseline") {
                 optimizationSettings.resetToBaseline()
             }
@@ -238,6 +244,12 @@ struct DiagnosticsView: View {
         Binding(
             get: { optimizationSettings.noCopyWeightSource },
             set: { optimizationSettings.setNoCopyWeightSource($0) })
+    }
+
+    private var attentionBackendBinding: Binding<DiTAttentionBackend> {
+        Binding(
+            get: { optimizationSettings.attentionBackend },
+            set: { optimizationSettings.setAttentionBackend($0) })
     }
 
     @ViewBuilder

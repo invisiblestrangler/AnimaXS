@@ -1894,3 +1894,393 @@ kernel void probe_f32_stats(
         atomic_fetch_max_explicit(&atom[probeSlot * NUM_SLOT_UINTS + 1], partialMax[0], memory_order_relaxed);
     }
 }
+
+// ---------------------------------------------------------------------------
+// P7-A: streaming/online-softmax attention kernels.
+//
+// The strided token-major MPS path (P4) materializes a full fp16
+// [queryTile, keyCount] score tile. P7-A keeps MPS for QK and PV but
+// processes keys in CHUNKS so only a [queryTile, keyChunk] score tile is
+// ever live, and carries the online-softmax state between chunks. All chunks
+// of a query tile encode into the SAME block command buffer: chunk (k+1)
+// reads state written by chunk k purely via GPU ordering (each chunk is a
+// separate encoder; encoder boundaries act as barriers), so there is NO
+// per-chunk wait and NO extra command-buffer completion.
+//
+// State buffer layout (per query row; chunkCount rows, e.g. 128; all FP32):
+//   runningMax[row]     — running max of scaled scores
+//   runningSum[row]     — running sum of exp(score - runningMax)
+//   runningAlpha[row]   — rescale factor exp(oldMax - newMax) of the LAST
+//                         prepare pass (1.0 on the first chunk)
+//   accumulator[row * headDim + d] — running output (alpha-rescaled)
+// The PV result of every chunk is accumulated into the FP32 accumulator —
+// NEVER into an fp16 accumulator — and only the final chunk divides by the
+// running sum and rounds to half.
+// ---------------------------------------------------------------------------
+
+// P7-A: given the fp16 scores of ONE key chunk (row-major [rows, rowStride]
+// halves; rowStride = chunkColumns for the tight MPS score tile), update the
+// running online-softmax state and rewrite the scores tile in place to the
+// RESCALED chunk probabilities (exp(score - newMax) * alpha). One threadgroup
+// per query row; threads reduce over the chunk columns.
+kernel void streaming_softmax_prepare(
+    device half       *scores       [[buffer(0)]],   // in/out [rows, rowStride]
+    device float      *runningMax   [[buffer(1)]],   // in/out [rows]
+    device float      *runningSum   [[buffer(2)]],   // in/out [rows]
+    device float      *runningAlpha [[buffer(3)]],   // out [rows]
+    constant uint     &rows         [[buffer(4)]],
+    constant uint     &columns      [[buffer(5)]],   // chunkColumns (Bk)
+    constant uint     &rowStride    [[buffer(6)]],   // padded row stride (halves)
+    constant uint     &firstChunk   [[buffer(7)]],   // 1 on the first chunk
+    uint3 group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint3 threads [[threads_per_threadgroup]])
+{
+    uint row = group.x;
+    if (row >= rows) return;
+    uint threadCount = threads.x;
+    threadgroup float partial[256];
+
+    // Chunk-local max (fp32).
+    float localMax = -INFINITY;
+    for (uint column = tid; column < columns; column += threadCount) {
+        localMax = max(localMax, float(scores[row * rowStride + column]));
+    }
+    partial[tid] = localMax;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] = max(partial[tid], partial[tid + stride]);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float chunkMax = partial[0];
+
+    // Merge with the running max (online-softmax rescale).
+    float oldMax = runningMax[row];
+    float newMax = firstChunk != 0 ? chunkMax : max(oldMax, chunkMax);
+    float alpha = firstChunk != 0 ? 1.0f : exp(oldMax - newMax);
+    runningMax[row] = newMax;
+    if (tid == 0) runningAlpha[row] = alpha;
+
+    // Rewrite this chunk's scores to exp(score - newMax) * alpha and add the
+    // chunk's row sum (fp32) into the running sum.
+    float localSum = 0.0f;
+    for (uint column = tid; column < columns; column += threadCount) {
+        float p = exp(float(scores[row * rowStride + column]) - newMax) * alpha;
+        scores[row * rowStride + column] = half(p);
+        localSum += p;
+    }
+    partial[tid] = localSum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = threadCount >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) partial[tid] += partial[tid + stride];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) runningSum[row] = firstChunk != 0 ? partial[0] : runningSum[row] + partial[0];
+}
+
+// P7-A: rescale the running FP32 output accumulator by this chunk's alpha
+// (stored by the prepare pass) and accumulate the fp16 chunk PV result:
+// acc = alpha * acc + float(chunkOut). The PV result is row-major
+// [rows, headDim] with rowBytes = headDim * 2 (tight). Threads iterate over
+// the [rows, headDim] tile.
+kernel void streaming_chunk_accumulate(
+    device const half *chunkOut     [[buffer(0)]],   // MPS PV result [rows, headDim]
+    device float      *accumulator  [[buffer(1)]],   // in/out [rows, headDim]
+    device const float *runningAlpha [[buffer(2)]],  // [rows] alpha of this chunk
+    constant uint     &rows         [[buffer(3)]],
+    constant uint     &headDim      [[buffer(4)]],
+    constant uint     &firstChunk   [[buffer(5)]],   // 1 on the first chunk
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= headDim || gid.y >= rows) return;
+    uint index = gid.y * headDim + gid.x;
+    accumulator[index] = (firstChunk != 0)
+        ? float(chunkOut[index])
+        : fma(runningAlpha[gid.y], accumulator[index], float(chunkOut[index]));
+}
+
+// P7-A: finalize one query tile of streaming attention:
+// output = half(acc / runningSum) into a TOKEN-MAJOR [rows, tokenStride]
+// buffer (each head owns headDim contiguous columns; column base head*headDim
+// is included in the buffer offset chosen by the caller). One thread per
+// [row, headDim] element.
+kernel void streaming_softmax_finalize(
+    device const float *accumulator  [[buffer(0)]],
+    device const float *runningSum   [[buffer(1)]],
+    device half        *output       [[buffer(2)]],   // token-major [rows, tokenStride]
+    constant uint      &rows         [[buffer(3)]],
+    constant uint      &headDim      [[buffer(4)]],
+    constant uint      &tokenStride  [[buffer(5)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= headDim || gid.y >= rows) return;
+    float sum = runningSum[gid.y];
+    float value = sum > 0.0f ? accumulator[gid.y * headDim + gid.x] / sum : 0.0f;
+    output[gid.y * tokenStride + gid.x] = half(value);
+}
+
+// ---------------------------------------------------------------------------
+// P7-B: DiT-specialized pure-Metal Flash-style online attention.
+//
+// STRICTLY DiT-specialized (NOT a generic transformer library):
+//   - headDim == 128 only, heads == 16, non-causal
+//   - token-major Q/K/V `[rows, tokenStride]` half buffers (tokenStride 2048)
+//   - token-major output, FP32 score/softmax/output accumulation
+// Any other shape must be rejected by the Swift side BEFORE this kernel runs.
+//
+// A12-safe: NO simdgroup_matrix, NO Metal 3. Score dots use `simd_sum` over
+// the 32 lanes of a SIMD group (threadExecutionWidth == 32 is required); each
+// lane owns 4 of the 128 headDim dims. Online-softmax running max/sum and the
+// output accumulator are FP32; running-max/rescale is MANDATORY (never a raw
+// exp(score), never an fp16 denominator/accumulator).
+//
+// Profile h128_q4_k32: 4 query rows per threadgroup, 4 SIMD groups (128
+// threads), K/V tile 32 keys. Each SIMD group computes ONE query row; every
+// lane of the group maintains IDENTICAL running max/sum scalars (simd_max
+// broadcasts, and the per-lane chunk sums are identical because every lane
+// computes the full score via simd_sum), so no lane shuffles are needed for
+// the final normalization. Lane d of the SIMD group owns output dim
+// (d * 32 + lane), matching the dot layout (dim d*32+lane), so the PV
+// accumulation needs no lane data movement either.
+// ---------------------------------------------------------------------------
+
+// P7-B: DiT Flash attention, headDim=128, 4 query rows/threadgroup, K=32.
+// Output is token-major [queryCount, tokenStride]; each head owns headDim
+// contiguous columns of every row (column base = head * 128).
+kernel void dit_flash_attention_h128_q4_k32(
+    device const half *query    [[buffer(0)]],  // [queryCount, tokenStride]
+    device const half *key      [[buffer(1)]],  // [keyCount, tokenStride]
+    device const half *value    [[buffer(2)]],  // [keyCount, tokenStride]
+    device half       *output   [[buffer(3)]],  // [queryCount, tokenStride]
+    constant uint     &queryCount [[buffer(4)]],
+    constant uint     &keyCount   [[buffer(5)]],
+    constant uint     &tokenStride [[buffer(6)]],
+    constant float    &scale      [[buffer(7)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_index_in_threadgroup]],
+    uint3 simdGroup [[simdgroup_index_in_threadgroup]],
+    uint simdLane [[thread_index_in_simdgroup]])
+{
+    constexpr uint HEAD_DIM = 128;
+    constexpr uint K_TILE = 32;
+    constexpr uint SIMD_GROUPS = 4;      // 128 threads / 32 lanes
+    constexpr uint THREADS = 128;
+
+    uint lane = simdLane;                 // 0..31
+    uint simd = simdGroup.x;              // 0..3  → query row within the group
+    uint head = group.z;                  // head index (grid.z = heads)
+    uint queryRow = group.x * SIMD_GROUPS + simd;
+    if (queryRow >= queryCount) return;
+
+    // Threadgroup K/V tile: [K_TILE][HEAD_DIM] halves, 8 KiB each (16 KiB total).
+    threadgroup half kTile[K_TILE * HEAD_DIM];
+    threadgroup half vTile[K_TILE * HEAD_DIM];
+
+    uint tid = tid3.x;                    // 0..127
+    uint headColBase = head * HEAD_DIM;   // column base of this head in the token row
+
+    // Running online-softmax state (FP32, IDENTICAL on every lane).
+    float rowMax = -INFINITY;
+    float rowSum = 0.0f;
+    // FP32 output accumulator: lane d of the SIMD group owns output dim
+    // (d * 32 + lane), 4 dims per lane.
+    float acc[HEAD_DIM / 32];             // 4 floats per lane
+
+    #pragma unroll
+    for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+        acc[d] = 0.0f;
+    }
+
+    uint keyBase = 0;
+    while (keyBase < keyCount) {
+        // Cooperative load of the K/V tile [K_TILE][HEAD_DIM] into threadgroup
+        // memory (16 KiB total for the K=32 profile).
+        #pragma unroll
+        for (uint i = 0; i < (K_TILE * HEAD_DIM) / THREADS; ++i) {
+            uint index = tid + i * THREADS;
+            uint kRow = keyBase + index / HEAD_DIM;
+            uint kCol = index % HEAD_DIM;
+            if (kRow < keyCount) {
+                kTile[index] = key[kRow * tokenStride + headColBase + kCol];
+                vTile[index] = value[kRow * tokenStride + headColBase + kCol];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        uint kCount = min(K_TILE, keyCount - keyBase);
+
+        // Pass 1: chunk-local max of the scaled scores for this query row.
+        // Each lane computes a 4-dim partial dot; simd_max reduces (and
+        // broadcasts) the chunk max over the 32 lanes.
+        float localMax = -INFINITY;
+                for (uint k = 0; k < K_TILE; ++k) {
+            if (k >= kCount) break;
+            float dot = 0.0f;
+            #pragma unroll
+            for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+                dot = fma(float(kTile[k * HEAD_DIM + d * 32 + lane]),
+                          float(query[queryRow * tokenStride + headColBase + d * 32 + lane]), dot);
+            }
+            localMax = max(localMax, dot * scale);
+        }
+        float chunkMax = simd_max(localMax);   // identical on all lanes
+
+        // Online-softmax rescale (running max/sum in FP32; MANDATORY).
+        float newMax = (keyBase == 0) ? chunkMax : max(rowMax, chunkMax);
+        float alpha = (keyBase == 0) ? 1.0f : exp(rowMax - newMax);
+        rowMax = newMax;
+
+        // Rescale the OLD accumulator BEFORE adding this chunk's contribution.
+        #pragma unroll
+        for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+            acc[d] = acc[d] * alpha;
+        }
+
+        // Pass 2: chunk probabilities + PV accumulation. The full score is
+        // recomputed per lane as a partial dot, then `simd_sum` broadcasts the
+        // FULL dot to every lane, so p = exp(score*scale - newMax) is
+        // identical on all lanes and no score shuffle is needed.
+        float chunkSum = 0.0f;
+                for (uint k = 0; k < K_TILE; ++k) {
+            if (k >= kCount) break;
+            float dot = 0.0f;
+            #pragma unroll
+            for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+                dot = fma(float(kTile[k * HEAD_DIM + d * 32 + lane]),
+                          float(query[queryRow * tokenStride + headColBase + d * 32 + lane]), dot);
+            }
+            float p = exp(simd_sum(dot) * scale - newMax);
+            chunkSum += p;
+            #pragma unroll
+            for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+                acc[d] = fma(p, float(vTile[k * HEAD_DIM + d * 32 + lane]), acc[d]);
+            }
+        }
+        // chunkSum is identical on every lane (identical p sequence), so every
+        // lane updates rowSum identically — no broadcast required.
+        rowSum = rowSum * alpha + chunkSum;
+
+        // The next chunk's cooperative load must not overwrite the tile while
+        // any lane is still reading it.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        keyBase += K_TILE;
+    }
+
+    // Finalize: output = half(acc / rowSum), token-major write.
+    float inverseSum = 1.0f / rowSum;
+    #pragma unroll
+    for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+        output[queryRow * tokenStride + headColBase + d * 32 + lane] = half(acc[d] * inverseSum);
+    }
+}
+
+// P7-B: K=16 profile of the same DiT Flash attention. Same threadgroup shape
+// (4 query rows, 128 threads) with a smaller K/V tile (4 KiB K + 4 KiB V) for
+// devices/pipelines whose threadgroup memory or occupancy prefers it. The math
+// is byte-identical to the K=32 profile — only the key chunk size changes.
+kernel void dit_flash_attention_h128_q4_k16(
+    device const half *query    [[buffer(0)]],
+    device const half *key      [[buffer(1)]],
+    device const half *value    [[buffer(2)]],
+    device half       *output   [[buffer(3)]],
+    constant uint     &queryCount [[buffer(4)]],
+    constant uint     &keyCount   [[buffer(5)]],
+    constant uint     &tokenStride [[buffer(6)]],
+    constant float    &scale      [[buffer(7)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_index_in_threadgroup]],
+    uint3 simdGroup [[simdgroup_index_in_threadgroup]],
+    uint simdLane [[thread_index_in_simdgroup]])
+{
+    constexpr uint HEAD_DIM = 128;
+    constexpr uint K_TILE = 16;
+    constexpr uint SIMD_GROUPS = 4;
+    constexpr uint THREADS = 128;
+
+    uint lane = simdLane;
+    uint simd = simdGroup.x;
+    uint head = group.z;                  // head index (grid.z = heads)
+    uint queryRow = group.x * SIMD_GROUPS + simd;
+    if (queryRow >= queryCount) return;
+
+    threadgroup half kTile[K_TILE * HEAD_DIM];
+    threadgroup half vTile[K_TILE * HEAD_DIM];
+
+    uint tid = tid3.x;
+    uint headColBase = head * HEAD_DIM;
+
+    float rowMax = -INFINITY;
+    float rowSum = 0.0f;
+    float acc[HEAD_DIM / 32];
+
+    #pragma unroll
+    for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+        acc[d] = 0.0f;
+    }
+
+    uint keyBase = 0;
+    while (keyBase < keyCount) {
+        #pragma unroll
+        for (uint i = 0; i < (K_TILE * HEAD_DIM) / THREADS; ++i) {
+            uint index = tid + i * THREADS;
+            uint kRow = keyBase + index / HEAD_DIM;
+            uint kCol = index % HEAD_DIM;
+            if (kRow < keyCount) {
+                kTile[index] = key[kRow * tokenStride + headColBase + kCol];
+                vTile[index] = value[kRow * tokenStride + headColBase + kCol];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        uint kCount = min(K_TILE, keyCount - keyBase);
+
+        float localMax = -INFINITY;
+                for (uint k = 0; k < K_TILE; ++k) {
+            if (k >= kCount) break;
+            float dot = 0.0f;
+            #pragma unroll
+            for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+                dot = fma(float(kTile[k * HEAD_DIM + d * 32 + lane]),
+                          float(query[queryRow * tokenStride + headColBase + d * 32 + lane]), dot);
+            }
+            localMax = max(localMax, dot * scale);
+        }
+        float chunkMax = simd_max(localMax);
+
+        float newMax = (keyBase == 0) ? chunkMax : max(rowMax, chunkMax);
+        float alpha = (keyBase == 0) ? 1.0f : exp(rowMax - newMax);
+        rowMax = newMax;
+
+        #pragma unroll
+        for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+            acc[d] = acc[d] * alpha;
+        }
+
+        float chunkSum = 0.0f;
+                for (uint k = 0; k < K_TILE; ++k) {
+            if (k >= kCount) break;
+            float dot = 0.0f;
+            #pragma unroll
+            for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+                dot = fma(float(kTile[k * HEAD_DIM + d * 32 + lane]),
+                          float(query[queryRow * tokenStride + headColBase + d * 32 + lane]), dot);
+            }
+            float p = exp(simd_sum(dot) * scale - newMax);
+            chunkSum += p;
+            #pragma unroll
+            for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+                acc[d] = fma(p, float(vTile[k * HEAD_DIM + d * 32 + lane]), acc[d]);
+            }
+        }
+        rowSum = rowSum * alpha + chunkSum;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        keyBase += K_TILE;
+    }
+
+    float inverseSum = 1.0f / rowSum;
+    #pragma unroll
+    for (uint d = 0; d < HEAD_DIM / 32; ++d) {
+        output[queryRow * tokenStride + headColBase + d * 32 + lane] = half(acc[d] * inverseSum);
+    }
+}
