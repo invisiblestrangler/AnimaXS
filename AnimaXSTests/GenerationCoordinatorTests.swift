@@ -527,7 +527,7 @@ final class GenerationCoordinatorTests: XCTestCase {
 
     /// Synthetic MTLCommandBufferErrorDomain fault with the given code.
     private func makeFatalMetalError(
-        _ code: MTLCommandBufferError,
+        _ code: MTLCommandBufferError.Code,
         description: String
     ) -> NSError {
         NSError(
