@@ -51,6 +51,13 @@ actor ModelStore {
     private let verifier: ModelVerifier
     private let receiptStore: VerificationReceiptStore
     private var states: [ModelComponent: State] = [:]
+    /// True per-component single-flight guard, independent of published UI
+    /// state. Same-component acquisition paths (download / importPack /
+    /// repair / verifyExisting) are serialized: a second operation for the
+    /// same component is rejected with "operation already active" before it
+    /// can mutate the destination or start a second network transfer.
+    /// Different components operate independently.
+    private var activeOperations: Set<ModelComponent> = []
     private static let diskReserve: Int64 = 256 * 1_024 * 1_024
 
     init(
@@ -211,19 +218,35 @@ actor ModelStore {
     /// already-installed URL when the component is already ready.
     func download(_ entry: ModelManifestEntry) async throws -> URL {
         if case .ready(let url) = state(for: entry.component) { return url }
+        // True single-flight guard: reject a second same-component operation
+        // (download OR import/repair/verify) before any state mutation or
+        // network work. The published-state check above is only a fast path
+        // for the already-ready case; this guard is authoritative.
+        guard beginOperation(for: entry.component) else {
+            throw AnimapkError.validation(
+                "operation already active for \(entry.component.rawValue)")
+        }
+        defer { endOperation(for: entry.component) }
         switch state(for: entry.component) {
         case .downloading, .verifying:
             throw AnimapkError.validation("model transfer is already active")
         default:
             break
         }
-        return try await downloadAndInstall(entry, destination: localURL(for: entry))
+        return try await downloadAndInstallAssumingOperationHeld(entry, destination: localURL(for: entry))
     }
 
     /// Re-verifies an existing local file (full size + SHA-256) and, on
     /// success, refreshes its verification receipt. Used by the explicit
     /// "Retry" action on a failed row. Never downloads.
     func verifyExisting(_ entry: ModelManifestEntry) async throws -> URL {
+        // Single-flight: a same-component acquisition (download/import/repair)
+        // already in progress must not race a full re-verification.
+        guard beginOperation(for: entry.component) else {
+            throw AnimapkError.validation(
+                "operation already active for \(entry.component.rawValue)")
+        }
+        defer { endOperation(for: entry.component) }
         let destination = localURL(for: entry)
         guard FileManager.default.fileExists(atPath: destination.path) else {
             states[entry.component] = .missing
@@ -247,13 +270,21 @@ actor ModelStore {
     /// then redownload and install it. Throws if the existing file is absent
     /// or there is nothing to repair.
     func repair(_ entry: ModelManifestEntry) async throws -> URL {
+        // Acquire the single-flight token BEFORE any destructive work: a
+        // same-component download/import/verify already in progress must
+        // never race the destination removal below.
+        guard beginOperation(for: entry.component) else {
+            throw AnimapkError.validation(
+                "operation already active for \(entry.component.rawValue)")
+        }
+        defer { endOperation(for: entry.component) }
         let destination = localURL(for: entry)
         if FileManager.default.fileExists(atPath: destination.path) {
             // Remove the invalid file before reinstalling so the state machine
             // is not left pointing at a stale corrupt path.
             try FileManager.default.removeItem(at: destination)
         }
-        return try await downloadAndInstall(entry, destination: destination)
+        return try await downloadAndInstallAssumingOperationHeld(entry, destination: destination)
     }
 
     /// Legal-block fallback: import a user-provided `.animapk` file. The file
@@ -265,6 +296,13 @@ actor ModelStore {
     /// Rejects arbitrary mismatched files. The caller is responsible for
     /// holding security-scoped access to `source` for the whole operation.
     func importPack(_ entry: ModelManifestEntry, from source: URL) async throws -> URL {
+        // Single-flight: a same-component download/repair/verify in progress
+        // must reject this local import before any staging work begins.
+        guard beginOperation(for: entry.component) else {
+            throw AnimapkError.validation(
+                "operation already active for \(entry.component.rawValue)")
+        }
+        defer { endOperation(for: entry.component) }
         // Verify + copy in a single bounded-memory pass (size gate first).
         let variant = try Self.verifyAndStage(
             from: source, entry: entry, secureInstalls: secureInstalls,
@@ -323,6 +361,22 @@ actor ModelStore {
     }
 
     // MARK: - Private
+
+    /// Acquires the per-component single-flight token. Returns false when
+    /// another operation is already active for the same component (the caller
+    /// must then fail with "operation already active"). Different components
+    /// are independent. Actor-isolated, so this is race-free.
+    private func beginOperation(for component: ModelComponent) -> Bool {
+        guard !activeOperations.contains(component) else { return false }
+        activeOperations.insert(component)
+        return true
+    }
+
+    /// Releases the per-component single-flight token (paired with
+    /// `beginOperation` via `defer`).
+    private func endOperation(for component: ModelComponent) {
+        activeOperations.remove(component)
+    }
 
     /// Single-pass bounded-memory verify + stage. Streams `source` into an
     /// app-owned staging file in the install directory EXACTLY ONCE while
@@ -415,7 +469,12 @@ actor ModelStore {
         return (staging, variant)
     }
 
-    private func downloadAndInstall(
+    /// Download + verify + install body. ASSUMES the caller already holds the
+    /// per-component single-flight token (callers: `download`, which acquires
+    /// before any state mutation, and `repair`, which acquires before deleting
+    /// the destination). Never acquires the token itself, so a repair cannot
+    /// deadlock or double-acquire on its internal download.
+    private func downloadAndInstallAssumingOperationHeld(
         _ entry: ModelManifestEntry, destination: URL
     ) async throws -> URL {
         do {

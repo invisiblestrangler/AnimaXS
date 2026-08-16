@@ -66,6 +66,51 @@ final class ModelStoreTests: XCTestCase {
         var count: Int { _count }
     }
 
+    /// A downloader seam whose FIRST invocation parks on a continuation the
+    /// test controls: the store's download task stays genuinely suspended
+    /// inside the downloader while the test launches a competing operation.
+    /// Every invocation is counted; subsequent invocations resolve with the
+    /// fixture result immediately.
+    private final class SuspendingDownloader {
+        private var _count = 0
+        private var continuation: CheckedContinuation<Void, Never>?
+        private let result: URL
+        private let lock = NSLock()
+        init(result: URL) { self.result = result }
+
+        /// Invoked by `ModelStore` on the store actor. Returns once the test
+        /// calls `resume()`.
+        func makeDownloader() -> ModelStore.Downloader {
+            { _ in
+                self.lock.lock()
+                self._count += 1
+                let shouldSuspend = self._count == 1
+                self.lock.unlock()
+                if shouldSuspend {
+                    await withCheckedContinuation { continuation in
+                        self.lock.lock()
+                        self.continuation = continuation
+                        self.lock.unlock()
+                    }
+                }
+                return self.result
+            }
+        }
+
+        var count: Int {
+            lock.lock(); defer { lock.unlock() }
+            return _count
+        }
+
+        func resume() {
+            lock.lock()
+            let continuation = self.continuation
+            self.continuation = nil
+            lock.unlock()
+            continuation?.resume()
+        }
+    }
+
     private func stagingFiles(in dir: URL) -> [String] {
         (try? FileManager.default.contentsOfDirectory(atPath: dir.path))?
             .filter { $0.contains(".staging-") } ?? []
@@ -910,6 +955,222 @@ final class ModelStoreTests: XCTestCase {
         for dir in [models, root] where fm.fileExists(atPath: dir.path) {
             try? fm.removeItem(at: dir)
         }
+    }
+
+    // MARK: - Per-component single-flight operations (Task 6)
+
+    /// A valid fixture pack for `entry` written to a source URL, with the
+    /// matching bytes pre-staged as the "downloaded" result.
+    private func makeFixture(
+        root: URL, entry: ModelManifestEntry
+    ) throws -> (source: URL, downloaded: URL) {
+        let content = Data("pack bytes for \(entry.component)".utf8)
+        let source = root.appendingPathComponent("import-\(entry.filename)")
+        try content.write(to: source)
+        let downloaded = root.appendingPathComponent("download-\(entry.filename)")
+        try content.write(to: downloaded)
+        return (source, downloaded)
+    }
+
+    /// 1. Download A active (downloader suspended) -> Import A must fail with
+    /// "operation already active", the downloader stays at ONE invocation,
+    /// and the import must not touch the destination.
+    func testImportRejectedWhileDownloadActiveDoesNotMutateDestination() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { Self.cleanup(root) }
+        let entry = makeEntry(content: Data("pack bytes for \(ModelComponent.dit)".utf8))
+        let (source, downloaded) = try makeFixture(root: root, entry: entry)
+        let suspension = SuspendingDownloader(result: downloaded)
+        let store = try makeStore(root: root, downloader: suspension.makeDownloader())
+
+        // Launch download (parks inside the downloader) and wait until the
+        // downloader has actually been invoked, i.e. the operation token is
+        // held.
+        let downloadTask = Task { try await store.download(entry) }
+        while suspension.count == 0 {
+            await Task.yield()
+        }
+        // The downloader parks; the store cannot have reached .downloading
+        // yet — the guard is the single-flight token, not UI state.
+        let preImportState = await store.state(for: entry.component)
+        XCTAssertEqual(preImportState, .missing)
+
+        // Import for the same component must be rejected.
+        do {
+            _ = try await store.importPack(entry, from: source)
+            XCTFail("import while download is active must fail")
+        } catch {
+            let message = error.localizedDescription
+            XCTAssertTrue(message.contains("already active"),
+                          "expected operation-already-active error, got \(message)")
+        }
+        XCTAssertEqual(suspension.count, 1,
+                       "rejected import must not trigger a second downloader invocation")
+
+        // Let the download finish and verify the fixture installed intact.
+        suspension.resume()
+        let installed = try await downloadTask.value
+        XCTAssertEqual(try Data(contentsOf: installed), Data("pack bytes for \(ModelComponent.dit)".utf8))
+        XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("models", isDirectory: true)
+            .appendingPathComponent(entry.filename)), Data("pack bytes for \(ModelComponent.dit)".utf8))
+        // The user's source file is never consumed or moved by the rejected import.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
+    }
+
+    /// 2. Download A active (downloader suspended) -> Repair A must be
+    /// rejected and must NOT delete the installed destination.
+    func testRepairRejectedWhileDownloadActiveDoesNotDeleteDestination() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { Self.cleanup(root) }
+        let entry = makeEntry(content: Data("pack bytes for \(ModelComponent.dit)".utf8))
+        let modelsDir = root.appendingPathComponent("models", isDirectory: true)
+        try FileManager.default.createDirectory(at: modelsDir, withIntermediateDirectories: true)
+        let destination = modelsDir.appendingPathComponent(entry.filename)
+        // A corrupt destination a repair would normally delete.
+        try Data("corrupt bytes".utf8).write(to: destination)
+        let downloaded = root.appendingPathComponent("download.animapk")
+        try Data("pack bytes for \(ModelComponent.dit)".utf8).write(to: downloaded)
+        let suspension = SuspendingDownloader(result: downloaded)
+        let store = try makeStore(root: root, downloader: suspension.makeDownloader())
+
+        let downloadTask = Task { try await store.download(entry) }
+        while suspension.count == 0 {
+            await Task.yield()
+        }
+
+        // Repair for the same component must be rejected BEFORE it can remove
+        // the existing destination.
+        do {
+            _ = try await store.repair(entry)
+            XCTFail("repair while download is active must fail")
+        } catch {
+            let message = error.localizedDescription
+            XCTAssertTrue(message.contains("already active"),
+                          "expected operation-already-active error, got \(message)")
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: destination.path),
+                      "rejected repair must not delete the existing destination")
+        XCTAssertEqual(try Data(contentsOf: destination), Data("corrupt bytes".utf8),
+                       "destination untouched by rejected repair")
+
+        suspension.resume()
+        _ = try await downloadTask.value
+    }
+
+    /// 3. Import A active -> explicit Download A cannot begin.
+    func testDownloadRejectedWhileImportActive() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { Self.cleanup(root) }
+        let entry = makeEntry(content: Data("pack bytes for \(ModelComponent.dit)".utf8))
+        let source = root.appendingPathComponent("user-import.animapk")
+        try Data("pack bytes for \(ModelComponent.dit)".utf8).write(to: source)
+        // Any downloader invocation would be a real bug here.
+        let store = try makeStore(root: root, downloader: { _ in
+            XCTFail("download must not begin while import is active")
+            fatalError("network must never be touched")
+        })
+        let importTask = Task { try await store.importPack(entry, from: source) }
+        // Poll until the store observable state flips to .verifying: the
+        // import has begun and holds the single-flight token.
+        var importBegan = false
+        for _ in 0..<10_000 {
+            if case .verifying = await store.state(for: entry.component) {
+                importBegan = true
+                break
+            }
+            await Task.yield()
+        }
+        XCTAssertTrue(importBegan, "import must begin before the download attempt")
+
+        do {
+            _ = try await store.download(entry)
+            XCTFail("download while import is active must fail")
+        } catch {
+            let message = error.localizedDescription
+            XCTAssertTrue(message.contains("already active"),
+                          "expected operation-already-active error, got \(message)")
+        }
+        // The import itself must still succeed with the local file.
+        let installed = try await importTask.value
+        XCTAssertEqual(try Data(contentsOf: installed), Data("pack bytes for \(ModelComponent.dit)".utf8))
+    }
+
+    /// 4. Operations on DIFFERENT components proceed independently: a
+    /// suspended download of A never blocks an import of B.
+    func testDifferentComponentsProceedIndependently() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { Self.cleanup(root) }
+        let dit = makeEntry(content: Data("dit pack bytes".utf8), component: .dit)
+        let vae = makeEntry(content: Data("vae pack bytes".utf8), component: .vae)
+        let (vaeSource, vaeDownloaded) = try makeFixture(root: root, entry: vae)
+        let suspension = SuspendingDownloader(result: vaeDownloaded)
+        let store = try makeStore(root: root, downloader: suspension.makeDownloader())
+
+        // Download VAE parks; import of the DIFFERENT dit component must
+        // proceed (the token is per-component).
+        let downloadTask = Task { try await store.download(vae) }
+        while suspension.count == 0 {
+            await Task.yield()
+        }
+        let ditSource = root.appendingPathComponent("dit-import.animapk")
+        try Data("dit pack bytes".utf8).write(to: ditSource)
+        let ditInstalled = try await store.importPack(dit, from: ditSource)
+        XCTAssertEqual(try Data(contentsOf: ditInstalled), Data("dit pack bytes".utf8),
+                       "import of an independent component must proceed while VAE download is suspended")
+
+        suspension.resume()
+        let vaeInstalled = try await downloadTask.value
+        XCTAssertEqual(try Data(contentsOf: vaeInstalled), Data("vae pack bytes".utf8))
+        XCTAssertEqual(suspension.count, 1)
+    }
+
+    /// 5. Local discovery remains side-effect free: neither `discover` nor
+    /// `resolveInstalledModels` ever invokes the downloader.
+    func testDiscoveryNeverInvokesDownloader() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
+        defer { Self.cleanup(root) }
+        let entries = makeThreeEntries()
+        let modelsDir = root.appendingPathComponent("models", isDirectory: true)
+        try seed(modelsDir: modelsDir, entries: entries)
+        let suspension = SuspendingDownloader(result: URL(fileURLWithPath: "/nonexistent"))
+        let store = try makeStore(root: root, downloader: suspension.makeDownloader())
+
+        let states = await store.discoverInstalled(entries: entries)
+        XCTAssertTrue(states.values.allSatisfy { if case .ready = $0 { return true } else { return false } })
+        _ = try await store.resolveInstalledModels(entries: entries)
+        XCTAssertEqual(suspension.count, 0,
+                       "local discovery must never invoke the downloader")
+    }
+
+    /// 6. A pure importPack must succeed locally with a downloader closure
+    /// that fails the test if ever invoked.
+    func testImportSucceedsLocallyWithoutDownloader() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AnimaXS-store-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { Self.cleanup(root) }
+        let content = Data("imported pack bytes".utf8)
+        let entry = makeEntry(content: content)
+        let source = root.appendingPathComponent("user-import.animapk")
+        try content.write(to: source)
+        let store = try makeStore(root: root, downloader: { _ in
+            XCTFail("import is a local-file operation and must never download")
+            fatalError("network must never be touched by import")
+        })
+
+        let installed = try await store.importPack(entry, from: source)
+        XCTAssertEqual(try Data(contentsOf: installed), content)
+        let state = await store.state(for: entry.component)
+        XCTAssertEqual(state, .ready(installed))
     }
 
     // MARK: - DiT numerics policy resolution (device-stabilization Task 2)

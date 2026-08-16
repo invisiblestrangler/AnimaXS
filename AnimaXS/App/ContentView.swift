@@ -103,7 +103,12 @@ struct ContentView: View {
                 allowedContentTypes: [.data],
                 allowsMultipleSelection: false
             ) { result in
-                guard let component = importComponent,
+                // Clear the importer target IMMEDIATELY — before handling the
+                // result — so a lingering `importComponent` can never steer a
+                // later unrelated action (e.g. a download) toward the picker.
+                let component = importComponent
+                importComponent = nil
+                guard let component,
                       let url = try? result.get().first else { return }
                 // Files-provided URLs are security-scoped: access must be held
                 // for the ENTIRE async import (size check + SHA-256 + copy),
@@ -147,16 +152,24 @@ struct ContentView: View {
             if case .ready = state {
                 Button("Repair") { Task { await catalog.repair(component) } }
                     .font(.caption)
+                    // Borderless so adjacent action buttons in the same Form
+                    // row can never cross-trigger (tapping Import must not
+                    // fire Download, etc.).
+                    .buttonStyle(.borderless)
             } else if case .failed = state {
                 Button("Retry") { Task { await catalog.retry(component) } }
                     .font(.caption)
+                    .buttonStyle(.borderless)
                 Button("Import") { importComponent = component; showingImporter = true }
                     .font(.caption)
+                    .buttonStyle(.borderless)
             } else if case .missing = state {
                 Button("Download") { Task { await catalog.download(component) } }
                     .font(.caption)
+                    .buttonStyle(.borderless)
                 Button("Import") { importComponent = component; showingImporter = true }
                     .font(.caption)
+                    .buttonStyle(.borderless)
             }
         }
     }
