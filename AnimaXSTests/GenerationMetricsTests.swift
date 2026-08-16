@@ -340,4 +340,21 @@ final class GenerationMetricsTests: XCTestCase {
         XCTAssertEqual(metrics.stepMetrics.map(\.crossKVMisses).reduce(0, +), metrics.crossKVMisses)
         XCTAssertTrue(metrics.summaryText.contains("cross-KV cache hits/misses: 28/28"))
     }
+
+    // P8: direct QGEMM dispatches accumulate globally AND into the active step,
+    // and per-family tallies are recorded (P8-E).
+    func testQGEMMCallAccumulatesPerStepAndPerFamily() {
+        let collector = MetricsCollector()
+        collector.beginStep(0)
+        collector.recordQGEMMCall(family: .mlpUp)
+        collector.recordQGEMMCall(family: .mlpUp)
+        collector.recordQGEMMCall(family: .mlpDown)
+        collector.endStep(completed: true)
+        collector.finalize(totalWall: 5)
+        let metrics = collector.snapshot()
+        XCTAssertEqual(metrics.qgemmCalls, 3)
+        XCTAssertEqual(metrics.qgemmMLPUpCalls, 2)
+        XCTAssertEqual(metrics.qgemmMLPDownCalls, 1)
+        XCTAssertEqual(metrics.stepMetrics[0].qgemmCalls, 3)
+    }
 }

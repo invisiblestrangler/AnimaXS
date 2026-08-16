@@ -429,4 +429,68 @@ final class LinearExecutorTests: XCTestCase {
         return (maxAbs, sqrt(squaredError / Double(actual.count)),
                 dot / sqrt(actualNorm * referenceNorm))
     }
+
+    /// P8: the direct packed QGEMM backend must be numerically equivalent to
+    /// the default dequantize-once + MPS path on the same W8 input/weights.
+    /// Uses group-K=64 (the quant group size) so the QGEMM tile kernel's
+    /// scale/zero indexing ([N][groupsPerRow]) matches a real pack.
+    func testDirectQGEMMMatchesDequantizedMPS() async throws {
+        let context = try requireContext()
+        let m = 9, n = 24, k = 64, groupsPerRow = 1
+        let scalarBytes = MemoryLayout<Float16>.stride
+        let packedStride = k  // W8: one byte per K column
+        // Input [m,k] fp16.
+        let input = try makeBuffer(bytes: m * k * scalarBytes, on: context.device)
+        var inputValues = [Float](repeating: 0, count: m * k)
+        for row in 0..<m {
+            for col in 0..<k {
+                let value = Float(((row * 7 + col * 3) % 19) - 9) / 9
+                inputValues[row * k + col] = Float(Float16(value))
+                store(Float16(value).bitPattern, in: input,
+                      byteOffset: (row * k + col) * scalarBytes)
+            }
+        }
+        // Packed W [n, packedStride] W8 bytes + per-row scale/zero (one group).
+        let packed = try makeBuffer(bytes: n * packedStride, on: context.device)
+        let scales = try makeBuffer(bytes: n * groupsPerRow * scalarBytes, on: context.device)
+        let zeros = try makeBuffer(bytes: n * groupsPerRow * scalarBytes, on: context.device)
+        var dequantized = [Float](repeating: 0, count: n * k)
+        for row in 0..<n {
+            let scale = Float(row + 1) / 64
+            let zero = Float(row - 4) / 32
+            store(Float16(scale).bitPattern, in: scales, byteOffset: row * scalarBytes)
+            store(Float16(zero).bitPattern, in: zeros, byteOffset: row * scalarBytes)
+            for col in 0..<k {
+                let q = UInt8((row * 13 + col * 5) & 255)
+                store(q, in: packed, byteOffset: row * packedStride + col)
+                dequantized[row * k + col] = Float(Float16(Float(q) * scale + zero))
+            }
+        }
+        let weight = QuantizedLinearWeightBuffers(
+            storage: .w8, packed: packed, packedOffset: 0,
+            scale: scales, scaleOffset: 0, zero: zeros, zeroOffset: 0,
+            rows: n, columns: k, packedRowStride: packedStride)
+        let mpsOut = try makeBuffer(bytes: m * n * scalarBytes, on: context.device)
+        let qgemmOut = try makeBuffer(bytes: m * n * scalarBytes, on: context.device)
+        // Reference: default dequantized-MPS path.
+        try await LinearExecutor(context: context).execute(
+            input: input, inputOffset: 0, weight: weight,
+            output: mpsOut, outputOffset: 0, inputRows: m)
+        // Direct QGEMM path (P8).
+        try await LinearExecutor(context: context, linearBackend: .directQuantized).execute(
+            input: input, inputOffset: 0, weight: weight,
+            output: qgemmOut, outputOffset: 0, inputRows: m)
+        var mps = [Float](repeating: 0, count: m * n)
+        var qgemm = [Float](repeating: 0, count: m * n)
+        for index in 0..<(m * n) {
+            mps[index] = loadHalf(mpsOut, byteOffset: index * scalarBytes)
+            qgemm[index] = loadHalf(qgemmOut, byteOffset: index * scalarBytes)
+        }
+        let stats = metrics(actual: qgemm, reference: mps)
+        XCTAssertEqual(stats.maxAbs, 0, accuracy: 0.01,
+                       "QGEMM max abs error \(stats.maxAbs) exceeds tolerance")
+        XCTAssertLessThanOrEqual(stats.rmse, 0.005, "QGEMM rmse too large: \(stats.rmse)")
+        XCTAssertGreaterThan(stats.cosine, 0.999, "QGEMM cosine \(stats.cosine) too low")
+        print("LINEAR_QGEMM_PARITY=PASS M=\(m) N=\(n) K=\(k) maxAbs=\(stats.maxAbs) rmse=\(stats.rmse) cosine=\(stats.cosine)")
+    }
 }
