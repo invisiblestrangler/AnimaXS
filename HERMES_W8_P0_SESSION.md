@@ -13,7 +13,8 @@
 ## Commits
 - `ea5e471` W8 final-residual boundary + magnitude telemetry (+ CI gate + runbook docs)
 - `78d9888` fused AdaLN offset float-element fix + ABI/parity tests
-- HEAD = `78d9888`
+- `2f5ec44` docs: D005/D006 + TODO P0 section + STATUS clarification
+- HEAD = `2f5ec44` (pushed to origin/fix/w8-range-and-fused-adaln)
 
 ## CI
 - CI Gate A (normal CI `ci.yml`): run `31950731666` — **PASS** (project-consistency, iphone-build, simulator-tests all success, HEAD 78d9888)
