@@ -304,6 +304,124 @@ final class AttentionExecutorTests: XCTestCase {
         print("ATTENTION_STRIDED_TOKEN_MAJOR=PASS heads=\(heads) Q=\(queryCount) K=\(keyCount) modelDim=\(modelDim)")
     }
 
+    /// P7-A: the streaming/online-softmax MPS backend must be numerically
+    /// equivalent to the strided token-major MPS reference (which P4 proved
+    /// equals legacy head-major) on the same token-major input. Uses an
+    /// aligned headDim=128 shape so the strided MPS head offsets are valid.
+    func testStreamingMPSMatchesStridedReference() async throws {
+        let context = try requireContext()
+        let heads = 2, headDim = 128, modelDim = heads * headDim
+        let queryCount = 5, keyCount = 7
+        let stride = modelDim
+        var q = [Float16](repeating: 0, count: queryCount * stride)
+        var k = [Float16](repeating: 0, count: keyCount * stride)
+        var v = [Float16](repeating: 0, count: keyCount * stride)
+        for token in 0..<queryCount {
+            for col in 0..<stride {
+                q[token * stride + col] = Float16(sin(Float(token * 31 + col)) * 0.3)
+            }
+        }
+        for token in 0..<keyCount {
+            for col in 0..<stride {
+                k[token * stride + col] = Float16(cos(Float(token * 17 + col)) * 0.3)
+                v[token * stride + col] = Float16(Float(token % 5) / 5)
+            }
+        }
+        let qBuf = makeHalfBuffer(q, context: context)
+        let kBuf = makeHalfBuffer(k, context: context)
+        let vBuf = makeHalfBuffer(v, context: context)
+        let refOut = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * stride * 2, options: .storageModeShared))
+        let streamOut = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * stride * 2, options: .storageModeShared))
+        // Strided reference (P4-proven == legacy).
+        try await AttentionExecutor(context: context).execute(
+            query: qBuf, key: kBuf, value: vBuf, output: refOut,
+            heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
+            layout: .tokenMajor(tokenStride: stride))
+        // Streaming online-softmax MPS (P7-A).
+        try await AttentionExecutor(context: context, attentionBackend: .streamingMPS).execute(
+            query: qBuf, key: kBuf, value: vBuf, output: streamOut,
+            heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
+            layout: .tokenMajor(tokenStride: stride))
+        let ref = readHalf(refOut, count: queryCount * stride)
+        let stream = readHalf(streamOut, count: queryCount * stride)
+        for index in ref.indices {
+            XCTAssertEqual(stream[index], ref[index], accuracy: 0.01,
+                           "streaming MPS diverges at \(index)")
+        }
+        print("ATTENTION_STREAMING_MPS=PASS heads=\(heads) Q=\(queryCount) K=\(keyCount)")
+    }
+
+    /// P7-B: the DiT-specialized pure-Metal Flash backend must be numerically
+    /// equivalent to the strided reference on the DiT shape (heads=16,
+    /// headDim=128, token-major 2048) with small token counts for speed.
+    func testMetalFlashMatchesStridedReference() async throws {
+        let context = try requireContext()
+        let heads = 16, headDim = 128, modelDim = heads * headDim
+        let queryCount = 4, keyCount = 8
+        let stride = modelDim
+        var q = [Float16](repeating: 0, count: queryCount * stride)
+        var k = [Float16](repeating: 0, count: keyCount * stride)
+        var v = [Float16](repeating: 0, count: keyCount * stride)
+        for token in 0..<queryCount {
+            for col in 0..<stride {
+                q[token * stride + col] = Float16(sin(Float(token * 13 + col) * 0.02))
+            }
+        }
+        for token in 0..<keyCount {
+            for col in 0..<stride {
+                k[token * stride + col] = Float16(cos(Float(token * 7 + col) * 0.02))
+                v[token * stride + col] = Float16(Float(token % 7) / 7)
+            }
+        }
+        let qBuf = makeHalfBuffer(q, context: context)
+        let kBuf = makeHalfBuffer(k, context: context)
+        let vBuf = makeHalfBuffer(v, context: context)
+        let refOut = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * stride * 2, options: .storageModeShared))
+        let flashOut = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * stride * 2, options: .storageModeShared))
+        try await AttentionExecutor(context: context).execute(
+            query: qBuf, key: kBuf, value: vBuf, output: refOut,
+            heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
+            layout: .tokenMajor(tokenStride: stride))
+        try await AttentionExecutor(context: context, attentionBackend: .metalFlash).execute(
+            query: qBuf, key: kBuf, value: vBuf, output: flashOut,
+            heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
+            layout: .tokenMajor(tokenStride: stride))
+        let ref = readHalf(refOut, count: queryCount * stride)
+        let flash = readHalf(flashOut, count: queryCount * stride)
+        for index in ref.indices {
+            XCTAssertEqual(flash[index], ref[index], accuracy: 0.01,
+                           "metal Flash diverges at \(index)")
+        }
+        print("ATTENTION_METAL_FLASH=PASS heads=\(heads) Q=\(queryCount) K=\(keyCount)")
+    }
+
+    /// P7-B: the DiT-specialized Flash backend must reject a non-DiT shape
+    /// (e.g. headDim != 128) loudly, never silently corrupt.
+    func testMetalFlashRejectsNonDiTHeadDim() async throws {
+        let context = try requireContext()
+        let heads = 4, headDim = 32, modelDim = heads * headDim
+        let queryCount = 4, keyCount = 4
+        let qBuf = makeHalfBuffer([Float16](repeating: 0, count: queryCount * modelDim), context: context)
+        let kBuf = makeHalfBuffer([Float16](repeating: 0, count: keyCount * modelDim), context: context)
+        let vBuf = makeHalfBuffer([Float16](repeating: 0, count: keyCount * modelDim), context: context)
+        let out = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * modelDim * 2, options: .storageModeShared))
+        do {
+            try await AttentionExecutor(context: context, attentionBackend: .metalFlash).execute(
+                query: qBuf, key: kBuf, value: vBuf, output: out,
+                heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
+                layout: .tokenMajor(tokenStride: modelDim))
+            XCTFail("metalFlash must reject a non-DiT headDim")
+        } catch {
+            // Expected: the backend refuses the unsupported shape.
+        }
+        print("ATTENTION_METAL_FLASH_REJECT_NON_DIT=PASS")
+    }
+
     /// P4: full DiT shape descriptors — self 1024/1024 and cross 1024/512 —
     /// with tokenStride 2048. Executes real attention at full shape.
     func testStridedTokenMajorFullDiTShapes() async throws {
