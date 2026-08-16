@@ -18,7 +18,7 @@
 - [x] T11 Docs/state correction (verified + committed)
 - [x] CI Gate A (PASS after T1)
 - [x] CI Gate B (PASS after T1-T11, run 31940846369 at 86c5904)
-- [ ] Full-inference W4/W8 gate (IN PROGRESS)
+- [x] Full-inference W4/W8 gate (PASS, run 31941211295 at 86c5904)
 
 ## Commits
 - 90ca169 feat: remove checkpoint/resume from production entirely (T1 source)
@@ -44,6 +44,7 @@
 - bootstrap-project #31932812543: success (pbxproj regenerated for T1)
 - ci.yml Gate A #31932848703: success (project-consistency, iphone-build, simulator-tests)
 - ci.yml Gate B #31940846369: success (project-consistency, iphone-build, simulator-tests) at 86c5904
+- full-inference-refine #31941211295: PASS both W4 (w4Legacy, latent cos 0.8231, RGB cos 0.7818) and W8 (w8LegacyStabilized, latent cos 0.9105, RGB cos 0.8613); generated images coherent, no checkerboard/NaN
 
 ## Deviations
 - (none)
