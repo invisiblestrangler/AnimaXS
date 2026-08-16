@@ -6,8 +6,8 @@
 
 ## Task Checklist
 - [x] T1 Checkpoint/resume removal (verified + committed + CI Gate A green)
-- [ ] T2 W8 legacy numerical policy (pending)
-- [ ] T3 Full-inference CI policy alignment (pending)
+- [x] T2 W8 legacy numerical policy (verified + committed)
+- [x] T3 Full-inference CI policy alignment (verified + committed)
 - [ ] T4 Quarantine directQuantized/hybrid (pending)
 - [ ] T5 Disable P6 mmap no-copy + fatal-Metal poisoning (pending)
 - [ ] T6 Import vs Download + single-flight (pending)
@@ -23,6 +23,9 @@
 ## Commits
 - 90ca169 feat: remove checkpoint/resume from production entirely (T1 source)
 - 0f86b67 chore: regenerate AnimaXS.xcodeproj from project.yml (bootstrap #31932812543)
+- 5e9933b docs: add device-stabilization runbook and session ledger
+- 82026cc fix: W8-v2 production resolves to stabilized legacy numerics (T2)
+- 27d3eb7 fix: full-inference CI executes the production numerical policy (T3)
 
 ## CI Runs
 - bootstrap-project #31932812543: success (pbxproj regenerated for T1)
