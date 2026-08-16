@@ -9,7 +9,6 @@ final class GenerationEligibilityTests: XCTestCase {
     private func evaluate(
         modelsResolved: Bool = true,
         isGenerating: Bool = false,
-        canResume: Bool = false,
         prompt: String = "masterpiece",
         seedText: String = "1337",
         metalAvailable: Bool = true
@@ -17,7 +16,6 @@ final class GenerationEligibilityTests: XCTestCase {
         GenerationEligibility.evaluate(
             modelsResolved: modelsResolved,
             isGenerating: isGenerating,
-            canResume: canResume,
             prompt: prompt,
             seedText: seedText,
             metalAvailable: metalAvailable)
@@ -40,14 +38,6 @@ final class GenerationEligibilityTests: XCTestCase {
             return XCTFail("expected blocked, got \(result)")
         }
         XCTAssertTrue(reason.contains("already running"))
-    }
-
-    func testBlockedWhenCheckpointAvailable() {
-        let result = evaluate(canResume: true)
-        guard case .blocked(let reason) = result else {
-            return XCTFail("expected blocked, got \(result)")
-        }
-        XCTAssertTrue(reason.contains("Resume"))
     }
 
     func testBlockedWhenModelsMissing() {
@@ -92,7 +82,6 @@ final class GenerationEligibilityTests: XCTestCase {
         let cases: [GenerationEligibility] = [
             evaluate(modelsResolved: false),
             evaluate(isGenerating: true),
-            evaluate(canResume: true),
             evaluate(prompt: ""),
             evaluate(seedText: "x"),
             evaluate(metalAvailable: false),

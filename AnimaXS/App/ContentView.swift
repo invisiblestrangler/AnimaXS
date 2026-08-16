@@ -7,7 +7,7 @@ import Darwin
 
 /// K001 — minimal useful app. Model section (3 packs: download/import/repair),
 /// prompt, seed + Randomize, Generate, Cancel, progress (stage/step/block +
-/// elapsed), Resume, image, Share, Diagnostics, and user-recoverable errors.
+/// elapsed), image, Share, Diagnostics, and user-recoverable errors.
 ///
 /// Real-device stabilization changes:
 /// - model discovery is local-only and side-effect free (no auto-download);
@@ -202,22 +202,14 @@ struct ContentView: View {
                     stopElapsedTimer(updateFinalElapsed: true)
                     coordinator.cancel()
                 }
-            } else if coordinator.canResume {
-                Button("Resume") {
-                    startGeneration(resume: true)
-                }
             } else {
                 Button("Generate") {
-                    startGeneration(resume: false)
+                    startGeneration()
                 }
                 .disabled(!eligibility.isReady)
                 if let reason = eligibility.blockedReason {
                     Text(reason).font(.caption).foregroundStyle(.orange)
                 }
-            }
-            if coordinator.canResume, let steps = coordinator.completedSteps {
-                Text("Checkpoint: \(steps)/\(ModelConstants.samplerSteps) steps — Resume available.")
-                    .font(.caption).foregroundStyle(.orange)
             }
             progressView
         }
@@ -228,9 +220,6 @@ struct ContentView: View {
             if case .failed(let message) = coordinator.state {
                 Section("Error") {
                     Text(message).foregroundStyle(.red)
-                    if coordinator.completedSteps ?? 0 > 0 {
-                        Button("Discard checkpoint") { coordinator.discardCheckpoint() }
-                    }
                 }
             }
         }
@@ -287,7 +276,6 @@ struct ContentView: View {
         GenerationEligibility.evaluate(
             modelsResolved: catalog.resolved != nil,
             isGenerating: isGenerating,
-            canResume: coordinator.canResume,
             prompt: prompt,
             seedText: seedText,
             metalAvailable: coordinator.isMetalAvailable)
@@ -306,8 +294,8 @@ struct ContentView: View {
         }
     }
 
-    private func startGeneration(resume: Bool) {
-        logGenerationAttempt(resume: resume)
+    private func startGeneration() {
+        logGenerationAttempt()
         guard case .ready = eligibility else {
             Self.generationLog.warning(
                 "generation blocked: \(eligibility.blockedReason ?? "unknown", privacy: .public)")
@@ -323,32 +311,28 @@ struct ContentView: View {
             Self.generationLog.error("generation guard: models disappeared after eligibility")
             return
         }
-        Self.generationLog.info("generation accepted (resume=\(resume))")
+        Self.generationLog.info("generation accepted")
         generationStart = Date()
         elapsedText = ""
         elapsedTimer?.invalidate()
         elapsedTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
             elapsedText = String(format: "%.1f s", Date().timeIntervalSince(generationStart))
         }
-        if resume {
-            coordinator.resume(prompt: prompt, seed: seed, models: models)
-        } else {
-            // Capture the immutable config snapshot at Generate time so a
-            // mid-run toggle change can never affect this run. The DiT pack is
-            // whatever variant (W4 or W8-v2) was imported into the .dit slot;
-            // `models.dit` already points at it.
-            let config = optimizationSettings.snapshot
-            coordinator.generate(
-                prompt: prompt, seed: seed, models: models,
-                optimization: config)
-        }
+        // Capture the immutable config snapshot at Generate time so a
+        // mid-run toggle change can never affect this run. The DiT pack is
+        // whatever variant (W4 or W8-v2) was imported into the .dit slot;
+        // `models.dit` already points at it.
+        let config = optimizationSettings.snapshot
+        coordinator.generate(
+            prompt: prompt, seed: seed, models: models,
+            optimization: config)
         Self.generationLog.info(
             "generation state after start: \(String(describing: coordinator.state), privacy: .public)")
     }
 
     /// Physical-device instrumentation: records the facts needed to tell a
     /// UI-guard rejection from an inference crash on the next device run.
-    private func logGenerationAttempt(resume: Bool) {
+    private func logGenerationAttempt() {
         let thermal = ProcessInfo.processInfo.thermalState
         let availableMemory = availableProcessMemory().map { "\($0)" } ?? "n/a"
         // Break the values out of the interpolation so the compiler does not
@@ -361,7 +345,7 @@ struct ContentView: View {
         // Logger's OSLogMessage overload requires a single interpolation
         // literal — runtime String concatenation does not compile.
         Self.generationLog.info(
-            "Generate tapped: resume=\(resume) promptValid=\(promptValid) seedParses=\(seedParses) modelsResolved=\(modelsResolved) thermal=\(thermalDescription) availableMemoryBytes=\(availableMemory) coordinatorState=\(stateDescription)")
+            "Generate tapped: promptValid=\(promptValid) seedParses=\(seedParses) modelsResolved=\(modelsResolved) thermal=\(thermalDescription) availableMemoryBytes=\(availableMemory) coordinatorState=\(stateDescription)")
     }
 
     private func availableProcessMemory() -> UInt64? {

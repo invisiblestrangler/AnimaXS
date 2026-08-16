@@ -137,7 +137,7 @@ struct DiagnosticsView: View {
     @ViewBuilder
     private var performanceSection: some View {
         Section("Inference performance experiments") {
-            Text("Applies to the next fresh generation. Use Generate, not Resume, for performance comparisons.")
+            Text("Applies to the next fresh generation. Each Generate starts from step 0 for a clean performance comparison.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Picker("Preset (P9)", selection: presetBinding) {

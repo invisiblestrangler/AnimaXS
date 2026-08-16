@@ -149,8 +149,6 @@ final class GenerationMetricsTests: XCTestCase {
         XCTAssertTrue(text.contains("Direct MPS linear I/O: on"))
         XCTAssertTrue(text.contains("Ping-pong weight streaming: off"))
         XCTAssertTrue(text.contains("Numerical monitor: off"))
-        // Checkpointing on for production W4.
-        XCTAssertTrue(text.contains("Checkpointing: on"))
         // Counters: 3 GEMM tiles → 2 direct + 1 copied input, 2 direct + 1 copied output.
         XCTAssertTrue(text.contains("Linear GEMM tiles: 3"))
         XCTAssertTrue(text.contains("Linear input tiles: 2 direct / 1 copied"))
@@ -167,9 +165,8 @@ final class GenerationMetricsTests: XCTestCase {
         XCTAssertTrue(text.contains("Low Power Mode: off -> off"))
     }
 
-    /// The summary reports which DiT pack variant ran and that checkpointing is
-    /// always on (the DiT slot holds one verified pack).
-    func testSummaryReportsDiTPackFilenameAndCheckpointing() {
+    /// The summary reports which DiT pack variant ran.
+    func testSummaryReportsDiTPackFilename() {
         let collector = MetricsCollector()
         collector.recordDiTPackIdentity(
             id: "w8-v2",
@@ -180,7 +177,6 @@ final class GenerationMetricsTests: XCTestCase {
         let text = collector.snapshot().summaryText
         XCTAssertTrue(text.contains("DiT pack: anima-turbo-v1.0-xsmax-w8-v2.animapk"))
         XCTAssertTrue(text.contains("(w8-v2)"))
-        XCTAssertTrue(text.contains("Checkpointing: on"))
     }
 
     // P1-H: cancellation reason is published into the summary and distinguishes

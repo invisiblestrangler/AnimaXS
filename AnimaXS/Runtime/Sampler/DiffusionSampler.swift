@@ -109,14 +109,13 @@ final class DiffusionSampler {
         self.rope = rope
     }
 
-    /// Runs the eight model evaluations (or the remaining ones when resuming
-    /// from a checkpoint) and writes the final fp32 latent.
-    /// `stepCompleted` is called after each finite post-Euler latent and is the
-    /// checkpoint boundary. Its buffers remain valid only for the callback.
+    /// Runs the eight model evaluations and writes the final fp32 latent.
+    /// `stepCompleted` is called after each finite post-Euler latent. Its
+    /// buffers remain valid only for the callback.
     ///
-    /// - Parameter startStep: Number of Euler steps already completed
-    ///   (I004 resume semantics). `0` = begin at step 0; `8` = all steps
-    ///   complete — the checkpoint latent is copied straight to output.
+    /// - Parameter startStep: Number of Euler steps to skip. Production always
+    ///   passes `0` (start from step 0); diagnostic/trajectory tests may pass
+    ///   a nonzero value to resume from a previously captured latent.
     /// - Precondition: `0 <= startStep <= 8`.
     func execute(
         initialLatent: MTLBuffer,
@@ -189,15 +188,15 @@ final class DiffusionSampler {
             key: "diffusion.cross-context.f16", bytes: 512 * 1_024 * 2)
         try await convertToHalf(crossContext, output: crossHalf, count: 512 * 1_024)
 
-        // Resume: the checkpoint latent already contains the result of steps
-        // [0, startStep); only execute the remaining sigma transitions.
+        // Only execute the remaining sigma transitions (startStep == 8 copies
+        // the latent straight to output).
         for step in startStep..<EulerSampler.sigmas.count - 1 {
             metrics?.beginStep(step)
             // P2: a step that throws is still recorded as a PARTIAL step
             // (completed == false) with its partial durations/counters, so a
             // device log can attribute a slowdown to the failing step (e.g.
             // the W8 failure case). On success the explicit endStep below
-            // keeps the historical timing point (before the checkpoint
+            // keeps the historical timing point (before the step-completed
             // callback); the defer only fires on failure.
             var completedForMetrics = false
             defer {

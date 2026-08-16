@@ -17,10 +17,6 @@ final class InferenceOptimizationConfigTests: XCTestCase {
         XCTAssertTrue(baseline.numericalMonitoring)
     }
 
-    func testBaselineEnablesCheckpointing() {
-        XCTAssertTrue(InferenceOptimizationConfig.currentBaseline.checkpointingEnabled)
-    }
-
     // P3: the fused activation toggles default OFF and do not change the
     // known-good baseline behavior (legacy paths remain the default).
     func testP3FusedTogglesDefaultOff() {
@@ -66,16 +62,6 @@ final class InferenceOptimizationConfigTests: XCTestCase {
         XCTAssertFalse(config.fusedMLPActivation) // independent
         config.fusedMLPActivation = true
         XCTAssertTrue(config.fusedMLPActivation)
-    }
-
-    // The DiT pack is whichever variant (W4 or W8-v2) was imported into the
-    // .dit slot; it is not a config choice, and checkpointing is always on
-    // because the slot holds exactly one verified pack.
-    func testCheckpointingIsAlwaysEnabled() {
-        var config = InferenceOptimizationConfig.currentBaseline
-        config.linearTileRows = 1024
-        config.numericalMonitoring = false
-        XCTAssertTrue(config.checkpointingEnabled)
     }
 
     // MARK: - Allowed tile rows

@@ -48,10 +48,8 @@ enum GenerationError: Error, LocalizedError {
 /// - guarantees one generation at a time;
 /// - forwards the visible seed into production `SeededRNG`;
 /// - reports diffusion step AND block progress to the UI;
-/// - persists a full-metadata checkpoint after each completed diffusion step
-///   (I004/K003) so cancel/background/memory-warning can resume;
-/// - validates checkpoint compatibility (prompt/seed/hashes) before resume;
-/// - exposes cooperative cancellation (K003 core);
+/// - exposes cooperative cancellation (K003 core) — there is no checkpoint or
+///   resume state, so backgrounding / memory warnings just cancel the run;
 /// - keeps the last successful image across failed runs.
 @MainActor
 final class GenerationCoordinator: ObservableObject {
@@ -63,49 +61,18 @@ final class GenerationCoordinator: ObservableObject {
 
     private let context: MetalContext?
     private let factory: any GenerationStageFactory
-    private let checkpointStore: CheckpointStore?
     private var generationTask: Task<Void, Never>?
-    private var latestCheckpoint: GenerationCheckpoint?
     /// The reason the most recent cooperative cancel was requested. Telemetry
     /// only — published into final metrics / the cancelled state to distinguish
     /// user-initiated from automatic (background / memory-warning) cancellation.
     private var pendingCancellationReason: GenerationCancellationReason?
-    /// Monotonic run identifier. Checkpoint-save tasks capture the epoch at
-    /// callback time and only apply if the run is still current — a save
-    /// queued before completion (or before a new Generate) can never
-    /// resurrect a stale checkpoint afterwards.
-    private var generationEpoch = 0
-
-    /// Test seam (mirrors `ModelStore.secureInstalls`): when set, the *default*
-    /// persistent store (used when a coordinator is wired with no explicit
-    /// `checkpointStore`, exactly as production `ContentView` does) is created
-    /// under this directory. Production leaves this `nil` so the default store
-    /// uses the real persistent Application Support location. Tests that need
-    /// to prove the default wiring provides cold-launch recovery set this to an
-    /// isolated temp directory and reset it afterward.
-    static nonisolated(unsafe) var defaultCheckpointStoreDirectoryOverride: URL?
-
-    @MainActor
-    private static func makeDefaultCheckpointStore() -> CheckpointStore? {
-        if let override = defaultCheckpointStoreDirectoryOverride {
-            return try? CheckpointStore(directory: override)
-        }
-        return try? CheckpointStore()
-    }
 
     init(
         context: MetalContext? = nil,
         factory: any GenerationStageFactory = ProductionStageFactory(),
-        attemptMetalFallback: Bool = true,
-        checkpointStore: CheckpointStore? = nil
+        attemptMetalFallback: Bool = true
     ) {
         self.factory = factory
-        // Production (default) wiring must persist checkpoints across cold
-        // launches so Resume works after the app is killed. `nil` here means
-        // "use the normal persistent store"; tests inject an isolated store
-        // (or leave nil and rely on `defaultCheckpointStoreDirectoryOverride`
-        // for isolation).
-        self.checkpointStore = checkpointStore ?? Self.makeDefaultCheckpointStore()
         if let context {
             self.context = context
         } else if attemptMetalFallback {
@@ -114,19 +81,6 @@ final class GenerationCoordinator: ObservableObject {
         } else {
             // Test seam: simulate an environment with no Metal device.
             self.context = nil
-        }
-        // Cold launch: a valid, non-terminal persisted checkpoint is offered
-        // for resume. A terminal checkpoint (step == samplerSteps) means the
-        // previous diffusion run fully completed — it must be cleared, not
-        // retained, so it can never replace the Generate button with a
-        // meaningless "8/8 Resume" (and cannot linger as dead cache).
-        if let checkpointStore = self.checkpointStore,
-           let loaded = checkpointStore.load() {
-            if loaded.step >= ModelConstants.samplerSteps {
-                checkpointStore.remove()
-            } else {
-                latestCheckpoint = loaded
-            }
         }
     }
 
@@ -148,30 +102,11 @@ final class GenerationCoordinator: ObservableObject {
         context != nil
     }
 
-    var canResume: Bool {
-        guard let checkpoint = latestCheckpoint else { return false }
-        switch state {
-        case .idle, .cancelled:
-            // Only a PARTIALLY completed diffusion run is resumable. A
-            // checkpoint at step == samplerSteps is terminal (all diffusion
-            // steps done) — there is nothing to resume, and offering it would
-            // suppress the Generate button with a no-op "8/8 Resume".
-            return checkpoint.step >= 1 && checkpoint.step < ModelConstants.samplerSteps
-        default:
-            return false
-        }
-    }
-
-    var completedSteps: Int? {
-        latestCheckpoint?.step
-    }
-
     /// Starts one generation. Does nothing when a generation is already
     /// running (K002: only one generation may execute at once).
     ///
     /// - Parameter optimization: Immutable per-run inference configuration,
-    ///   captured at Generate time. When it selects an experimental W8 pack,
-    ///   checkpoint persistence/resume is disabled for the run.
+    ///   captured at Generate time.
     func generate(
         prompt: String,
         seed: UInt64,
@@ -184,108 +119,44 @@ final class GenerationCoordinator: ObservableObject {
             state = .failed(GenerationError.metal("Metal device unavailable").localizedDescription)
             return
         }
-        // A fresh generation supersedes any previous checkpoint.
-        latestCheckpoint = nil
-        checkpointStore?.remove()
-        generationEpoch += 1
         // Enter the generating state synchronously so a second `generate`
         // call (even on the same runloop tick) is rejected.
         state = .tokenizing
         run(engine: GenerationEngine(context: context, factory: factory),
             prompt: prompt, seed: seed, models: models,
-            noise: noise, startStep: 0, optimization: optimization)
-    }
-
-    /// Resumes from the latest completed diffusion step checkpoint.
-    /// Reconstructs conditioning (tokenization + Qwen + adapter), then starts
-    /// diffusion at `checkpoint.step`. Rejects incompatible checkpoints
-    /// (prompt/seed/resolution/model-hash mismatch) as a recoverable error.
-    func resume(
-        prompt: String,
-        seed: UInt64,
-        models: ResolvedModels,
-        noise: MTLBuffer? = nil
-    ) {
-        guard !isGenerating else { return }
-        guard let checkpoint = latestCheckpoint else { return }
-        guard let context else {
-            state = .failed(GenerationError.metal("Metal device unavailable").localizedDescription)
-            return
-        }
-        do {
-            let hashes = models.hashes
-            let store = try checkpointStore ?? CheckpointStore()
-            _ = try store.validate(
-                checkpoint, prompt: prompt, seed: seed,
-                resolution: (512, 512), modelHashes: hashes)
-        } catch {
-            // Incompatible or corrupt: drop it and surface a recoverable error.
-            discardCheckpoint()
-            state = .failed(error.localizedDescription)
-            return
-        }
-        guard let latent = try? checkpoint.latentValues() else {
-            discardCheckpoint()
-            state = .failed("checkpoint latent is corrupt")
-            return
-        }
-        let buffer = context.device.makeBuffer(
-            length: latent.count * 4, options: .storageModeShared)!
-        buffer.contents().copyMemory(
-            from: latent, byteCount: latent.count * 4)
-        generationEpoch += 1
-        state = .tokenizing
-        run(engine: GenerationEngine(context: context, factory: factory),
-            prompt: prompt, seed: seed, models: models,
-            noise: noise ?? buffer, startStep: checkpoint.step,
-            optimization: .currentBaseline)
+            noise: noise, optimization: optimization)
     }
 
     /// Cooperative cancellation (K003 core): the engine stops at the next safe
-    /// boundary; the last completed diffusion step checkpoint is retained.
-    /// The reason is telemetry only (user/background/memory-warning/…).
+    /// boundary. There is no resume state to preserve. The reason is telemetry
+    /// only (user/background/memory-warning/…).
     func cancel(reason: GenerationCancellationReason = .user) {
         guard isGenerating else { return }
         pendingCancellationReason = reason
         generationTask?.cancel()
     }
 
-    /// Drops the retained checkpoint (e.g. incompatible models after resume).
-    func discardCheckpoint() {
-        latestCheckpoint = nil
-        checkpointStore?.remove()
-        if case .cancelled = state { state = .idle }
-    }
-
     // MARK: - App lifecycle (K003)
 
-    /// App moved to background while generating: request safe cancellation,
-    /// retain the latest completed-step checkpoint, and release the heavy
-    /// generation stage. Do not promise unrestricted background GPU inference.
+    /// App moved to background while generating: request cooperative
+    /// cancellation at the next safe boundary. The generation run ends in the
+    /// `.cancelled` state; a fresh Generate is available afterward. There is
+    /// no checkpoint to retain and no resume path.
     func appDidEnterBackground() {
         guard isGenerating else { return }
-        // Cooperative cancellation: the engine stops at the next safe block
-        // boundary; when the cancel lands, state becomes .cancelled and the
-        // checkpoint remains available for Resume.
         cancel(reason: .background)
     }
 
-    /// App returned to foreground: nothing to do — a compatible checkpoint is
-    /// already surfaced through `canResume`/`completedSteps`.
-    func appWillEnterForeground() {
-        // Resume availability is derived from `latestCheckpoint` on demand.
-    }
+    /// App returned to foreground: nothing to do — cancellation already
+    /// completed; the user starts a fresh Generate if desired.
+    func appWillEnterForeground() {}
 
     // MARK: - Resource policy (K004)
 
     /// A memory warning arrived during generation: cancel at the nearest safe
-    /// boundary, preserve the last completed-step checkpoint, and surface a
-    /// recoverable message. Never try to "free random buffers" that an active
-    /// Metal command still owns.
-    ///
-    /// The engine's natural cancellation path persists the checkpoint (the
-    /// step-completed callback enqueues the write on the main actor) and then
-    /// transitions to `.cancelled`; we only request the cooperative cancel.
+    /// boundary and surface a recoverable message. Never try to "free random
+    /// buffers" that an active Metal command still owns. There is no
+    /// checkpoint state to preserve.
     func handleMemoryWarning() {
         guard isGenerating else { return }
         cancel(reason: .memoryWarning)
@@ -299,7 +170,6 @@ final class GenerationCoordinator: ObservableObject {
         seed: UInt64,
         models: ResolvedModels,
         noise: MTLBuffer?,
-        startStep: Int,
         optimization: InferenceOptimizationConfig
     ) {
         let metrics = MetricsCollector()
@@ -328,50 +198,10 @@ final class GenerationCoordinator: ObservableObject {
                     seed: seed,
                     models: models,
                     noise: noise,
-                    startStep: startStep,
                     progress: { stage in
                         let snapshot = GenerationState.from(stage)
                         Task { @MainActor [weak self] in
                             self?.state = snapshot
-                        }
-                    },
-                    checkpoint: { [weak self] completedStep, latent in
-                        // Checkpoint identity uses the ACTUAL resolved model
-                        // hashes (models.hashes), so a W8 checkpoint is stamped
-                        // with the W8 hashes and can never validate against a
-                        // W4 pack (and vice versa).
-                        guard optimization.checkpointingEnabled,
-                              let self else { return }
-                        // Persist the full-metadata checkpoint immediately so
-                        // cancel/background/memory-warning can always resume
-                        // from the last fully completed step (I004 §6.3).
-                        let nextStep = completedStep + 1
-                        // A terminal checkpoint (all steps complete) has no
-                        // diffusion left to resume: never retain or persist it,
-                        // or it would replace Generate with "8/8 Resume" and
-                        // linger as dead cache.
-                        guard nextStep < ModelConstants.samplerSteps else { return }
-                        guard let checkpoint = try? GenerationCheckpoint(
-                            latent: latent, step: nextStep,
-                            prompt: prompt, seed: seed,
-                            width: ModelConstants.imageSize,
-                            height: ModelConstants.imageSize,
-                            modelHashes: models.hashes) else {
-                            return
-                        }
-                        // Apply on the main actor, but only while this run is
-                        // still current (epoch) and still generating: a save
-                        // queued just before completion or a fresh Generate
-                        // must never resurrect a stale checkpoint afterwards.
-                        let epoch = self.generationEpoch
-                        Task { @MainActor [weak self] in
-                            guard let self,
-                                  self.generationEpoch == epoch,
-                                  self.isGenerating else { return }
-                            self.latestCheckpoint = checkpoint
-                            if let store = self.checkpointStore {
-                                try? store.save(checkpoint)
-                            }
                         }
                     },
                     metrics: metrics,
@@ -382,10 +212,6 @@ final class GenerationCoordinator: ObservableObject {
                 }
                 self.image = GenerationCoordinator.makeUIImage(from: decoded)
                 self.state = .completed
-                // A finished generation has nothing to resume: clear the
-                // retained/persisted checkpoint so the next action is a fresh
-                // Generate, never a stale "N/8 Resume".
-                self.clearCheckpoint()
             } catch is CancellationError {
                 self.state = .cancelled
             } catch {
@@ -426,16 +252,6 @@ final class GenerationCoordinator: ObservableObject {
             thermalState: thermal,
             lowPowerMode: ProcessInfo.processInfo.isLowPowerModeEnabled
         )
-    }
-
-    /// Drops the retained and persisted checkpoint without touching state
-    /// (used when a generation completes: nothing is left to resume).
-    /// Bumps the epoch so any in-flight checkpoint-save from the just-ended
-    /// run is invalidated and can never resurrect the terminal checkpoint.
-    private func clearCheckpoint() {
-        generationEpoch += 1
-        latestCheckpoint = nil
-        checkpointStore?.remove()
     }
 
     /// Publish the run's telemetry summary (works for completed, failed, and

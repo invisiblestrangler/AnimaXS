@@ -209,18 +209,6 @@ enum ModelManifest {
         _ = try matchedVariant(of: url, against: entry)
     }
 
-    /// The three production model hashes (used for checkpoint compatibility).
-    /// The DiT hash is the primary (W4) variant, which is the stable
-    /// checkpoint-identity baseline regardless of which DiT pack is installed.
-    static func productionHashes() throws -> ModelHashes {
-        guard let dit = entries.first(where: { $0.component == .dit })?.sha256,
-              let textEncoder = entries.first(where: { $0.component == .textEncoder })?.sha256,
-              let vae = entries.first(where: { $0.component == .vae })?.sha256 else {
-            throw AnimapkError.validation("model manifest is missing a production component")
-        }
-        return ModelHashes(dit: dit, textEncoder: textEncoder, vae: vae)
-    }
-
     private static func entry(
         _ filename: String, size: UInt64, sha256: String, component: ModelComponent
     ) -> ModelManifestEntry {

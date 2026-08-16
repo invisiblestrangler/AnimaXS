@@ -18,21 +18,11 @@ struct ResolvedModelPack: Hashable {
 /// dedicated fixture; that fixture architecture never leaks into here.
 ///
 /// Each pack carries its resolved variant descriptor so consumers can report
-/// which variant (W4 or W8-v2) actually ran, and checkpoint identity can use
-/// the actual resolved hashes instead of a hardcoded W4 baseline.
+/// which variant (W4 or W8-v2) actually ran.
 struct ResolvedModels: Equatable {
     let textEncoder: ResolvedModelPack
     let dit: ResolvedModelPack
     let vae: ResolvedModelPack
-
-    /// The actual resolved model hashes for checkpoint identity (not the
-    /// hardcoded W4 production baseline).
-    var hashes: ModelHashes {
-        ModelHashes(
-            dit: dit.variant.sha256,
-            textEncoder: textEncoder.variant.sha256,
-            vae: vae.variant.sha256)
-    }
 
     init(textEncoder: ResolvedModelPack, dit: ResolvedModelPack, vae: ResolvedModelPack) {
         self.textEncoder = textEncoder
@@ -174,7 +164,7 @@ struct GenerationEngine {
     }
 
     /// Runs the full production pipeline: prompt → tokens → Qwen → adapter →
-    /// diffusion → VAE → RGBA8.
+    /// diffusion → VAE → RGBA8. Always starts diffusion from step 0.
     ///
     /// - Parameters:
     ///   - prompt: User prompt. Not altered between UI and tokenization.
@@ -182,10 +172,7 @@ struct GenerationEngine {
     ///           `noise` is injected (test-only golden path).
     ///   - models: Exactly three resolved pack URLs.
     ///   - noise: Optional pre-generated initial noise (test-only injection).
-    ///   - startStep: Resume support: number of Euler steps already completed.
     ///   - progress: Stage progress, including diffusion step/block counts.
-    ///   - checkpoint: Called after each completed diffusion step with the
-    ///                 completed step index and the fp32 latent snapshot.
     ///   - metrics: Optional collector for this run's timing/memory telemetry;
     ///              a private one is created when nil (test path).
     ///   - optimization: Immutable per-run inference configuration snapshot.
@@ -195,9 +182,7 @@ struct GenerationEngine {
         seed: UInt64,
         models: ResolvedModels,
         noise: MTLBuffer? = nil,
-        startStep: Int = 0,
         progress: ProgressCallback? = nil,
-        checkpoint: ((Int, [Float]) throws -> Void)? = nil,
         metrics metricsIn: MetricsCollector? = nil,
         optimization: InferenceOptimizationConfig = .currentBaseline
     ) async throws -> DecodedRGBA8 {
@@ -235,14 +220,16 @@ struct GenerationEngine {
                 contextTokens: qwenTokenIDs.count, t5IDs: t5IDs, t5Weights: t5Weights)
         }
 
-        // ---- 4. Diffusion: seeded noise → final latent (sampler-space) ----
+        // ---- 4. Diffusion: seeded noise → final latent (sampler-space).
+        // Always starts from step 0: there is no checkpoint/resume path, so
+        // no per-step latent snapshot is copied to the CPU. ----
         let totalSteps = ModelConstants.samplerSteps
         let initialLatent = try makeInitialLatent(seed: seed, noise: noise)
         let finalLatent = try await measured(.diffusion, metrics: metrics) {
             try await diffuse(
                 models: models, initialLatent: initialLatent, cross: cross,
-                startStep: startStep, totalSteps: totalSteps,
-                progress: progress, checkpoint: checkpoint, metrics: metrics,
+                totalSteps: totalSteps,
+                progress: progress, metrics: metrics,
                 optimization: optimization)
         }
 
@@ -252,7 +239,7 @@ struct GenerationEngine {
         // (samplers.py CFGGuider.inner_sample). The custom runtime omitted it,
         // decoding raw sampler latents as VAE latents — the 8px grid. Apply
         // EXACTLY ONCE here; VAEDecoder still consumes its canonical latent
-        // unchanged (D060). Checkpoints remain sampler-space (diffusion math).
+        // unchanged (D060).
         Wan21LatentFormat.applyProcessOutInPlace(finalLatent)
 
         // ---- 5. VAE decode (VAE + its mmap cannot escape this helper) ----
@@ -336,14 +323,10 @@ struct GenerationEngine {
 
     private func diffuse(
         models: ResolvedModels, initialLatent: MTLBuffer, cross: MTLBuffer,
-        startStep: Int, totalSteps: Int,
-        progress: ProgressCallback?, checkpoint: ((Int, [Float]) throws -> Void)?,
+        totalSteps: Int,
+        progress: ProgressCallback?,
         metrics: MetricsCollector, optimization: InferenceOptimizationConfig
     ) async throws -> MTLBuffer {
-        guard (0...ModelConstants.samplerSteps).contains(startStep) else {
-            throw GenerationError.sampler(
-                "startStep \(startStep) out of range 0...\(ModelConstants.samplerSteps)")
-        }
         let sampler = try factory.makeDiffusion(
             context: context, fileURL: models.dit.url,
             optimization: optimization,
@@ -357,20 +340,19 @@ struct GenerationEngine {
         let output = try makeBuffer(
             length: DiffusionSampler.latentElements * 4, "diffusion output buffer")
         let blocks = ModelConstants.ditBlocks
+        // Production always starts from step 0 and passes NO stepCompleted
+        // callback: there is no checkpoint to write, so the sampler never
+        // snapshots the fp32 latent to the CPU after each step.
         try await sampler.execute(
             initialLatent: initialLatent, crossContext: cross, outputLatent: output,
-            startStep: startStep,
+            startStep: 0,
             blockProgress: { step, block in
                 try Task.checkCancellation()
                 progress?(.diffusing(
                     step: step + 1, block: block + 1,
                     totalSteps: totalSteps, totalBlocks: blocks))
             },
-            stepCompleted: { step, _, _, denoised, latent in
-                // Copy the fp32 latent into owned storage INSIDE the callback:
-                // the Metal buffer is only valid for the callback duration.
-                let values = readFloats(latent, count: DiffusionSampler.latentElements)
-                try checkpoint?(step, values)
+            stepCompleted: { step, _, _, _, _ in
                 progress?(.diffusing(
                     step: step + 1, block: blocks,
                     totalSteps: totalSteps, totalBlocks: blocks))
@@ -404,10 +386,5 @@ struct GenerationEngine {
             throw GenerationError.metal("failed to allocate \(label)")
         }
         return buffer
-    }
-
-    private func readFloats(_ buffer: MTLBuffer, count: Int) -> [Float] {
-        let pointer = buffer.contents().bindMemory(to: Float.self, capacity: count)
-        return Array(UnsafeBufferPointer(start: pointer, count: count))
     }
 }

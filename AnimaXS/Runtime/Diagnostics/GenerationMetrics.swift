@@ -171,13 +171,6 @@ struct GenerationMetrics: Equatable {
         return blockTimes.reduce(0, +) / Double(blockTimes.count)
     }
 
-    /// Whether checkpointing was enabled for this run (always on: the DiT
-    /// slot holds one verified pack, so there is no separate experimental
-    /// state a checkpoint could collide with).
-    var checkpointingEnabled: Bool {
-        optimizationConfig?.checkpointingEnabled ?? true
-    }
-
     /// Compact text report (also the in-app post-generation summary shape).
     var summaryText: String {
         var lines: [String] = []
@@ -279,7 +272,6 @@ struct GenerationMetrics: Equatable {
             lines.append("Numerical monitor: \(config.numericalMonitoring ? "on" : "off")")
             lines.append("Mmap no-copy weight source: \(config.noCopyWeightSource ? "on" : "off")")
         }
-        lines.append("Checkpointing: \(checkpointingEnabled ? "on" : "off")")
         lines.append("")
         lines.append("Environment")
         lines.append("Power: \(environmentStart.powerState) -> \(environmentEnd.powerState)")

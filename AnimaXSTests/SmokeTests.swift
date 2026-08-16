@@ -67,27 +67,6 @@ final class SmokeTests: XCTestCase {
         XCTAssertThrowsError(try first.normal(count: -1))
     }
 
-    func testCheckpointRoundTripIsBitExactAndAtomic() throws {
-        let count = 16 * 64 * 64
-        let latent = (0..<count).map { Float($0 % 257) / 19 - 3 }
-        let checkpoint = try GenerationCheckpoint(
-            latent: latent, step: 4, prompt: "checkpoint test", seed: 1_337,
-            width: 512, height: 512,
-            modelHashes: ModelHashes(dit: "dit-hash", textEncoder: "te-hash", vae: "vae-hash"))
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("AnimaXS-checkpoint-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let url = directory.appendingPathComponent("generation.json")
-        try checkpoint.writeAtomically(to: url)
-        let loaded = try GenerationCheckpoint.load(from: url)
-        XCTAssertEqual(loaded, checkpoint)
-        let restored = try loaded.latentValues()
-        XCTAssertEqual(restored.map(\.bitPattern), latent.map(\.bitPattern))
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path),
-                       ["generation.json"])
-    }
-
     func testIncrementalModelManifestSHA256() throws {
         XCTAssertEqual(ModelManifest.entries.map(\.component), [.dit, .textEncoder, .vae])
         XCTAssertEqual(Set(ModelManifest.entries.map(\.filename)).count, 3)

@@ -131,15 +131,6 @@ struct InferenceOptimizationConfig: Equatable {
         let clamped = min(1024, max(128, value))
         return allowedTileRows.min(by: { abs($0 - clamped) < abs($1 - clamped) }) ?? 128
     }
-
-    /// True when checkpoint persistence/resume is meaningful for this run.
-    ///
-    /// The DiT slot holds exactly one verified pack (W4 or W8-v2) at a time,
-    /// so there is no separate experimental state that a checkpoint could
-    /// collide with: checkpoint identity is the stable production hash set.
-    var checkpointingEnabled: Bool {
-        true
-    }
 }
 
 /// P9 (runbook §14): named combinations of the existing per-toggle/per-backend

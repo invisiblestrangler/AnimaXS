@@ -3,22 +3,9 @@ import Metal
 @testable import AnimaXS
 
 /// Coordinator integration for the runtime optimization config (§18.7):
-/// the immutable snapshot must be forwarded unchanged, and the checkpoint
-/// path must be independent of the optimization settings.
+/// the immutable snapshot must be forwarded unchanged through the
+/// coordinator into the diffusion stage factory.
 final class InferenceOptimizationCoordinatorTests: XCTestCase {
-
-    override func setUpWithError() throws {
-        try super.setUpWithError()
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("AnimaXS-optcoord-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        GenerationCoordinator.defaultCheckpointStoreDirectoryOverride = dir
-    }
-
-    override func tearDownWithError() throws {
-        GenerationCoordinator.defaultCheckpointStoreDirectoryOverride = nil
-        try super.tearDownWithError()
-    }
 
     private func makeContext() throws -> MetalContext {
         guard let context = MetalContext() else {
@@ -94,7 +81,7 @@ final class InferenceOptimizationCoordinatorTests: XCTestCase {
         let factory = CapturingFactory()
         let coordinator = GenerationCoordinator(
             context: context, factory: factory,
-            attemptMetalFallback: false, checkpointStore: nil)
+            attemptMetalFallback: false)
         var config = InferenceOptimizationConfig.currentBaseline
         config.linearTileRows = 1024
         config.attentionTileRows = 512
@@ -110,106 +97,5 @@ final class InferenceOptimizationCoordinatorTests: XCTestCase {
         }
         let captured = try XCTUnwrap(factory.capturedConfig)
         XCTAssertEqual(captured, config, "the engine must forward the exact immutable snapshot")
-    }
-
-    /// Production W4 still persists checkpoints exactly as current HEAD: a
-    /// PARTIAL run (cancelled after step 0) retains its checkpoint.
-    @MainActor
-    func testProductionW4KeepsCheckpointPath() async throws {
-        let context = try makeContext()
-        let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
-            .appendingPathComponent("AnimaXS-w4cp-\(UUID().uuidString)", isDirectory: true))
-        defer { store.remove() }
-        let factory = SuspendSamplerFactory()
-        let coordinator = GenerationCoordinator(
-            context: context, factory: factory,
-            attemptMetalFallback: false, checkpointStore: store)
-
-        coordinator.generate(prompt: "p", seed: 1, models: testModels())
-        // Wait for the sampler to complete step 0 and fire the checkpoint.
-        for _ in 0..<250 {
-            if factory.sampler?.completedSteps ?? 0 >= 1 { break }
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-        coordinator.cancel()
-        for _ in 0..<250 {
-            if !coordinator.isGenerating { break }
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-        // A partial W4 run retains its checkpoint (exactly the D206 behavior).
-        XCTAssertTrue(store.hasCheckpoint,
-                      "production W4 partial run must retain the checkpoint path")
-    }
-
-    /// Checkpointing is not config-dependent: any run (including one with
-    /// non-baseline optimization settings) persists a partial-run checkpoint.
-    @MainActor
-    func testNonBaselineConfigStillPersistsCheckpoint() async throws {
-        let context = try makeContext()
-        let store = try CheckpointStore(directory: FileManager.default.temporaryDirectory
-            .appendingPathComponent("AnimaXS-optcp-\(UUID().uuidString)", isDirectory: true))
-        defer { store.remove() }
-        let factory = SuspendSamplerFactory()
-        let coordinator = GenerationCoordinator(
-            context: context, factory: factory,
-            attemptMetalFallback: false, checkpointStore: store)
-        var config = InferenceOptimizationConfig.currentBaseline
-        config.linearTileRows = 1024
-        config.numericalMonitoring = false
-
-        coordinator.generate(prompt: "p", seed: 1, models: testModels(), optimization: config)
-        for _ in 0..<250 {
-            if factory.sampler?.completedSteps ?? 0 >= 1 { break }
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-        coordinator.cancel()
-        for _ in 0..<250 {
-            if !coordinator.isGenerating { break }
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-        // The DiT slot holds one verified pack; checkpointing is always on.
-        XCTAssertTrue(store.hasCheckpoint,
-                      "non-baseline optimization config must still persist the checkpoint")
-    }
-
-    /// Fires one step-completed callback then suspends until cancelled, so the
-    /// checkpoint path runs but the generation stays partial (mirrors the
-    /// existing LifecycleSampler pattern in GenerationCoordinatorTests).
-    private final class SuspendSampler: DiffusionStage {
-        private(set) var completedSteps = 0
-        func execute(initialLatent: MTLBuffer, crossContext: MTLBuffer,
-                     outputLatent: MTLBuffer, startStep: Int,
-                     blockProgress: ((Int, Int) throws -> Void)?,
-                     stepCompleted: ((Int, Float, Float, MTLBuffer, MTLBuffer) throws -> Void)?) async throws {
-            let count = initialLatent.length / 4
-            let out = outputLatent.contents().bindMemory(to: Float.self, capacity: count)
-            for i in 0..<count { out[i] = 1 }
-            completedSteps += 1
-            try stepCompleted?(0, 1.0, 0.5, outputLatent, outputLatent)
-            // Deterministic pause: suspend until the coordinator cancels.
-            try await Task.sleep(nanoseconds: 60_000_000_000)
-        }
-    }
-
-    private final class SuspendSamplerFactory: GenerationStageFactory {
-        private(set) var sampler: SuspendSampler?
-        func makePromptEncoder(context: MetalContext, fileURL: URL) throws -> PromptEncoderStage {
-            ProbeEncoder()
-        }
-        func makeContextAdapter(context: MetalContext, fileURL: URL) throws -> ContextAdapterStage {
-            ProbeAdapter()
-        }
-        func makeDiffusion(
-            context: MetalContext, fileURL: URL,
-            optimization: InferenceOptimizationConfig,
-            numerics: DiTNumericsPolicy
-        ) throws -> DiffusionStage {
-            let sampler = SuspendSampler()
-            self.sampler = sampler
-            return sampler
-        }
-        func makeVAE(context: MetalContext, fileURL: URL) throws -> VAEDecodeStage {
-            ProbeVAE()
-        }
     }
 }

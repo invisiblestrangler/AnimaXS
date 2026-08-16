@@ -10,9 +10,11 @@ struct AnimaXSApp: App {
                 .onChange(of: scenePhase) { _, phase in
                     switch phase {
                     case .background, .inactive:
-                        // K003: safe cancellation at the next block boundary;
-                        // the latest completed-step checkpoint is retained.
-                        // The ContentView's coordinator handles it.
+                        // K003: request cooperative cancellation at the next
+                        // block boundary. There is no checkpoint/resume state
+                        // to retain — the run simply ends cancelled and a
+                        // fresh Generate is available afterward. The
+                        // ContentView's coordinator handles it.
                         NotificationCenter.default.post(
                             name: .animaXSAppDidEnterBackground, object: nil)
                     case .active:

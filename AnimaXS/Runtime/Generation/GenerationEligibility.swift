@@ -14,16 +14,12 @@ enum GenerationEligibility: Equatable {
     static func evaluate(
         modelsResolved: Bool,
         isGenerating: Bool,
-        canResume: Bool,
         prompt: String,
         seedText: String,
         metalAvailable: Bool
     ) -> GenerationEligibility {
         if isGenerating {
             return .blocked("A generation is already running.")
-        }
-        if canResume {
-            return .blocked("A checkpoint is available — use Resume instead.")
         }
         if !modelsResolved {
             return .blocked("Models are not ready yet. Download or import all three model packs first.")
