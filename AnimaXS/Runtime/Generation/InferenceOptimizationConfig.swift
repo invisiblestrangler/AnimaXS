@@ -20,6 +20,20 @@ enum DiTLinearBackend: String, Codable, CaseIterable {
     /// projections and everything else keep the dequantized-MPS path until
     /// A12 data proves otherwise.
     case hybrid
+
+    /// QUARANTINED (device stabilization — Task 4): true for the P8 direct
+    /// packed QGEMM backends (`.directQuantized`, `.hybrid`) that measured
+    /// ~10x SLOWER than `.dequantizedMPS` on the physical A12 device
+    /// (structural kernel issues — TM=8 against M=1024, repeated packed-weight
+    /// revisits, scalar FMAs, many barriers). This is a measured PERFORMANCE
+    /// regression, NOT a proven correctness failure: the research kernel
+    /// (`LinearExecutor` / `AnimaKernels.metal`) stays intact and directly
+    /// testable, but these backends must never be selected by normal device
+    /// settings, presets, or combined candidates while the optimization
+    /// search runs.
+    var isQuarantined: Bool {
+        self == .directQuantized || self == .hybrid
+    }
 }
 
 /// Immutable, value-semantic runtime configuration captured for a single
@@ -105,6 +119,12 @@ struct InferenceOptimizationConfig: Equatable {
     /// MLP up/down matrices (largest decompressed-weight scratch traffic)
     /// through QGEMM and keeps attention projections on MPS until A12 data
     /// proves otherwise. M=1 modulation matvecs are never affected.
+    ///
+    /// QUARANTINED (Task 4): `.directQuantized` and `.hybrid` are measured
+    /// ~10x slower than `.dequantizedMPS` on device (A12). Normal device
+    /// settings, presets, and persisted values are sanitized to
+    /// `.dequantizedMPS`; the research kernel remains directly testable via
+    /// `LinearExecutor`.
     var linearBackend: DiTLinearBackend
 
     static let currentBaseline = InferenceOptimizationConfig(
@@ -162,12 +182,35 @@ enum InferencePreset: String, CaseIterable {
     case streamingMPSCandidate
     /// Fused + KV + pure-Metal Flash attention backend.
     case metalFlashCandidate
-    /// Best attention candidate + direct packed QGEMM for the MLP only
-    /// (`.hybrid` linear backend) — the §17 preset 8 "MLP QGEMM hybrid".
+    /// QUARANTINED (Task 4) — §17 preset 8 "MLP QGEMM hybrid". The QGEMM
+    /// part of this preset is temporarily disabled: `.hybrid` measured ~10x
+    /// SLOWER than `.dequantizedMPS` on the physical A12 device (a measured
+    /// performance regression, NOT a proven correctness failure — the P8
+    /// research kernel stays intact and testable). `makeConfig()` therefore
+    /// FORCES `linearBackend` back to `.dequantizedMPS` so a device preset
+    /// can never silently run the 10x-slower direct path; every other
+    /// component of the combination still applies unchanged. The preset is
+    /// kept selectable (with a visible note in Diagnostics) so the
+    /// combination can be re-enabled instantly once the QGEMM kernel is
+    /// structurally fixed and re-measured.
     case directQGEMMCandidate
     /// All currently-winning components combined — one test configuration,
-    /// NOT an automatic "best".
+    /// NOT an automatic "best". QUARANTINED (Task 4): like
+    /// `directQGEMMCandidate`, the hybrid/QGEMM part is temporarily disabled
+    /// (measured ~10x A12 regression vs `.dequantizedMPS`; performance, not
+    /// correctness). `makeConfig()` keeps every other combined setting as-is
+    /// EXCEPT `linearBackend` is forced back to `.dequantizedMPS`.
     case allCandidate
+
+    /// QUARANTINED (Task 4): true for presets whose QGEMM part is temporarily
+    /// disabled (measured ~10x A12 regression vs `.dequantizedMPS` —
+    /// performance, not correctness). They remain selectable: `makeConfig()`
+    /// forces `linearBackend` to `.dequantizedMPS` while keeping every other
+    /// component of the combination. The UI marks them with a visible warning
+    /// so a device preset can never silently run the 10x-slower direct path.
+    var containsQuarantinedLinearBackend: Bool {
+        self == .directQGEMMCandidate || self == .allCandidate
+    }
 
     /// Human-friendly label for UI selection.
     var label: String {
@@ -225,12 +268,19 @@ enum InferencePreset: String, CaseIterable {
             c.attentionBackend = .metalFlash
         case .directQGEMMCandidate:
             c = InferencePreset.stridedMPSKV.makeConfig()
-            c.linearBackend = .hybrid
+            // QUARANTINED (Task 4): the hybrid/QGEMM part is disabled — a
+            // measured ~10x A12 regression vs .dequantizedMPS. Force the
+            // backend back to the known-good path; never persist/run hybrid.
+            c.linearBackend = .dequantizedMPS
         case .allCandidate:
             c = InferencePreset.stridedMPSKV.makeConfig()
             c.noCopyWeightSource = true
             c.attentionBackend = .streamingMPS
-            c.linearBackend = .hybrid
+            // QUARANTINED (Task 4): keep every other combined setting as-is,
+            // EXCEPT the hybrid/QGEMM part — measured ~10x A12 regression vs
+            // .dequantizedMPS. A device preset must never silently run the
+            // 10x-slower direct path.
+            c.linearBackend = .dequantizedMPS
         }
         return c
     }

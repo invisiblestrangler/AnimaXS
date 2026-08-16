@@ -142,10 +142,20 @@ struct DiagnosticsView: View {
                 .foregroundStyle(.secondary)
             Picker("Preset (P9)", selection: presetBinding) {
                 ForEach(InferencePreset.allCases, id: \.self) { preset in
+                    // QUARANTINED (Task 4): presets whose QGEMM part is
+                    // disabled remain selectable, but are shown as disabled
+                    // with a visible explanation. Their makeConfig() forces
+                    // linearBackend back to .dequantizedMPS, so applying one
+                    // can never run the 10x-slower direct path — and the
+                    // disabled look makes the quarantine impossible to miss.
                     Text(preset.label).tag(preset)
+                        .disabled(preset.containsQuarantinedLinearBackend)
                 }
             }
             .disabled(isGenerating)
+            if optimizationSettings.activePreset?.containsQuarantinedLinearBackend == true {
+                quarantineNote
+            }
             Text("A preset sets every control below at once. Adjusting individual controls below refines it; nothing here is claimed fastest until the physical XS Max is measured.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -184,11 +194,18 @@ struct DiagnosticsView: View {
             }
             .disabled(isGenerating)
             Picker("DiT linear backend (P8)", selection: linearBackendBinding) {
-                ForEach(DiTLinearBackend.allCases, id: \.self) { backend in
+                // QUARANTINED (Task 4): `.directQuantized` and `.hybrid` are
+                // filtered out of the normal device picker entirely — they
+                // measured ~10x slower than dequantized MPS on the A12 device
+                // and must never be selectable in production/device settings.
+                // The P8 research kernel stays intact and testable via
+                // LinearExecutor for research/diagnostic tests.
+                ForEach(DiTLinearBackend.allCases.filter { !$0.isQuarantined }, id: \.self) { backend in
                     Text(backend.rawValue).tag(backend)
                 }
             }
             .disabled(isGenerating)
+            quarantineNote
             Button("Reset to current baseline") {
                 optimizationSettings.resetToBaseline()
             }
@@ -199,6 +216,22 @@ struct DiagnosticsView: View {
                     .foregroundStyle(.orange)
             }
         }
+    }
+
+    /// QUARANTINED (Task 4): visible explanation shown whenever the P8 direct
+    /// QGEMM backends (or the presets containing them) are hidden/disabled in
+    /// the UI. Wording states it is a measured A12 PERFORMANCE regression
+    /// (~10x slower than dequantized MPS), NOT a proven correctness failure —
+    /// the research kernel stays intact and testable via `LinearExecutor`.
+    private var quarantineNote: some View {
+        Label {
+            Text(InferenceOptimizationSettings.quarantineReason)
+                .font(.caption2)
+        } icon: {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+        }
+        .foregroundStyle(.secondary)
     }
 
     /// P9: binding for the preset picker. `activePreset` is `nil` once the

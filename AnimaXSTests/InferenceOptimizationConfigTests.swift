@@ -136,6 +136,73 @@ final class InferenceOptimizationConfigTests: XCTestCase {
         XCTAssertEqual(settings.attentionTileRows, 128)
     }
 
+    // QUARANTINED (Task 4): the baseline linear backend always resolves to
+    // the known-good dequantized-MPS path.
+    @MainActor
+    func testBaselineLinearBackendIsDequantizedMPS() {
+        XCTAssertEqual(InferenceOptimizationConfig.currentBaseline.linearBackend,
+                       .dequantizedMPS)
+        let settings = InferenceOptimizationSettings(defaults: makeDefaults())
+        XCTAssertEqual(settings.linearBackend, .dequantizedMPS)
+        XCTAssertEqual(settings.snapshot.linearBackend, .dequantizedMPS)
+    }
+
+    // QUARANTINED (Task 4): a persisted .directQuantized / .hybrid selection
+    // (e.g. from a pre-quarantine build) is migrated back to .dequantizedMPS
+    // on load, and the sanitized value is re-persisted so the store is clean.
+    @MainActor
+    func testPersistedQuarantinedLinearBackendSanitizesToBaseline() {
+        for rawValue in ["directQuantized", "hybrid"] {
+            let defaults = makeDefaults()
+            defaults.set(rawValue, forKey: InferenceOptimizationSettings.Keys.linearBackend)
+            let settings = InferenceOptimizationSettings(defaults: defaults)
+            XCTAssertEqual(settings.linearBackend, .dequantizedMPS,
+                           "persisted \(rawValue) must migrate to dequantizedMPS")
+            XCTAssertEqual(settings.snapshot.linearBackend, .dequantizedMPS)
+            XCTAssertEqual(defaults.string(forKey: InferenceOptimizationSettings.Keys.linearBackend),
+                           "dequantizedMPS",
+                           "the sanitized value must be re-persisted for \(rawValue)")
+            let reloaded = InferenceOptimizationSettings(defaults: defaults)
+            XCTAssertEqual(reloaded.linearBackend, .dequantizedMPS)
+        }
+    }
+
+    // QUARANTINED (Task 4): a manual selection of .directQuantized / .hybrid
+    // is rejected/normalized to .dequantizedMPS and NEVER reaches the
+    // persisted store.
+    @MainActor
+    func testSetLinearBackendRejectsQuarantinedValues() {
+        for backend in [DiTLinearBackend.directQuantized, .hybrid] {
+            let defaults = makeDefaults()
+            let settings = InferenceOptimizationSettings(defaults: defaults)
+            settings.setLinearBackend(backend)
+            XCTAssertEqual(settings.linearBackend, .dequantizedMPS,
+                           "selecting \(backend) must normalize to dequantizedMPS")
+            XCTAssertEqual(settings.snapshot.linearBackend, .dequantizedMPS)
+            XCTAssertEqual(defaults.string(forKey: InferenceOptimizationSettings.Keys.linearBackend),
+                           "dequantizedMPS",
+                           "\(backend) must never be persisted")
+        }
+        // The known-good backend still round-trips normally.
+        let defaults = makeDefaults()
+        let settings = InferenceOptimizationSettings(defaults: defaults)
+        settings.setLinearBackend(.dequantizedMPS)
+        XCTAssertEqual(settings.linearBackend, .dequantizedMPS)
+        XCTAssertEqual(defaults.string(forKey: InferenceOptimizationSettings.Keys.linearBackend),
+                       "dequantizedMPS")
+    }
+
+    // QUARANTINED (Task 4): the quarantined flag covers exactly the two
+    // disabled P8 backends.
+    func testQuarantineFlag() {
+        XCTAssertTrue(DiTLinearBackend.directQuantized.isQuarantined)
+        XCTAssertTrue(DiTLinearBackend.hybrid.isQuarantined)
+        XCTAssertFalse(DiTLinearBackend.dequantizedMPS.isQuarantined)
+        XCTAssertTrue(InferencePreset.directQGEMMCandidate.containsQuarantinedLinearBackend)
+        XCTAssertTrue(InferencePreset.allCandidate.containsQuarantinedLinearBackend)
+        XCTAssertFalse(InferencePreset.baseline.containsQuarantinedLinearBackend)
+    }
+
     @MainActor
     func testResetRestoresBaselineAndPersists() {
         let defaults = makeDefaults()
@@ -258,17 +325,23 @@ final class InferenceOptimizationConfigTests: XCTestCase {
     }
 
     // Direct QGEMM candidate = best attention (strided+KV) + hybrid linear
-    // (MLP-only QGEMM), per §17 preset 8.
+    // (MLP-only QGEMM), per §17 preset 8. QUARANTINED (Task 4): the QGEMM
+    // part is disabled (measured ~10x A12 regression vs dequantizedMPS), so
+    // the config keeps every other component but forces linearBackend back
+    // to .dequantizedMPS — a device preset can never silently run the
+    // 10x-slower direct path.
     @MainActor
     func testDirectQGEMMCandidatePreset() {
         let c = InferencePreset.directQGEMMCandidate.makeConfig()
-        XCTAssertEqual(c.linearBackend, .hybrid)
+        XCTAssertEqual(c.linearBackend, .dequantizedMPS)
         XCTAssertTrue(c.crossKVCache)
         XCTAssertTrue(c.stridedTokenMajorAttention)
         XCTAssertEqual(c.attentionBackend, .stridedTokenMajorMPS)
     }
 
     // allCandidate combines the winning components but is NOT forced as best.
+    // QUARANTINED (Task 4): every other combined setting stays as-is EXCEPT
+    // the hybrid/QGEMM part, which is forced back to .dequantizedMPS.
     @MainActor
     func testAllCandidatePreset() {
         let c = InferencePreset.allCandidate.makeConfig()
@@ -278,7 +351,40 @@ final class InferenceOptimizationConfigTests: XCTestCase {
         XCTAssertTrue(c.crossKVCache)
         XCTAssertTrue(c.noCopyWeightSource)
         XCTAssertEqual(c.attentionBackend, .streamingMPS)
-        XCTAssertEqual(c.linearBackend, .hybrid)
+        XCTAssertEqual(c.linearBackend, .dequantizedMPS)
+    }
+
+    // QUARANTINED (Task 4): no preset a normal device user can apply may ever
+    // produce a direct/hybrid linear backend.
+    @MainActor
+    func testNoPresetProducesQuarantinedLinearBackend() {
+        for preset in InferencePreset.allCases {
+            let c = preset.makeConfig()
+            XCTAssertFalse(c.linearBackend.isQuarantined,
+                           "\(preset) must not produce a quarantined linear backend")
+            XCTAssertEqual(c.linearBackend, .dequantizedMPS,
+                           "\(preset) must resolve to the baseline linear backend")
+        }
+    }
+
+    // QUARANTINED (Task 4): the quarantined presets keep every NON-QGEMM
+    // component of their combination — only linearBackend is neutralized.
+    @MainActor
+    func testQuarantinedPresetsKeepNonQGEMMComponents() {
+        let direct = InferencePreset.directQGEMMCandidate.makeConfig()
+        XCTAssertTrue(direct.crossKVCache)
+        XCTAssertTrue(direct.stridedTokenMajorAttention)
+        XCTAssertEqual(direct.attentionBackend, .stridedTokenMajorMPS)
+        XCTAssertEqual(direct.linearBackend, .dequantizedMPS)
+
+        let all = InferencePreset.allCandidate.makeConfig()
+        XCTAssertTrue(all.fusedNormModulation)
+        XCTAssertTrue(all.fusedMLPActivation)
+        XCTAssertTrue(all.stridedTokenMajorAttention)
+        XCTAssertTrue(all.crossKVCache)
+        XCTAssertTrue(all.noCopyWeightSource)
+        XCTAssertEqual(all.attentionBackend, .streamingMPS)
+        XCTAssertEqual(all.linearBackend, .dequantizedMPS)
     }
 
     // Every preset's config is internally consistent with respect to backend

@@ -137,9 +137,25 @@ final class InferenceOptimizationSettings: ObservableObject {
         defaults.set(value.rawValue, forKey: Keys.attentionBackend)
     }
 
+    /// QUARANTINED (Task 4): the P8 direct packed QGEMM backends
+    /// (`.directQuantized`, `.hybrid`) measured ~10x SLOWER than
+    /// `.dequantizedMPS` on the physical A12 device — a measured PERFORMANCE
+    /// regression, NOT a proven correctness failure (the research kernel
+    /// stays intact and directly testable via `LinearExecutor`). Normal
+    /// device settings must never select them while the optimization search
+    /// runs, so a manual selection is rejected/normalized to
+    /// `.dequantizedMPS` and never persisted.
+    static let quarantineReason = "P8 direct QGEMM (.directQuantized / .hybrid) is temporarily disabled: it measured ~10x slower than dequantized MPS on the A12 device (performance regression, not a proven correctness failure). The research kernel remains testable directly via LinearExecutor."
+
     func setLinearBackend(_ value: DiTLinearBackend) {
-        linearBackend = value
-        defaults.set(value.rawValue, forKey: Keys.linearBackend)
+        // QUARANTINED (Task 4): reject direct/hybrid selections for normal
+        // device settings — normalize to the known-good baseline and never
+        // let a quarantined rawValue reach the persisted store. The P8
+        // research path remains reachable only through a manually
+        // constructed LinearExecutor (research tests).
+        let sanitized = value.isQuarantined ? DiTLinearBackend.dequantizedMPS : value
+        linearBackend = sanitized
+        defaults.set(sanitized.rawValue, forKey: Keys.linearBackend)
     }
 
     /// P9 (runbook §14): applies a named preset by setting every underlying
@@ -250,10 +266,26 @@ final class InferenceOptimizationSettings: ObservableObject {
         return value
     }
 
-    private static func loadLinearBackend(from defaults: UserDefaults,
-                                          baseline: DiTLinearBackend) -> DiTLinearBackend {
+    /// QUARANTINED (Task 4): the P8 direct packed QGEMM backends
+    /// (`.directQuantized`, `.hybrid`) measured ~10x SLOWER than
+    /// `.dequantizedMPS` on the physical A12 device — a measured PERFORMANCE
+    /// regression, NOT a proven correctness failure (the research kernel
+    /// stays intact and directly testable via `LinearExecutor`). Normal
+    /// device settings must never select them while the optimization search
+    /// runs. Persisted bad values are migrated back to `.dequantizedMPS` on
+    /// load so they can never reach the executors.
+    static func loadLinearBackend(from defaults: UserDefaults,
+                                  baseline: DiTLinearBackend) -> DiTLinearBackend {
         guard let raw = defaults.string(forKey: Keys.linearBackend),
               let value = DiTLinearBackend(rawValue: raw) else { return baseline }
+        // QUARANTINED (Task 4): a persisted direct/hybrid selection (e.g.
+        // from a pre-quarantine build) is migrated back to the baseline.
+        // The sanitized value is also re-persisted so the next launch reads
+        // a clean store.
+        if value.isQuarantined {
+            defaults.set(baseline.rawValue, forKey: Keys.linearBackend)
+            return baseline
+        }
         return value
     }
 
