@@ -23,8 +23,10 @@ struct ContentView: View {
     // Runtime inference-optimization settings (Diagnostics). Captured into an
     // immutable snapshot at Generate time; never mutated mid-run.
     @StateObject private var optimizationSettings = InferenceOptimizationSettings()
-    @State private var prompt = "masterpiece, best quality, score_7, safe, 1girl"
-    @State private var seedText = "1337"
+    @AppStorage("generation.lastPrompt")
+    private var prompt = "masterpiece, best quality, score_7, safe, 1girl"
+    @AppStorage("generation.lastSeed")
+    private var seedText = "1337"
     @State private var generationStart = Date()
     @State private var elapsedText = ""
     @State private var elapsedTimer: Timer?

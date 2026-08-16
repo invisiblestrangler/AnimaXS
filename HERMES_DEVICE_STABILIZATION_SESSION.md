@@ -10,7 +10,7 @@
 - [x] T3 Full-inference CI policy alignment (verified + committed)
 - [x] T4 Quarantine directQuantized/hybrid (verified + committed)
 - [x] T5 Disable P6 mmap no-copy + fatal-Metal poisoning (verified + committed)
-- [ ] T6 Import vs Download + single-flight (pending)
+- [x] T6 Import vs Download + single-flight (verified + committed)
 - [ ] T7 Persist prompt/seed (pending)
 - [ ] T8 Fresh-run image ownership (pending)
 - [ ] T9 Diagnostics preset drift + compat validator (pending)
@@ -29,6 +29,7 @@
 - fd3e31f docs: update session ledger (T2, T3 committed)
 - e536bd7 fix: quarantine P8 directQuantized/hybrid from production device settings (T4)
 - b14b88b fix: disable P6 mmap no-copy and poison context on fatal Metal faults (T5)
+- f64eb5c fix: Import is local-only and per-component model ops are single-flight (T6)
 
 ## CI Runs
 - bootstrap-project #31932812543: success (pbxproj regenerated for T1)
