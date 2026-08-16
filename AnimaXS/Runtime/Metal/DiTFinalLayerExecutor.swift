@@ -85,10 +85,12 @@ final class DiTFinalLayerExecutor {
 
         // predict2.py:930 casts the large fp32 residual to cross-attention dtype
         // before FinalLayer. For W4 (legacy) that is an fp16 boundary followed by
-        // an fp32-stat LayerNorm — the known-good path. For W8-v2 (BF16 emulated),
-        // an FP16 conversion of the large residual would overflow above 65,504, so
+        // an fp32-stat LayerNorm — the known-good path. For the BF16 experimental
+        // policy (w8BF16Experimental / explicit .bf16Compute request), an FP16
+        // conversion of the large residual would overflow above 65,504, so
         // the residual is rounded to BF16 RNE while retained in fp32 storage, and
         // LayerNorm runs in fp32 over those BF16-rounded values (source-faithful).
+        // Production W8-v2 resolves to legacy numerics and does NOT take this path.
         let normalized = buffer("final.normalized.f32", Self.tokens * Self.dim, Float.self)
         let normalizedHalf = buffer("final.normalized.f16", Self.tokens * Self.dim, Float16.self)
         let normalizedBoundary = buffer(
@@ -97,9 +99,11 @@ final class DiTFinalLayerExecutor {
         let projectionInput = buffer("final.projectionInput.f16", Self.tokens * Self.dim, Float16.self)
 
         if emulatesBF16 {
-            // W8-v2: BF16 RNE rounding of the large residual while stored in FP32,
-            // then LayerNorm in FP32 over the BF16-rounded values. The large
-            // residual is never converted to half here.
+            // Experimental BF16 path (explicit .bf16Compute request, never the
+            // production W8-v2 resolution): BF16 RNE rounding of the large
+            // residual while stored in FP32, then LayerNorm in FP32 over the
+            // BF16-rounded values. The large residual is never converted to
+            // half here.
             let boundaryFloat = buffer("final.boundary.f32", Self.tokens * Self.dim, Float.self)
             try encodeUnary(command, "round_f32_to_bf16", residual, boundaryFloat,
                             Self.tokens * Self.dim)

@@ -911,4 +911,68 @@ final class ModelStoreTests: XCTestCase {
             try? fm.removeItem(at: dir)
         }
     }
+
+    // MARK: - DiT numerics policy resolution (device-stabilization Task 2)
+
+    /// Production W8-v2 must resolve to the stabilized LEGACY policy — the
+    /// numerical mode that already produced coherent full-inference CI
+    /// output — and must NOT auto-select the incomplete FP16-backed BF16
+    /// emulation path. The BF16 experimental policy stays reachable only via
+    /// explicit request.
+
+    func testVariantW4ResolvesToLegacyPolicy() {
+        XCTAssertEqual(DiTNumericsPolicy.fromVariantID("w4"), .w4Legacy)
+    }
+
+    func testVariantW8V2ResolvesToStabilizedLegacyPolicy() {
+        XCTAssertEqual(DiTNumericsPolicy.fromVariantID("w8-v2"), .w8LegacyStabilized)
+    }
+
+    func testVariantW8V2NeverResolvesToExperimentalBF16() {
+        XCTAssertNotEqual(DiTNumericsPolicy.fromVariantID("w8-v2"), .w8BF16Experimental)
+    }
+
+    func testUnknownVariantFallsBackToW4Legacy() {
+        XCTAssertEqual(DiTNumericsPolicy.fromVariantID("some-future-variant"), .w4Legacy)
+    }
+
+    func testW4LegacyPolicyMapsToLegacyLegacyNumerics() {
+        let resolved = DiffusionSampler.resolvedNumerics(for: .w4Legacy)
+        XCTAssertEqual(resolved.activation, .legacy)
+        XCTAssertEqual(resolved.attention, .legacy)
+    }
+
+    func testW8LegacyStabilizedPolicyMapsToLegacyLegacyNumerics() {
+        let resolved = DiffusionSampler.resolvedNumerics(for: .w8LegacyStabilized)
+        XCTAssertEqual(resolved.activation, .legacy)
+        XCTAssertEqual(resolved.attention, .legacy)
+    }
+
+    func testW8BF16ExperimentalPolicyMapsToBF16ComputeNumerics() {
+        // The experimental path remains reachable when explicitly requested
+        // (diagnostic path) even though variant-id resolution never selects
+        // it for production W8-v2.
+        let resolved = DiffusionSampler.resolvedNumerics(for: .w8BF16Experimental)
+        XCTAssertEqual(resolved.activation, .bf16Compute)
+        XCTAssertEqual(resolved.attention, .bf16Compute)
+    }
+
+    func testW4VariantChainResolvesToLegacyNumerics() {
+        let policy = DiTNumericsPolicy.fromVariantID("w4")
+        let resolved = DiffusionSampler.resolvedNumerics(for: policy)
+        XCTAssertEqual(policy, .w4Legacy)
+        XCTAssertEqual(resolved.activation, .legacy)
+        XCTAssertEqual(resolved.attention, .legacy)
+    }
+
+    func testW8V2VariantChainResolvesToLegacyNumerics() {
+        // Full production chain: resolved W8-v2 pack -> stabilized legacy
+        // policy -> legacy attention/activation numerics (the known-good
+        // numerical mode that produced coherent full-inference CI output).
+        let policy = DiTNumericsPolicy.fromVariantID("w8-v2")
+        let resolved = DiffusionSampler.resolvedNumerics(for: policy)
+        XCTAssertEqual(policy, .w8LegacyStabilized)
+        XCTAssertEqual(resolved.activation, .legacy)
+        XCTAssertEqual(resolved.attention, .legacy)
+    }
 }

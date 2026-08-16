@@ -52,16 +52,22 @@ struct ModelVariantDescriptor: Hashable {
 /// pack variant id — never from the app-owned local filename.
 ///
 /// - `w4Legacy`: the known-good current W4 path (FP16 boundaries as today).
-/// - `w8BF16Emulated`: the W8-v2 pack whose source semantics require a
-///   BF16-like range at compute boundaries. On Apple5/A12 (no native BF16
-///   storage) this is emulated as BF16 RNE rounding while retaining FP32
-///   storage, mapping onto the existing `ActivationNumerics` BF16 machinery.
+/// - `w8LegacyStabilized`: production W8-v2 resolution. Uses the same legacy
+///   attention/activation numerics that already produced coherent
+///   full-inference CI output for W8 — the BF16 range-emulation path is not
+///   yet complete, so production W8 temporarily runs legacy numerics rather
+///   than an unfinished experimental path.
+/// - `w8BF16Experimental`: BF16-range emulation for W8 (BF16 RNE rounding in
+///   FP32 storage, mapping onto the existing `ActivationNumerics` BF16
+///   machinery). Retained ONLY for explicitly-requested experiments/diagnostics;
+///   it is NOT selected by variant-id resolution.
 enum DiTNumericsPolicy: String, Equatable {
     case w4Legacy
-    case w8BF16Emulated
+    case w8LegacyStabilized
+    case w8BF16Experimental
 
     static func fromVariantID(_ id: String) -> DiTNumericsPolicy {
-        id == "w8-v2" ? .w8BF16Emulated : .w4Legacy
+        id == "w8-v2" ? .w8LegacyStabilized : .w4Legacy
     }
 }
 

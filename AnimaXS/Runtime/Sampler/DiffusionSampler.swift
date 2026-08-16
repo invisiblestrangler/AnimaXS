@@ -58,19 +58,15 @@ final class DiffusionSampler {
          numerics: DiTNumericsPolicy? = nil) throws {
         self.context = context
         // When the pack-derived policy is supplied it selects the numerical
-        // fidelity (W8-v2 => BF16 emulation, W4 => legacy). It is derived from
-        // the resolved variant id, never from the app-owned filename.
+        // fidelity. Production W8-v2 resolves to `w8LegacyStabilized` (legacy
+        // numerics — the known-good path); the BF16 experimental policy is
+        // never selected by variant-id resolution, only by explicit request.
+        // Policy is derived from the resolved variant id, never from the
+        // app-owned filename.
         let resolvedActivation: ActivationNumerics
         let resolvedAttention: AttentionNumerics
         if let numerics {
-            switch numerics {
-            case .w4Legacy:
-                resolvedActivation = .legacy
-                resolvedAttention = .legacy
-            case .w8BF16Emulated:
-                resolvedActivation = .bf16Compute
-                resolvedAttention = .bf16Compute
-            }
+            (resolvedActivation, resolvedAttention) = Self.resolvedNumerics(for: numerics)
         } else {
             resolvedActivation = activationNumerics
             resolvedAttention = attentionNumerics
@@ -319,6 +315,22 @@ final class DiffusionSampler {
         }
         return NumericalFailure.eulerOutput(
             step: step + 1, totalSteps: ModelConstants.samplerSteps)
+    }
+
+    /// Resolves the attention/activation numerics selected by a DiT numerics
+    /// policy. The single source of truth for the policy -> numerics mapping,
+    /// used by `init` (test seam: no Metal context required to assert it).
+    static func resolvedNumerics(
+        for policy: DiTNumericsPolicy
+    ) -> (activation: ActivationNumerics, attention: AttentionNumerics) {
+        switch policy {
+        case .w4Legacy:
+            return (.legacy, .legacy)
+        case .w8LegacyStabilized:
+            return (.legacy, .legacy)
+        case .w8BF16Experimental:
+            return (.bf16Compute, .bf16Compute)
+        }
     }
 
     private func convertVelocity(
