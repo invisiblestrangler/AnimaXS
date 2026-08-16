@@ -82,3 +82,12 @@ result: ALL PASS. project-consistency ✓, simulator-tests ✓ (305 tests, 14 ex
 key metrics: 0 failures. Adds DiTAttentionBackend selector (legacyHeadMajorMPS/stridedTokenMajorMPS/streamingMPS/metalFlash, default legacy preserves W4). P7-A streaming/online-softmax MPS (chunked keys 64/128/256, running FP32 max/sum, FP32 accumulator, no per-chunk wait, non-causal refusal). P7-B DiT-specialized pure-Metal Flash (dit_flash_attention_h128_q4_k32 + _k16; headDim=128, heads=16, token-major, FP32 accumulation, running-max/rescale, no simdgroup_matrix). Tests: streaming MPS parity, Metal Flash parity (DiT shape), non-DiT headDim rejection. DiagnosticsView backend picker.
 artifact/run id: 31918808645 (PR #17 draft)
 interpretation: P7 gate met. Backends runtime-selectable behind DiTAttentionBackend (default legacy preserves W4). Physical A12 (P7-D) selects the winner on sustained later steps — not done by CI. Next: P8.
+
+## 2026-08-16 (P8) — Normal CI green on P8 (direct packed W4/W8 GEMM)
+HEAD: 1cb1d93 (P8 complete on opt/a12-sustained-io)
+command: gh workflow run ci.yml --ref opt/a12-sustained-io; gh run watch 31922667679
+configuration: normal CI (ci.yml): project-consistency, simulator-tests, iphone-build
+result: ALL PASS. project-consistency ✓, simulator-tests ✓ (307 tests, 14 expected skips, 0 failures), iphone-build ✓ (QGEMM Metal kernels compile).
+key metrics: 0 failures. Adds DiTLinearFamily (attentionProjection/mlpUp/mlpDown/other) + DiTLinearBackend (dequantizedMPS/directQuantized/hybrid, default dequantizedMPS preserves W4). qgemm_8x8x64/qgemm_8x16x64 + W8 variants as macro-generated MSL kernels (MSL rejects template-param structs), EXACT dequant_w4_to_half/dequant_w8_to_half decode (group K=64), threadgroup W-tile dequant reused across TM rows, FP32 accumulator, no full [N,K] fp16 scratch; hybrid dispatch MLP→QGEMM / attention→MPS; M=1 matvec preserved; qgemmCalls + per-family metrics; DiagnosticsView selector. Tests: direct QGEMM parity (cosine 0.9999998, fp16 accumulation drift), qgemmCalls per-step/family accumulation.
+artifact/run id: 31922667679 (PR #17 draft)
+interpretation: P8 gate met. Direct QGEMM gated behind selector (default dequantizedMPS preserves W4); device decides per-family enablement later. Next: P9 (combine winners + presets + final report).

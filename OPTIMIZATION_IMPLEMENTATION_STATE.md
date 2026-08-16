@@ -2,10 +2,10 @@
 
 Baseline main SHA: f89b1d867883f04b2d9aa4b59e9322b36111c8b4 (origin/main, planner-verified baseline)
 Working branch: opt/a12-sustained-io
-Current HEAD: 153ac1f (P7 complete, CI green)
-## Current phase: P8 — direct packed W4/W8 GEMM (runbook §13, highest-risk)
-Current phase gate: P8 — DiTLinearFamily tagging; qgemm_8x8x64/qgemm_8x16x64 tile profiles; dispatch dequantizedMPS/directQuantized/hybrid; parity + CI green
-Working tree: clean (at 153ac1f)
+Current HEAD: 1cb1d93 (P8 complete, CI green)
+## Current phase: P9 — combine winners + presets + final integration/report (runbook §14, §23)
+Current phase gate: P9 — InferencePreset enum; diagnostics presets; no winner forced without A12 data; final report
+Working tree: clean (at 1cb1d93)
 
 ## Completed phases
 - P0 COMPLETE: branch created from origin/main f89b1d8; state files committed; PR #17; normal CI green (31896517851).
@@ -16,12 +16,13 @@ Working tree: clean (at 153ac1f)
 - P5 COMPLETE (commits 287555e..7062064): generation-local cross-attention K/V cache (CrossKVCache, one contiguous ~112 MiB .storageModePrivate buffer, per-block ready flags); hit=blit cache→scratch (skip cross K/V projection + static boundary + K RMSNorm), miss=project+store+markReady, Q always dynamic; threaded DiffusionSampler→DitForward→DiTBlockExecutor behind crossKVCache toggle (default OFF); recordCrossKVHit/Miss metrics + summary line; graceful alloc-failure fallback. CI green on run 31913876755 (292 tests, 0 failures).
 - P6 COMPLETE (commits cad818f..e0b6109): mmap-backed no-copy weight source (WeightStorageMode copied/noCopy + WeightLoadResult + WeightNoCopyPolicy page-aligned eligibility + bytesNoCopy MTLBuffer alias over the mmap'd pack region, deallocator nil so AnimapkFile retains the mmap); noCopyWeightSource toggle (default OFF) wired through DiTBlock/Preparation/FinalLayer executors; buffer(for:) returns the alias on no-copy path; recordMmapNoCopyBytes + summary; safe fallback to copied for non-aligned/out-of-bounds/device-refusal; Qwen/VAE/LLMAdapter unchanged. CI green on run 31915690478 (302 tests, 0 failures).
 - P7 COMPLETE (commits 55ce7bc..153ac1f): attention backends — DiTAttentionBackend selector (legacyHeadMajorMPS/stridedTokenMajorMPS/streamingMPS/metalFlash, default legacy preserves W4); P7-A streaming/online-softmax MPS (chunked keys 64/128/256, running FP32 max/sum, FP32 accumulator, no per-chunk wait, non-causal refusal); P7-B DiT-specialized pure-Metal Flash (headDim=128, heads=16, self 1024/cross 512, token-major, FP32 accumulation, threadExecutionWidth==32 gate, running-max/rescale mandatory, K=32 + K=16 profiles, no simdgroup_matrix); parity vs strided + non-DiT rejection tests; DiagnosticsView backend picker. CI green on run 31918808645 (305 tests, 0 failures).
+- P8 COMPLETE (commits 781a54a..1cb1d93): direct packed W4/W8 GEMM — DiTLinearFamily (attentionProjection/mlpUp/mlpDown/other) tagged at DiT call sites; DiTLinearBackend selector (dequantizedMPS/directQuantized/hybrid, default dequantizedMPS preserves W4); qgemm_8x8x64/qgemm_8x16x64 (+ W8 variants) macro-generated MSL kernels with EXACT dequant_w4_to_half/dequant_w8_to_half decode (group K=64), threadgroup W-tile dequant reused across TM rows, FP32 accumulator, no full [N,K] fp16 scratch; hybrid dispatch (MLP→QGEMM, attention→MPS); M=1 matvec preserved; qgemmCalls + per-family metrics; DiagnosticsView selector. CI green on run 31922667679 (307 tests, 0 failures).
 
 ## Current exact objective
-- P7 COMPLETE (normal CI green on run 31918808645: 305 tests, 0 failures). Next: P8 — direct packed W4/W8 GEMM (runbook §13, highest-risk).
+- P8 COMPLETE (normal CI green on run 31922667679: 307 tests, 0 failures). Next: P9 — combine winners + presets + final integration/report (runbook §14, §23).
 
 ## Current files being modified
-- P7 complete: working tree clean at 153ac1f.
+- P8 complete: working tree clean at 1cb1d93.
 
 ## Invariants that must not regress
 - W4 known-good path
@@ -42,16 +43,17 @@ Working tree: clean (at 153ac1f)
 - P5 normal CI green (31913876755): 292 tests, 0 failures. Cross-KV cache unit tests + metrics accumulation.
 - P6 normal CI green (31915690478): 302 tests, 0 failures. WeightStreamer no-copy/mmap alias + metrics.
 - P7 normal CI green (31918808645): 305 tests, 0 failures. Streaming MPS + Metal Flash parity + non-DiT rejection.
+- P8 normal CI green (31922667679): 307 tests, 0 failures. Direct QGEMM parity + qgemmCalls metrics.
 
 ## Tests still required
-- P8: tiny W4/W8 QGEMM vs dequant+MPS parity; odd M/N; tile boundary; no full FP16 weight scratch on direct path; qgemmCalls metric.
+- P9: preset selection maps to the right combination; reset-to-baseline restores; immutable snapshot mid-run unchanged.
 
 ## Known unresolved items
 - None.
 
 ## Exact next command / next code edit
-- Begin P8: add DiTLinearFamily to LinearExecutor call sites; implement qgemm_8x8x64 + qgemm_8x16x64 (TK=64, group K=64) tile profiles with threadgroup dequant of W tile reused across TM activation rows + FP32 accumulator + exact dequant_w4_to_half/dequant_w8_to_half decode; dispatch .dequantizedMPS/.directQuantized/.hybrid (MLP→QGEMM initially); no full FP16 weight scratch on direct path.
+- Begin P9: add InferencePreset enum (baseline/current1024Control/fusedTraffic/stridedMPS/stridedMPSKV/noCopyCandidate/streamingMPSCandidate/metalFlashCandidate/directQGEMMCandidate/allCandidate); diagnostics preset selector + reset-to-baseline; do NOT change currentBaseline to recommendedA12 (no A12 data yet); final report per runbook §23.
 
 ## Last safe continuation point
-commit: 153ac1f (P7 complete, CI green) on opt/a12-sustained-io — HEAD at 153ac1f (remote == local)
-notes: P7 done and green (305 tests). P8 (direct packed W4/W8 QGEMM, highest-risk) next. Reminders: after adding/removing .swift files run bootstrap-project.yml + pull bot commit before ci.yml; push every commit; verify git ls-remote origin opt/a12-sustained-io == git rev-parse HEAD after each push. Full handoff in HANDOFF.md.
+commit: 1cb1d93 (P8 complete, CI green) on opt/a12-sustained-io — HEAD at 1cb1d93 (remote == local)
+notes: P8 done and green (307 tests). P9 (combine winners + presets + final report) is the LAST phase. Reminders: after adding/removing .swift files run bootstrap-project.yml + pull bot commit before ci.yml; push every commit; verify git ls-remote origin opt/a12-sustained-io == git rev-parse HEAD after each push. Full handoff in HANDOFF.md.
