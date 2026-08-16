@@ -91,3 +91,13 @@ result: ALL PASS. project-consistency ✓, simulator-tests ✓ (307 tests, 14 ex
 key metrics: 0 failures. Adds DiTLinearFamily (attentionProjection/mlpUp/mlpDown/other) + DiTLinearBackend (dequantizedMPS/directQuantized/hybrid, default dequantizedMPS preserves W4). qgemm_8x8x64/qgemm_8x16x64 + W8 variants as macro-generated MSL kernels (MSL rejects template-param structs), EXACT dequant_w4_to_half/dequant_w8_to_half decode (group K=64), threadgroup W-tile dequant reused across TM rows, FP32 accumulator, no full [N,K] fp16 scratch; hybrid dispatch MLP→QGEMM / attention→MPS; M=1 matvec preserved; qgemmCalls + per-family metrics; DiagnosticsView selector. Tests: direct QGEMM parity (cosine 0.9999998, fp16 accumulation drift), qgemmCalls per-step/family accumulation.
 artifact/run id: 31922667679 (PR #17 draft)
 interpretation: P8 gate met. Direct QGEMM gated behind selector (default dequantizedMPS preserves W4); device decides per-family enablement later. Next: P9 (combine winners + presets + final report).
+
+## 2026-08-16 (P9) — Presets + final integration in progress
+HEAD: 20a40a8 (P9 code + tests committed on opt/a12-sustained-io)
+command: edits to InferenceOptimizationConfig/Settings/DiagnosticsView/InferenceOptimizationConfigTests; commit + push; ci.yml run 31924014986 (status pending)
+configuration: normal CI (ci.yml): project-consistency, simulator-tests, iphone-build
+result: PENDING — CI run 31924014986 watching. Adds InferencePreset enum (10 cases) mapping to concrete InferenceOptimizationConfig per runbook §14/§17; setPreset applies + persists every control + activePreset marker; invalid persisted preset sanitizes to nil; resetToBaseline clears marker; DiagnosticsView preset picker; individual A/B controls retained. Tests: preset→config mapping, persistence, sanitization, snapshot stability, reset clears marker, backend layout invariant.
+key metrics: 0 known failures (CI pending). baseline preset == currentBaseline; allCandidate is one test config, NOT an automatic best; no recommendedA12 until physical A12 data (§14).
+artifact/run id: 31924014986 (PR #17 draft)
+interpretation: P9 in progress. Awaiting CI result before final report (§23) + state files → "ready for physical A12 validation".
+
