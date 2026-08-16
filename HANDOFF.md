@@ -5,10 +5,11 @@ For: the next agent continuing this implementation. Read this fully before touch
 ---
 
 ## TL;DR status
-- **Phases P0, P1, P2, P3, P4, P5, P6, P7, P8 are COMPLETE and CI-GREEN** on branch `opt/a12-sustained-io`. **Only P9 (combine winners + presets + final report) remains.**
-- **Current HEAD: `bffc03a`** (P8 complete + state/evidence). Working tree CLEAN, `origin/opt/a12-sustained-io` == local `bffc03a`. Draft PR #17 open.
-- Last green CI: run `31922667679` (P8) — **307 tests, 14 expected skips, 0 failures**.
+- **Phases P0–P9 are COMPLETE and CI-GREEN** on branch `opt/a12-sustained-io`. P9 (combine winners + presets + final report) is done. **The project is READY FOR PHYSICAL A12 VALIDATION** (runbook §17).
+- **Current HEAD: `d16e317`** (P9 complete + state/evidence/report). Working tree CLEAN, `origin/opt/a12-sustained-io` == local `d16e317`. Draft PR #17 open.
+- Last green CI: run `31924467039` (P9) — **324 tests, 14 expected skips, 0 failures**.
 - The full implementation plan is the runbook file: `/root/.hermes/cache/documents/doc_e617196af2a6_ANIMAXS_A12_RELIABILITY_PERFORMANCE_IMPLEMENTATION_PLAN.md` (also sent in-conversation). **It is the authoritative spec.** Repo: `/root/AnimaXS`, branch `opt/a12-sustained-io`.
+- Final report: `OPTIMIZATION_FINAL_REPORT.md` (runbook §23 template).
 
 ---
 
@@ -61,25 +62,24 @@ Update before long CI waits and at every phase gate.
 - **P6** mmap no-copy weight source — CI 31915690478 (302 tests). `WeightStorageMode`/`WeightNoCopyPolicy`/`WeightLoadResult`, `noCopyWeightSource` toggle (default OFF), page-aligned-only with copied fallback, `recordMmapNoCopyBytes`.
 - **P7** attention backends (streaming MPS + pure Metal Flash) — CI 31918808645 (305 tests). `DiTAttentionBackend` (legacy/strided/streaming/metalFlash, default legacy), streaming online-softmax MPS + `dit_flash_attention_h128_q4_k32`/`_k16`, parity + non-DiT rejection tests.
 - **P8** direct packed W4/W8 GEMM — CI 31922667679 (307 tests). `DiTLinearFamily` + `DiTLinearBackend` (dequantizedMPS/directQuantized/hybrid, default dequantizedMPS), `qgemm_8x8x64`/`qgemm_8x16x64`(+W8) macro-generated MSL kernels (MSL rejects template-param structs — use `#define QGEMM_KERNEL`), exact dequant decode, threadgroup W-tile, FP32 acc, no full FP16 scratch, `recordQGEMMCall`, direct-QGEMM parity test (cosine 0.9999998).
+- **P9** combine winners + presets + final report — CI 31924467039 (324 tests). `InferencePreset` (10 cases) → `makeConfig()` maps to a concrete `InferenceOptimizationConfig`; `setPreset` applies + persists + sanitizes (invalid → nil); `resetToBaseline` clears the marker; DiagnosticsView preset picker; baseline/individual A/B controls retained; no `recommendedA12` (no physical A12 data yet). Final report at `OPTIMIZATION_FINAL_REPORT.md`.
 
 ---
 
-## What's left — P9 (runbook §14, the LAST phase)
+## What's next — PHYSICAL A12 VALIDATION (runbook §17)
 
-### P9 — combine winners + presets (runbook §14) + final report (§23)
-- Add `enum InferencePreset: String, CaseIterable`: `baseline`, `current1024Control`, `fusedTraffic`, `stridedMPS`, `stridedMPSKV`, `noCopyCandidate`, `streamingMPSCandidate`, `metalFlashCandidate`, `directQGEMMCandidate`, `allCandidate`. Each preset maps to a specific combination of the existing config toggles/backends (linear 1024 + attention 1024 + directMPSIO + ping-pong for control; add fused; add strided; add KV; add no-copy; etc.).
-- Keep ALL individual backends + A/B controls (don't remove the per-toggle/backend controls).
-- Add a diagnostics preset selector + reset-to-baseline. **Do NOT change `currentBaseline` to a `recommendedA12` preset** — no physical A12 data exists yet. Add `recommendedA12` only AFTER the user tests on the device.
-- Preset config persistence: `InferenceOptimizationSettings` needs a `setPreset(_:)` that applies the mapping + sanitizes invalid persisted enums; reset restores baseline. Immutable snapshot-at-Generate behavior must remain.
-- Tests: preset selection maps to the right combination; reset-to-baseline restores baseline; invalid persisted enum sanitizes; snapshot unchanged mid-run.
-- Then produce the **final report (runbook §23)**: repo/branch/final HEAD/correctness fixes/backends/tests/traffic changes/known limitations/physical XS Max benchmark matrix (runbook §17 presets 1-9 with fixed model/prompt/seed/steps/resolution, unplugged, low-power off)/state files/final recommendation. **Do NOT claim any backend is fastest without physical A12 measurements.**
-- Ensure `OPTIMIZATION_IMPLEMENTATION_STATE.md` ends in a "ready for physical A12 validation" state; tree clean; branch pushed; `OPTIMIZATION_EVIDENCE.md` has all run IDs.
+P9 is complete; **no further code changes are required**. The remaining work is on-device, not on this VPS:
+- Run the §17 benchmark matrix on a physical XS Max using the Diagnostics-screen **Preset** selector (runbook §17 presets 1–9): fixed model W4 first, fixed prompt, fixed seed, 8 steps, unchanged resolution, device unplugged, low-power mode off. Record the full metrics text after each run.
+- After W4 is stable, run W8-v2 correctness first — do NOT use W8 as the first performance control.
+- Only after physical measurements: add a `recommendedA12` preset in `InferencePreset` with the proven winner combination. **Do NOT change `currentBaseline` to `recommendedA12` without physical A12 data.**
+- Simulator/macOS timing is NOT device proof; do not "optimize for CI timing."
 
-### Files P9 likely touches
-- `AnimaXS/Runtime/Generation/InferenceOptimizationConfig.swift` (+ preset mapping)
-- `AnimaXS/App/InferenceOptimizationSettings.swift`, `AnimaXS/App/DiagnosticsView.swift` (preset selector + apply)
-- `AnimaXSTests/InferenceOptimizationConfigTests.swift` / `GenerationMetricsTests.swift` (preset tests)
-- `OPTIMIZATION_IMPLEMENTATION_STATE.md`, `OPTIMIZATION_EVIDENCE.md`, `OPTIMIZATION_DECISIONS.md`, `HANDOFF.md`, and the final report file
+### Files P9 touched
+- `AnimaXS/Runtime/Generation/InferenceOptimizationConfig.swift` (`InferencePreset` + `makeConfig`)
+- `AnimaXS/App/InferenceOptimizationSettings.swift` (`setPreset`, `activePreset`, `loadPreset`)
+- `AnimaXS/App/DiagnosticsView.swift` (preset picker)
+- `AnimaXSTests/InferenceOptimizationConfigTests.swift` (P9 preset tests, +17)
+- `OPTIMIZATION_IMPLEMENTATION_STATE.md`, `OPTIMIZATION_EVIDENCE.md`, `OPTIMIZATION_DECISIONS.md`, `HANDOFF.md`, `OPTIMIZATION_FINAL_REPORT.md`
 
 ---
 
@@ -94,7 +94,8 @@ W4 known-good reference; 8 steps; 28 blocks; no thermal gating; no auto model do
 ---
 
 ## Exact next steps for a fresh agent
-1. `cd /root/AnimaXS && git pull origin opt/a12-sustained-io` (should be clean at `bffc03a`; parallel session may have added a commit — pull to get it).
-2. Read runbook §14 (P9) + §17 (device benchmark matrix) + §23 (final report).
-3. Implement P9 presets + tests, get `ci.yml` green. Commit + push, verify remote==local.
-4. Write the final §23 report + update state files to "ready for physical A12 validation" + update this HANDOFF.md. Tree clean, branch pushed.
+1. `cd /root/AnimaXS && git pull origin opt/a12-sustained-io` (should be clean at `d16e317`; parallel session may have added a commit — pull to get it).
+2. P0–P9 are COMPLETE and CI-green. **No code changes are required.**
+3. The remaining work is PHYSICAL A12 VALIDATION on a device (runbook §17): use the Diagnostics-screen **Preset** selector to run presets 1–9, record full metrics, and only then add a `recommendedA12` preset in `InferencePreset` with the proven winner. Do NOT claim a fastest backend without physical measurements, and do NOT change `currentBaseline` to `recommendedA12`.
+4. If any further code change is needed, follow the git discipline above: commit + push each change, verify `remote == local`, run `ci.yml` to green.
+
