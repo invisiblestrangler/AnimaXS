@@ -65,11 +65,23 @@ final class DiffusionSampler {
         // app-owned filename.
         let resolvedActivation: ActivationNumerics
         let resolvedAttention: AttentionNumerics
+        let resolvedFinalResidualBoundary: FinalResidualBoundary
         if let numerics {
             (resolvedActivation, resolvedAttention) = Self.resolvedNumerics(for: numerics)
+            // The policy also selects the final-residual ENTRY boundary
+            // (decoupled from activation numerics): production W8-v2 keeps
+            // legacy block numerics but its large residual enters the final
+            // layer via BF16-RNE-in-FP32, never FP16.
+            resolvedFinalResidualBoundary = Self.resolvedFinalResidualBoundary(for: numerics)
         } else {
             resolvedActivation = activationNumerics
             resolvedAttention = attentionNumerics
+            // Explicit construction (no pack policy): preserve the existing
+            // experimental behavior — .bf16Compute activation numerics implies
+            // the BF16 residual boundary, everything else keeps the FP16
+            // legacy boundary.
+            resolvedFinalResidualBoundary = activationNumerics == .bf16Compute
+                ? .bf16RNEInFP32 : .fp16Legacy
         }
         // Numerical monitoring OFF removes monitor/probe work from the
         // production path (the final CPU finite guard is retained). ON keeps
@@ -87,7 +99,9 @@ final class DiffusionSampler {
         self.crossKVCache = cache
         forward = try DitForward(
             context: context, file: file, attentionNumerics: resolvedAttention,
-            activationNumerics: resolvedActivation, monitor: monitor,
+            activationNumerics: resolvedActivation,
+            finalResidualBoundary: resolvedFinalResidualBoundary,
+            monitor: monitor,
             optimization: optimization, crossKVCache: cache)
         euler = EulerSampler(context: context, monitor: monitor)
         buffers = BufferPool(device: context.device)
@@ -330,6 +344,26 @@ final class DiffusionSampler {
             return (.legacy, .legacy)
         case .w8BF16Experimental:
             return (.bf16Compute, .bf16Compute)
+        }
+    }
+
+    /// Resolves the final-residual ENTRY boundary selected by a DiT numerics
+    /// policy. DECOUPLED from `resolvedNumerics`: production W8-v2
+    /// (w8LegacyStabilized) keeps legacy activation numerics yet its large
+    /// final residual must never be converted to FP16 (overflow above 65,504),
+    /// so the policy carries a source-faithful BF16-RNE-in-FP32 boundary. W4
+    /// keeps its byte-for-byte FP16 legacy boundary. Test seam: no Metal
+    /// context required.
+    static func resolvedFinalResidualBoundary(
+        for policy: DiTNumericsPolicy
+    ) -> FinalResidualBoundary {
+        switch policy {
+        case .w4Legacy:
+            return .fp16Legacy
+        case .w8LegacyStabilized:
+            return .bf16RNEInFP32
+        case .w8BF16Experimental:
+            return .bf16RNEInFP32
         }
     }
 

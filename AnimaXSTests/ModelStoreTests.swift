@@ -1232,4 +1232,26 @@ final class ModelStoreTests: XCTestCase {
         XCTAssertEqual(resolved.activation, .legacy)
         XCTAssertEqual(resolved.attention, .legacy)
     }
+
+    func testW8V2PolicyResolvesToBF16RNEInFP32FinalResidualBoundary() {
+        // P0 decoupling: production W8-v2 keeps legacy block numerics, yet its
+        // final-residual ENTRY boundary is .bf16RNEInFP32 so the large residual
+        // is never converted to FP16 at final-layer entry (overflow above
+        // 65,504 would poison the fp32-stat LayerNorm).
+        let policy = DiTNumericsPolicy.fromVariantID("w8-v2")
+        XCTAssertEqual(policy, .w8LegacyStabilized)
+        XCTAssertEqual(
+            DiffusionSampler.resolvedFinalResidualBoundary(for: .w8LegacyStabilized),
+            .bf16RNEInFP32)
+        XCTAssertEqual(
+            DiffusionSampler.resolvedFinalResidualBoundary(for: policy),
+            .bf16RNEInFP32)
+    }
+
+    func testW4PolicyResolvesToFP16LegacyFinalResidualBoundary() {
+        // W4's final FP16 boundary is unchanged (byte-for-byte legacy path).
+        XCTAssertEqual(
+            DiffusionSampler.resolvedFinalResidualBoundary(for: .w4Legacy),
+            .fp16Legacy)
+    }
 }

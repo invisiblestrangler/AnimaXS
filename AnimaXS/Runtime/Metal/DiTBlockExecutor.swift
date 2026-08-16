@@ -738,15 +738,55 @@ final class DiTBlockExecutor {
     }
 
     /// P3-A: one fused pass replacing layernorm → modulate → boundary → toHalf.
-    /// The modulation buffer uses the EXACT legacy layout (scale at
-    /// `modulationOffset` = dim*4, shift at offset 0). The optional BF16
+    /// The modulation buffer uses the EXACT legacy layout (shift at element 0,
+    /// scale at element `dim`). The shader ABI receives `modulationOffset` in
+    /// float ELEMENTS: both kernels do `device const float *scale =
+    /// modulation + modulationOffset` (pointer arithmetic on a float*), so
+    /// scale starts at element `dim` (2048 for the DiT) — NOT at byte offset
+    /// dim*4. The legacy non-fused path is different: `setBuffer(offset:)`
+    /// takes BYTES, so its modulate-step offset stays `dim*4`. Both fused
+    /// kernels (`dit_layernorm_modulate_to_half` and
+    /// `dit_layernorm_modulate_to_half_probe`) share this element-unit
+    /// contract, so the single host-side offset covers both. The optional BF16
     /// rounding sits between modulation and the fp16 conversion, matching the
     /// legacy `encodeFloatToComputeHalf` boundary placement. When a monitor is
     /// present the probe kernel records the same stats as the legacy
     /// `float_to_half_probe` pass, on the value fed to `half()`.
+
+    /// Scale-chunk offset for the fused kernel, in the float-ELEMENT unit the
+    /// shader ABI consumes (see the P3-A comment above). Internal (not
+    /// private) so the ABI unit test and the synthetic parity test can lock
+    /// the unit and catch a future byte/element regression — passing a byte
+    /// offset (dim*4 = 8192) here walks 2048 floats past the end of the
+    /// 6144-float modulation buffer.
+    static func fusedModulationElementOffset(columns: Int) -> UInt32 {
+        UInt32(columns)
+    }
+
     private func encodeFusedNormModulate(
         _ command: MTLCommandBuffer, residual: MTLBuffer, modulation: MTLBuffer,
         output: MTLBuffer, rows: Int, columns: Int, probe: NumericalMonitor.Probe
+    ) throws {
+        try Self.encodeFusedNormModulateKernel(
+            context: context, command: command,
+            residual: residual, modulation: modulation, output: output,
+            rows: rows, columns: columns,
+            modulationElementOffset: Self.fusedModulationElementOffset(columns: Self.dim),
+            emulatesBF16: emulatesBF16, monitor: monitor, probe: probe)
+    }
+
+    /// Single source of the fused kernel ABI (internal test seam): encodes
+    /// `dit_layernorm_modulate_to_half` or its probe variant with the exact
+    /// production argument layout. `modulationElementOffset` is in float
+    /// ELEMENTS (see the P3-A comment above). Exposed so the synthetic parity
+    /// test can drive the kernel against a tight 6144-float modulation buffer
+    /// without a full pack fixture; production call sites go through
+    /// `encodeFusedNormModulate`.
+    static func encodeFusedNormModulateKernel(
+        context: MetalContext, command: MTLCommandBuffer,
+        residual: MTLBuffer, modulation: MTLBuffer, output: MTLBuffer,
+        rows: Int, columns: Int, modulationElementOffset: UInt32,
+        emulatesBF16: Bool, monitor: NumericalMonitor?, probe: NumericalMonitor.Probe
     ) throws {
         let kernel = monitor == nil ? "dit_layernorm_modulate_to_half" : "dit_layernorm_modulate_to_half_probe"
         let pipeline = try context.pipeline(named: kernel)
@@ -754,7 +794,7 @@ final class DiTBlockExecutor {
             throw AnimapkError.validation("failed to create fused LayerNorm/modulate encoder")
         }
         var n = UInt32(columns), epsilon = Self.eps, rowCount = UInt32(rows)
-        var modulationOffset = UInt32(Self.dim * MemoryLayout<Float>.stride)
+        var modulationOffset = modulationElementOffset
         var boundary: UInt32 = emulatesBF16 ? 1 : 0
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(residual, offset: 0, index: 0)

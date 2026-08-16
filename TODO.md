@@ -1,5 +1,22 @@
 # AnimaXS TODO
 
+## Current P0 — W8 final-residual boundary + fused AdaLN offset (fix/w8-range-and-fused-adaln) — source/CI DONE, physical retest PENDING
+
+- [x] W8 block attention/activation numerics = legacy (`w8LegacyStabilized`, `.legacy`/`.legacy`)
+- [x] W8 final residual ENTRY boundary = `.bf16RNEInFP32` via `FinalResidualBoundary` — large FP32
+      residual rounded to BF16 RNE, retained in FP32, LayerNorm in FP32; NEVER FP16 (pre-fix
+      `float_to_half` overflowed above 65,504 after block 28/28 on the physical XS Max)
+- [x] W4 final residual boundary = `.fp16Legacy` (byte-for-byte unchanged)
+- [x] Full `w8BF16Experimental` = still NOT production
+- [x] Fused LayerNorm+AdaLN+to-half modulation offset = float elements (2048 via
+      `fusedModulationElementOffset(columns:)`; old byte count 8192 walked past the 6144-float buffer)
+- [x] `fusedNormModulation` = OFF by default (`currentBaseline.fusedNormModulation == false`)
+- [x] W8 pack identity unchanged — no repack (sha256 8b63c7fd9b5872805e5a2ba799ab6d79989c54a6a89a4f34edf022c59c9ed130)
+- [x] CI Gate A PASS (run 31950731666); CI Gate B PASS (run 31951006939 — W8 coherent image,
+      latent_cos 0.9108)
+- [ ] **Physical iPhone XS Max W8-v2 retest (user) — PENDING.** macOS Metal runner CI does NOT
+      prove device correctness; perform per the P0 runbook §13.
+
 ## Device-stabilization patch (2026-08-16, branch fix/device-stability-no-checkpoint) — source DONE, validation PENDING
 
 Physical iPhone XS Max run (2026-08-15) exposed: Files import permission error, generic

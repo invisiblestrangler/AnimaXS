@@ -25,7 +25,12 @@ user re-tests on the XS Max.
    `DiTNumericsPolicy` = `w4Legacy` / `w8LegacyStabilized` / `w8BF16Experimental`;
    `fromVariantID("w8-v2")` → `w8LegacyStabilized` (legacy attention/activation). The
    FP16-backed BF16 emulation (`w8BF16Experimental`) remains experimental and is NOT
-   claimed range-safe internally; only explicit diagnostics reach it.
+   claimed range-safe internally; only explicit diagnostics reach it. Note: block
+   attention/activation remain legacy, but the final-residual ENTRY boundary is now
+   decoupled via `FinalResidualBoundary` — production W8 uses `.bf16RNEInFP32` (BF16-RNE-rounded
+   values retained in FP32, LayerNorm in FP32); the W8 large residual is never converted to FP16
+   at final-layer entry (the pre-fix `float_to_half` overflowed above 65,504 after block 28/28 on
+   the physical XS Max). W4 keeps `.fp16Legacy` unchanged. (D005)
 3. **Full-inference CI executes the production policy** (`27d3eb7`) —
    `testCanonicalProductionInference` derives numerics from
    `DiTNumericsPolicy.fromVariantID(ANIMAXS_DIT_VARIANT)` via

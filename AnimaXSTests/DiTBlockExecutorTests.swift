@@ -275,6 +275,151 @@ final class DiTBlockExecutorTests: XCTestCase {
         XCTAssertTrue(cache.isReady(5))
     }
 
+    // MARK: - P3-A fused LayerNorm+AdaLN+to-half ABI (E-fused)
+
+    /// Locks the fused modulation offset UNIT. The fused kernels read scale at
+    /// `modulation + modulationOffset` — pointer arithmetic on a float*, i.e.
+    /// float ELEMENTS, not bytes. For dim = 2048 the correct offset is 2048,
+    /// and the old byte-unit bug (dim*4 = 8192) would walk 2048 floats past
+    /// the end of the real 6144-float modulation buffer (3 × 2048 chunks).
+    func testFusedModulationElementOffsetIsFloatElements() {
+        XCTAssertEqual(DiTBlockExecutor.fusedModulationElementOffset(columns: 2048), 2048)
+        // Explicit regression guard: the byte-unit value must NEVER come back.
+        XCTAssertNotEqual(DiTBlockExecutor.fusedModulationElementOffset(columns: 2048), 2048 * 4)
+        XCTAssertEqual(DiTBlockExecutor.fusedModulationElementOffset(columns: 1), 1)
+    }
+
+    /// Synthetic parity test for `dit_layernorm_modulate_to_half`: drives the
+    /// production fused ABI (via the internal kernel seam) against an EXACT
+    /// 6144-float modulation buffer (shift [0..<2048], scale [2048..<4096],
+    /// gate/third chunk [4096..<6144]) — no slack, so a bogus element offset
+    /// of 8192 could not hide behind an oversized allocation. The GPU output
+    /// must match a CPU LayerNorm→(1+scale)→+shift→fp16 reference, proving
+    /// scale was read from element 2048 (the fixed semantics).
+    func testFusedLayerNormModulateToHalfParityAgainstCPU() throws {
+        let context = try requireContext()
+        let rows = 3
+        let columns = DiTBlockExecutor.dim // 2048
+        let residual = makeFusedResidual(rows: rows, columns: columns)
+        let modulation = makeFusedModulation(columns: columns)
+        XCTAssertEqual(modulation.count, 6144)
+        let output = try XCTUnwrap(context.device.makeBuffer(
+            length: rows * columns * MemoryLayout<Float16>.stride))
+        let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+
+        try DiTBlockExecutor.encodeFusedNormModulateKernel(
+            context: context, command: command,
+            residual: buffer(residual, context: context),
+            modulation: buffer(modulation, context: context),
+            output: output, rows: rows, columns: columns,
+            modulationElementOffset: DiTBlockExecutor.fusedModulationElementOffset(columns: columns),
+            emulatesBF16: false, monitor: nil, probe: .selfProjectionInput)
+        command.commit()
+        command.waitUntilCompleted()
+        XCTAssertNil(command.error)
+
+        let expected = fusedReference(residual: residual, modulation: modulation,
+                                      rows: rows, columns: columns)
+        let actual = output.contents().bindMemory(to: Float16.self, capacity: rows * columns)
+        for index in 0..<(rows * columns) {
+            XCTAssertTrue(actual[index].isFinite, "non-finite output at \(index)")
+            // Both sides compute in fp32 and round once to fp16; allow a
+            // couple of fp16 ulps for rsqrt/summation-order differences.
+            XCTAssertEqual(Float(actual[index]), expected[index], accuracy: 5e-3,
+                           "index \(index)")
+        }
+    }
+
+    /// Same parity check for the probe variant
+    /// (`dit_layernorm_modulate_to_half_probe`), which reads scale from the
+    /// SAME element offset and additionally records health stats. Clean
+    /// stats (no NaN/Inf/overflow flags) confirm the probe saw the correct
+    /// scale values rather than garbage from an out-of-bounds read.
+    func testFusedLayerNormModulateToHalfProbeParityAgainstCPU() throws {
+        let context = try requireContext()
+        let rows = 2
+        let columns = DiTBlockExecutor.dim
+        let residual = makeFusedResidual(rows: rows, columns: columns)
+        let modulation = makeFusedModulation(columns: columns)
+        let monitor = try NumericalMonitor(context: context)
+        let output = try XCTUnwrap(context.device.makeBuffer(
+            length: rows * columns * MemoryLayout<Float16>.stride))
+        let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+
+        try DiTBlockExecutor.encodeFusedNormModulateKernel(
+            context: context, command: command,
+            residual: buffer(residual, context: context),
+            modulation: buffer(modulation, context: context),
+            output: output, rows: rows, columns: columns,
+            modulationElementOffset: DiTBlockExecutor.fusedModulationElementOffset(columns: columns),
+            emulatesBF16: false, monitor: monitor, probe: .selfProjectionInput)
+        command.commit()
+        command.waitUntilCompleted()
+        XCTAssertNil(command.error)
+
+        let expected = fusedReference(residual: residual, modulation: modulation,
+                                      rows: rows, columns: columns)
+        let actual = output.contents().bindMemory(to: Float16.self, capacity: rows * columns)
+        for index in 0..<(rows * columns) {
+            XCTAssertTrue(actual[index].isFinite, "non-finite output at \(index)")
+            XCTAssertEqual(Float(actual[index]), expected[index], accuracy: 5e-3,
+                           "index \(index)")
+        }
+        XCTAssertEqual(monitor.warningCount(), 0)
+        XCTAssertNil(monitor.earliestIssue)
+    }
+
+    /// Synthetic residual with real per-row variance (alternating sign,
+    /// varying magnitude, row offset) so LayerNorm is well-defined.
+    private func makeFusedResidual(rows: Int, columns: Int) -> [Float] {
+        (0..<(rows * columns)).map { index in
+            let i = index % columns
+            let row = index / columns
+            return Float(((i * 37) % 101) - 50) / 13 + Float(row)
+        }
+    }
+
+    /// EXACT 3 × `columns` modulation layout: shift, then scale, then the
+    /// gate/third chunk filled with arbitrary values. 6144 floats for
+    /// columns = 2048 — nothing more, matching production.
+    private func makeFusedModulation(columns: Int) -> [Float] {
+        var values = [Float](repeating: 0, count: columns * 3)
+        for i in 0..<columns {
+            values[i] = Float((i % 13) - 6) / 10            // shift chunk
+            values[columns + i] = Float((i % 11) - 5) / 8   // scale chunk (at element `columns`)
+            values[2 * columns + i] = Float((i % 7) - 3)    // gate/third chunk (unused here)
+        }
+        return values
+    }
+
+    /// CPU reference for the fused kernels: per-row LayerNorm (biased
+    /// variance, the same eps the shader receives), then
+    /// normalized * (1 + scale) + shift with scale at element `columns`,
+    /// rounded once through Float16 (matching the GPU's half() store).
+    private func fusedReference(residual: [Float], modulation: [Float],
+                                rows: Int, columns: Int) -> [Float] {
+        let epsilon = DiTBlockExecutor.eps
+        var expected = [Float](repeating: 0, count: residual.count)
+        for row in 0..<rows {
+            var sum: Float = 0
+            for i in 0..<columns { sum += residual[row * columns + i] }
+            let mean = sum / Float(columns)
+            var squareSum: Float = 0
+            for i in 0..<columns {
+                let centered = residual[row * columns + i] - mean
+                squareSum += centered * centered
+            }
+            let inverse = 1 / sqrt(squareSum / Float(columns) + epsilon)
+            for i in 0..<columns {
+                let normalized = (residual[row * columns + i] - mean) * inverse
+                let scale = modulation[columns + i]
+                let shift = modulation[i]
+                expected[row * columns + i] = Float(Float16(normalized * (1 + scale) + shift))
+            }
+        }
+        return expected
+    }
+
     private func fixtureFloats(_ name: String, in directory: URL) throws -> [Float] {
         let data = try Data(contentsOf: directory.appendingPathComponent(name))
         guard data.count.isMultiple(of: 4) else { throw AnimapkError.validation("invalid oracle file") }
