@@ -11,8 +11,8 @@
 - [x] T4 Quarantine directQuantized/hybrid (verified + committed)
 - [x] T5 Disable P6 mmap no-copy + fatal-Metal poisoning (verified + committed)
 - [x] T6 Import vs Download + single-flight (verified + committed)
-- [ ] T7 Persist prompt/seed (pending)
-- [ ] T8 Fresh-run image ownership (pending)
+- [x] T7 Persist prompt/seed (verified + committed)
+- [x] T8 Fresh-run image ownership (verified + committed)
 - [ ] T9 Diagnostics preset drift + compat validator (pending)
 - [ ] T10 Numerical-monitor label cleanup (pending)
 - [ ] T11 Docs/state correction (pending)
@@ -30,6 +30,8 @@
 - e536bd7 fix: quarantine P8 directQuantized/hybrid from production device settings (T4)
 - b14b88b fix: disable P6 mmap no-copy and poison context on fatal Metal faults (T5)
 - f64eb5c fix: Import is local-only and per-component model ops are single-flight (T6)
+- a4a1c60 feat: persist latest prompt and seed across relaunch (T7)
+- b25b845 fix: a fresh Generate owns the image/metrics surface (T8)
 
 ## CI Runs
 - bootstrap-project #31932812543: success (pbxproj regenerated for T1)
