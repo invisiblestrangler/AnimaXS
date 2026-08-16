@@ -14,7 +14,7 @@
 - [x] T7 Persist prompt/seed (verified + committed)
 - [x] T8 Fresh-run image ownership (verified + committed)
 - [x] T9 Diagnostics preset drift + compat validator (verified + committed)
-- [ ] T10 Numerical-monitor label cleanup (pending)
+- [x] T10 Numerical-monitor label cleanup (verified + committed)
 - [ ] T11 Docs/state correction (pending)
 - [x] CI Gate A (PASS after T1)
 - [ ] CI Gate B (after T1-T10)
@@ -34,6 +34,7 @@
 - b25b845 fix: a fresh Generate owns the image/metrics surface (T8)
 - f48deca docs: update session ledger (T7, T8 committed)
 - f647908 fix: Diagnostics preset drift + central compatibility validator (T9)
+- 605300f fix: numerical-monitor gate/add probe labels identify the gate input boundary (T10)
 
 ## CI Runs
 - bootstrap-project #31932812543: success (pbxproj regenerated for T1)
