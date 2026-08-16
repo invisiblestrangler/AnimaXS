@@ -945,8 +945,8 @@ kernel void KNAME(                                                              
     uint mBase = group.x * TM;                                                       \
     uint nBase = group.y * TN;                                                       \
     if (mBase >= M || nBase >= N) return;                                            \
-    uint mCount = min(TM, M - mBase);                                                \
-    uint nCount = min(TN, N - nBase);                                                \
+    uint mCount = min((uint)TM, M - mBase);                                                \
+    uint nCount = min((uint)TN, N - nBase);                                                \
     uint groupsPerRow = (K + W4_GROUP - 1) / W4_GROUP;                               \
     uint mRow = tid / TN;                                                            \
     uint nCol = tid % TN;                                                            \
@@ -955,7 +955,7 @@ kernel void KNAME(                                                              
     float acc = 0.0f;                                                                \
     uint kBase = 0;                                                                  \
     while (kBase < K) {                                                              \
-        uint kCount = min(TK, K - kBase);                                            \
+        uint kCount = min((uint)TK, K - kBase);                                            \
         for (uint k = nCol; k < TK; k += TN) {                                       \
             if (k < kCount) {                                                        \
                 aTile[mRow * TK + k] = input[row * inputStride + kBase + k];         \
