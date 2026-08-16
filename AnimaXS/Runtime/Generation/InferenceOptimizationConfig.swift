@@ -55,6 +55,16 @@ enum DiTLinearBackend: String, Codable, CaseIterable {
 ///
 /// The DiT pack is whichever variant (W4 or W8-v2) was imported into the
 /// `.dit` slot; it is resolved by `ModelStore` and is not a config choice.
+///
+/// Compatibility: `blockingReason(for:numerics:)` is the single central
+/// validator for a resolved production configuration (Task 9). It returns a
+/// user-visible blocking reason for any configuration that must NOT reach the
+/// executors — P6 no-copy, the quarantined P8 linear backends, and explicit
+/// experimental BF16 numerics combined with a strided token-major attention
+/// layout (the `AttentionExecutor` constraint). It is DEFENSE-IN-DEPTH on top
+/// of the Task 4/5 settings-layer sanitization: it never mutates a
+/// user-selected config, it only reports a reason so Generate is blocked and
+/// the user sees why.
 struct InferenceOptimizationConfig: Equatable {
     static let allowedTileRows = [128, 256, 512, 1024]
 
@@ -162,6 +172,109 @@ struct InferenceOptimizationConfig: Equatable {
         // Clamp to the allowed range, then round to the nearest allowed row.
         let clamped = min(1024, max(128, value))
         return allowedTileRows.min(by: { abs($0 - clamped) < abs($1 - clamped) }) ?? 128
+    }
+
+    // MARK: - Central compatibility validator (Task 9)
+
+    /// DISABLED (Task 5) — P6 mmap no-copy weight source. A physical A12 run
+    /// hit a real GPU page fault (`kIOGPUCommandBufferCallbackErrorPageFault`)
+    /// while no-copy bytes were being served, so production configuration can
+    /// never run the no-copy path. The Task 5 settings layer already
+    /// normalizes `true` → `false` and never persists it; this reason is the
+    /// central-validator wording for any config that still carries `true`
+    /// (defense-in-depth — a normal device user cannot currently produce one).
+    static let noCopyBlockingReason = "P6 mmap no-copy weight source is disabled for device use: a physical A12 run hit a real GPU page fault (kIOGPUCommandBufferCallbackErrorPageFault) while no-copy bytes were being served. Correctness/safety hardening, not a proof of the historical root cause."
+
+    /// QUARANTINED (Task 4) — P8 direct packed QGEMM linear backends
+    /// (`.directQuantized` / `.hybrid`). They measured ~10x SLOWER than
+    /// `.dequantizedMPS` on the physical A12 device — a measured PERFORMANCE
+    /// regression, NOT a proven correctness failure (the research kernel
+    /// stays intact and directly testable via `LinearExecutor`). The Task 4
+    /// settings layer already normalizes them to `.dequantizedMPS`; this
+    /// reason is the central-validator wording for any config that still
+    /// carries one (defense-in-depth).
+    static let linearBackendBlockingReason = "P8 direct QGEMM (.directQuantized / .hybrid) is quarantined for device use: it measured ~10x slower than dequantized MPS on the A12 device (performance regression, not a proven correctness failure)."
+
+    /// EXPERIMENTAL BF16 numerics + strided token-major attention layout.
+    /// `AttentionExecutor` throws "P4 strided token-major attention does not
+    /// support bf16Compute numerics" for this exact combination — the BF16
+    /// boundary round is contiguous in the legacy layout but would corrupt
+    /// the strided token-major layout, so it refuses loudly instead of
+    /// silently producing wrong results. Production W8-v2 resolves to
+    /// `w8LegacyStabilized` → legacy/legacy numerics (compatible with strided
+    /// attention); only an EXPLICIT experimental BF16 policy triggers this.
+    static let bf16StridedAttentionBlockingReason = "Experimental BF16 numerics (w8BF16Experimental / bf16Compute) are not supported with strided token-major attention: the BF16 boundary round would corrupt the strided layout. Select legacy numerics or disable the strided token-major attention layout."
+
+    /// True when the resolved DiT attention layout is strided token-major.
+    /// Mirrors `DiTBlockExecutor`'s backend selection exactly:
+    /// `.legacyHeadMajorMPS` never uses the strided layout; `.stridedTokenMajorMPS`
+    /// honors the `stridedTokenMajorAttention` boolean; `.streamingMPS` /
+    /// `.metalFlash` REQUIRE the token-major layout (they throw unless the
+    /// toggle is ON). Qwen/VAE/adapter attention is always head-major and is
+    /// never affected.
+    var resolvesToStridedTokenMajorAttention: Bool {
+        switch attentionBackend {
+        case .legacyHeadMajorMPS:
+            return false
+        case .stridedTokenMajorMPS:
+            return stridedTokenMajorAttention
+        case .streamingMPS, .metalFlash:
+            return true
+        }
+    }
+
+    /// The single central compatibility validator for a RESOLVED production
+    /// configuration (Task 9). Returns a user-visible blocking reason when
+    /// the configuration must NOT reach the executors, or `nil` when it is
+    /// compatible.
+    ///
+    /// It blocks:
+    /// 1. `noCopyWeightSource == true` (P6 disabled — A12 GPU page fault).
+    /// 2. `linearBackend` other than `.dequantizedMPS` (P8 quarantined —
+    ///    ~10x A12 regression).
+    /// 3. An explicit experimental BF16 numerical policy — resolved
+    ///    attention/activation numerics `bf16Compute` — combined with a
+    ///    strided token-major attention layout (the `AttentionExecutor`
+    ///    constraint).
+    ///
+    /// The BF16 check is based on the ACTUAL resolved numerical policy
+    /// (`DiffusionSampler.resolvedNumerics(for:)`), NOT the pack name: a
+    /// production W8 pack resolves to `w8LegacyStabilized` → legacy/legacy
+    /// numerics, which IS compatible with strided attention and must not be
+    /// blocked. `numerics` defaults to the W4 pack policy (the most common
+    /// resolved case, legacy/legacy).
+    ///
+    /// The validator is read-only: it NEVER mutates a user-selected config.
+    /// Persisted bad settings are migrated at app initialization (Tasks 4/5);
+    /// an explicit current incompatible selection is surfaced as a blocking
+    /// reason and left exactly as the user set it.
+    static func blockingReason(
+        for config: InferenceOptimizationConfig,
+        numerics: DiTNumericsPolicy = .w4Legacy
+    ) -> String? {
+        // 1. P6 no-copy (Task 5): a physical A12 run hit a real GPU page
+        // fault while no-copy bytes were being served.
+        if config.noCopyWeightSource {
+            return noCopyBlockingReason
+        }
+        // 2. P8 quarantined linear backends (Task 4): measured ~10x slower
+        // than dequantized MPS on the A12 device.
+        if config.linearBackend != .dequantizedMPS {
+            return linearBackendBlockingReason
+        }
+        // 3. Experimental BF16 numerics + strided token-major attention:
+        // AttentionExecutor refuses bf16Compute for the strided layout.
+        // Only the explicit experimental policy resolves to BF16 numerics
+        // (w8LegacyStabilized -> legacy/legacy, compatible with strided).
+        if numerics == .w8BF16Experimental {
+            let (activation, attention) = DiffusionSampler.resolvedNumerics(for: numerics)
+            if activation == .bf16Compute || attention == .bf16Compute {
+                if config.resolvesToStridedTokenMajorAttention {
+                    return bf16StridedAttentionBlockingReason
+                }
+            }
+        }
+        return nil
     }
 }
 

@@ -571,6 +571,86 @@ final class InferenceOptimizationConfigTests: XCTestCase {
         XCTAssertEqual(reloaded.snapshot, InferenceOptimizationConfig.currentBaseline)
     }
 
+    // MARK: - Preset marker drift (Task 9)
+
+    // A manual individual control mutation after applying a preset clears the
+    // active-preset marker and removes its persisted key, so Diagnostics
+    // shows "Custom" instead of a stale preset name.
+    @MainActor
+    func testManualSetterClearsActivePresetMarker() {
+        let defaults = makeDefaults()
+        let settings = InferenceOptimizationSettings(defaults: defaults)
+        settings.setPreset(.baseline)
+        XCTAssertEqual(settings.activePreset, .baseline)
+        XCTAssertEqual(defaults.string(forKey: InferenceOptimizationSettings.Keys.activePreset),
+                       InferencePreset.baseline.rawValue)
+        settings.setLinearTileRows(256)
+        XCTAssertNil(settings.activePreset,
+                     "a manual setter must clear the preset marker")
+        XCTAssertNil(defaults.string(forKey: InferenceOptimizationSettings.Keys.activePreset),
+                     "a manual setter must remove the persisted preset marker key")
+    }
+
+    // After a manual edit clears the marker, a relaunch (fresh settings
+    // instance over the same store) stays nil/Custom — the marker is not
+    // restored from anywhere.
+    @MainActor
+    func testManualEditSurvivesRelaunchAsCustom() {
+        let defaults = makeDefaults()
+        let settings = InferenceOptimizationSettings(defaults: defaults)
+        settings.setPreset(.stridedMPSKV)
+        settings.setCrossKVCache(false)
+        XCTAssertNil(settings.activePreset)
+        let reloaded = InferenceOptimizationSettings(defaults: defaults)
+        XCTAssertNil(reloaded.activePreset,
+                     "relaunch must stay Custom after a manual edit")
+        XCTAssertEqual(reloaded.crossKVCache, false,
+                       "the manual control value itself still persists")
+        XCTAssertEqual(reloaded.stridedTokenMajorAttention, true,
+                       "the preset's other controls remain applied")
+    }
+
+    // Every individual setter clears the marker (representative sweep over a
+    // Bool toggle, a tile row, and both backend selectors).
+    @MainActor
+    func testEveryIndividualSetterClearsMarker() {
+        let defaults = makeDefaults()
+        let settings = InferenceOptimizationSettings(defaults: defaults)
+        settings.setPreset(.allCandidate)
+        XCTAssertNotNil(settings.activePreset)
+
+        settings.setDirectLinearMPSIO(false)
+        XCTAssertNil(settings.activePreset)
+        settings.setPreset(.allCandidate)
+
+        settings.setAttentionTileRows(512)
+        XCTAssertNil(settings.activePreset)
+        settings.setPreset(.allCandidate)
+
+        settings.setAttentionBackend(.stridedTokenMajorMPS)
+        XCTAssertNil(settings.activePreset)
+        settings.setPreset(.allCandidate)
+
+        settings.setLinearBackend(.dequantizedMPS)
+        XCTAssertNil(settings.activePreset)
+        XCTAssertNil(defaults.string(forKey: InferenceOptimizationSettings.Keys.activePreset))
+    }
+
+    // resetToBaseline goes through the same clearPresetMarker path: exact
+    // baseline values + nil marker + persisted key removed.
+    @MainActor
+    func testResetToBaselineClearsPersistedMarkerKey() {
+        let defaults = makeDefaults()
+        let settings = InferenceOptimizationSettings(defaults: defaults)
+        settings.setPreset(.metalFlashCandidate)
+        XCTAssertNotNil(defaults.string(forKey: InferenceOptimizationSettings.Keys.activePreset))
+        settings.resetToBaseline()
+        XCTAssertNil(settings.activePreset)
+        XCTAssertNil(defaults.string(forKey: InferenceOptimizationSettings.Keys.activePreset),
+                     "resetToBaseline must remove the persisted marker key")
+        XCTAssertEqual(settings.snapshot, InferenceOptimizationConfig.currentBaseline)
+    }
+
     // Applying the baseline preset is equivalent to resetToBaseline.
     @MainActor
     func testBaselinePresetRestoresBaseline() {
@@ -591,5 +671,128 @@ final class InferenceOptimizationConfigTests: XCTestCase {
         settings.setPreset(.directQGEMMCandidate)
         XCTAssertEqual(before, InferenceOptimizationConfig.currentBaseline,
                        "snapshot taken before setPreset must stay baseline")
+    }
+
+    // MARK: - Central compatibility validator (Task 9)
+
+    private func config(
+        linearTileRows: Int = 128,
+        attentionTileRows: Int = 128,
+        directLinearMPSIO: Bool = false,
+        pingPongWeightStreaming: Bool = true,
+        numericalMonitoring: Bool = true,
+        fusedNormModulation: Bool = false,
+        fusedMLPActivation: Bool = false,
+        stridedTokenMajorAttention: Bool = false,
+        crossKVCache: Bool = false,
+        noCopyWeightSource: Bool = false,
+        attentionBackend: DiTAttentionBackend = .legacyHeadMajorMPS,
+        linearBackend: DiTLinearBackend = .dequantizedMPS
+    ) -> InferenceOptimizationConfig {
+        InferenceOptimizationConfig(
+            linearTileRows: linearTileRows,
+            attentionTileRows: attentionTileRows,
+            directLinearMPSIO: directLinearMPSIO,
+            pingPongWeightStreaming: pingPongWeightStreaming,
+            numericalMonitoring: numericalMonitoring,
+            fusedNormModulation: fusedNormModulation,
+            fusedMLPActivation: fusedMLPActivation,
+            stridedTokenMajorAttention: stridedTokenMajorAttention,
+            crossKVCache: crossKVCache,
+            noCopyWeightSource: noCopyWeightSource,
+            attentionBackend: attentionBackend,
+            linearBackend: linearBackend)
+    }
+
+    // The baseline configuration is fully compatible.
+    func testBaselineConfigHasNoBlockingReason() {
+        XCTAssertNil(InferenceOptimizationConfig.blockingReason(
+            for: .currentBaseline))
+        XCTAssertNil(InferenceOptimizationConfig.blockingReason(
+            for: config()))
+    }
+
+    // A no-copy config is blocked with a reason referencing the A12 GPU page
+    // fault / no-copy disablement.
+    func testNoCopyConfigBlockedWithPageFaultReason() {
+        let reason = InferenceOptimizationConfig.blockingReason(
+            for: config(noCopyWeightSource: true))
+        XCTAssertNotNil(reason)
+        XCTAssertTrue(reason!.contains("page fault"), reason!)
+        XCTAssertTrue(reason!.contains("no-copy"), reason!)
+    }
+
+    // The quarantined P8 linear backends are blocked with a reason referencing
+    // the ~10x A12 regression.
+    func testQuarantinedLinearBackendsBlocked() {
+        for backend in [DiTLinearBackend.directQuantized, .hybrid] {
+            let reason = InferenceOptimizationConfig.blockingReason(
+                for: config(linearBackend: backend))
+            XCTAssertNotNil(reason, "\(backend) must be blocked")
+            XCTAssertTrue(reason!.contains("10x"), reason!)
+        }
+    }
+
+    // Experimental BF16 numerics + strided token-major attention is blocked:
+    // AttentionExecutor refuses bf16Compute for the strided layout.
+    func testBF16ExperimentalWithStridedAttentionBlocked() {
+        for backend in [DiTAttentionBackend.stridedTokenMajorMPS,
+                        .streamingMPS, .metalFlash] {
+            let c = config(
+                stridedTokenMajorAttention: true,
+                attentionBackend: backend)
+            let reason = InferenceOptimizationConfig.blockingReason(
+                for: c, numerics: .w8BF16Experimental)
+            XCTAssertNotNil(reason, "\(backend) with BF16 must be blocked")
+            XCTAssertTrue(reason!.contains("BF16"), reason!)
+        }
+    }
+
+    // Production W8 (w8LegacyStabilized -> legacy/legacy numerics) with
+    // strided attention must NOT be blocked — the check is on the RESOLVED
+    // numerics, never on the pack name.
+    func testW8LegacyStabilizedWithStridedAttentionIsCompatible() {
+        for backend in [DiTAttentionBackend.stridedTokenMajorMPS,
+                        .streamingMPS, .metalFlash] {
+            let c = config(
+                stridedTokenMajorAttention: true,
+                attentionBackend: backend)
+            XCTAssertNil(InferenceOptimizationConfig.blockingReason(
+                for: c, numerics: .w8LegacyStabilized),
+                "\(backend) with w8LegacyStabilized must stay compatible")
+        }
+    }
+
+    // W4 legacy numerics with strided attention is compatible too.
+    func testW4LegacyWithStridedAttentionIsCompatible() {
+        let c = config(
+            stridedTokenMajorAttention: true,
+            attentionBackend: .stridedTokenMajorMPS)
+        XCTAssertNil(InferenceOptimizationConfig.blockingReason(
+            for: c, numerics: .w4Legacy))
+    }
+
+    // Experimental BF16 numerics with the legacy head-major layout is
+    // compatible (the executor only rejects the strided layout).
+    func testBF16ExperimentalWithHeadMajorAttentionIsCompatible() {
+        XCTAssertNil(InferenceOptimizationConfig.blockingReason(
+            for: config(), numerics: .w8BF16Experimental))
+    }
+
+    // The validator is read-only: it never mutates the config it checks.
+    func testValidatorNeverMutatesConfig() {
+        var c = config(noCopyWeightSource: true, linearBackend: .hybrid)
+        let original = c
+        _ = InferenceOptimizationConfig.blockingReason(for: c)
+        XCTAssertEqual(c, original,
+                       "blockingReason must not mutate the config")
+        c.linearBackend = .dequantizedMPS
+        c.noCopyWeightSource = false
+        c.stridedTokenMajorAttention = true
+        c.attentionBackend = .streamingMPS
+        let original2 = c
+        _ = InferenceOptimizationConfig.blockingReason(for: c, numerics: .w8BF16Experimental)
+        XCTAssertEqual(c, original2,
+                       "blockingReason must not mutate the config")
     }
 }

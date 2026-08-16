@@ -11,14 +11,16 @@ final class GenerationEligibilityTests: XCTestCase {
         isGenerating: Bool = false,
         prompt: String = "masterpiece",
         seedText: String = "1337",
-        metalAvailable: Bool = true
+        metalAvailable: Bool = true,
+        optimizationBlockingReason: String? = nil
     ) -> GenerationEligibility {
         GenerationEligibility.evaluate(
             modelsResolved: modelsResolved,
             isGenerating: isGenerating,
             prompt: prompt,
             seedText: seedText,
-            metalAvailable: metalAvailable)
+            metalAvailable: metalAvailable,
+            optimizationBlockingReason: optimizationBlockingReason)
     }
 
     func testReadyWhenAllConditionsMet() {
@@ -102,5 +104,56 @@ final class GenerationEligibilityTests: XCTestCase {
         XCTAssertTrue(evaluate().isReady)
         XCTAssertNil(evaluate().blockedReason)
         XCTAssertNotNil(evaluate(prompt: "").blockedReason)
+    }
+
+    // MARK: - Central compatibility validator threading (Task 9)
+
+    // An incompatible optimization configuration blocks Generate with the
+    // validator's exact reason, even when every other condition is fine.
+    func testBlockedByOptimizationConfigReason() {
+        let reason = InferenceOptimizationConfig.noCopyBlockingReason
+        let result = evaluate(optimizationBlockingReason: reason)
+        guard case .blocked(let blocked) = result else {
+            return XCTFail("expected blocked, got \(result)")
+        }
+        XCTAssertEqual(blocked, reason)
+        XCTAssertFalse(result.isReady)
+    }
+
+    // The validator reason takes priority over the input conditions (models/
+    // prompt/seed/Metal), so the incompatible configuration is never masked
+    // by an environment issue.
+    func testOptimizationBlockingReasonTakesPriorityOverInputConditions() {
+        let reason = InferenceOptimizationConfig.linearBackendBlockingReason
+        let result = evaluate(
+            modelsResolved: false,
+            prompt: "",
+            seedText: "bad",
+            metalAvailable: false,
+            optimizationBlockingReason: reason)
+        guard case .blocked(let blocked) = result else {
+            return XCTFail("expected blocked, got \(result)")
+        }
+        XCTAssertEqual(blocked, reason)
+    }
+
+    // An in-flight generation still wins over the config reason: the running
+    // generation guard is the very first check.
+    func testAlreadyGeneratingWinsOverOptimizationBlockingReason() {
+        let result = evaluate(
+            isGenerating: true,
+            optimizationBlockingReason: InferenceOptimizationConfig.noCopyBlockingReason)
+        guard case .blocked(let reason) = result else {
+            return XCTFail("expected blocked, got \(result)")
+        }
+        XCTAssertTrue(reason.contains("already running"))
+    }
+
+    // No config reason (compatible config) leaves the normal conditions
+    // untouched.
+    func testNilOptimizationBlockingReasonKeepsNormalConditions() {
+        XCTAssertEqual(evaluate(optimizationBlockingReason: nil), .ready)
+        XCTAssertEqual(evaluate(prompt: "", optimizationBlockingReason: nil)
+            .blockedReason, "Prompt cannot be empty.")
     }
 }

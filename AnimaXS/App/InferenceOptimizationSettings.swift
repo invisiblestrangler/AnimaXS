@@ -30,8 +30,9 @@ final class InferenceOptimizationSettings: ObservableObject {
     /// The P9 preset most recently applied, if any. Persisted so a relaunch
     /// restores the user's chosen configuration. `nil` until a preset is
     /// applied (e.g. fresh install or after `resetToBaseline`). Adjusting an
-    /// individual control afterwards does NOT clear this marker — the picker
-    /// simply continues to show the last preset applied.
+    /// individual control afterwards CLEARS the marker (Task 9): the preset
+    /// combination no longer exactly describes the current controls, so
+    /// Diagnostics shows "Custom" instead of a stale preset name.
     @Published private(set) var activePreset: InferencePreset?
 
     @Published private(set) var linearTileRows: Int
@@ -82,49 +83,69 @@ final class InferenceOptimizationSettings: ObservableObject {
 
     // MARK: - Mutations (validate before persist)
 
+    /// Task 9: clears the active-preset marker after an INDIVIDUAL manual
+    /// control mutation. The named preset no longer exactly describes the
+    /// current controls, so the persisted marker is removed and Diagnostics
+    /// shows "Custom" — a stale preset name must never be claimed. The
+    /// persisted control value the caller just wrote is NOT touched (only the
+    /// marker key is removed); `setPreset` re-establishes a marker.
+    private func clearPresetMarker() {
+        activePreset = nil
+        defaults.removeObject(forKey: Keys.activePreset)
+    }
+
     func setLinearTileRows(_ value: Int) {
         linearTileRows = InferenceOptimizationConfig.sanitizedTileRows(value)
         defaults.set(linearTileRows, forKey: Keys.linearTileRows)
+        clearPresetMarker()
     }
 
     func setAttentionTileRows(_ value: Int) {
         attentionTileRows = InferenceOptimizationConfig.sanitizedTileRows(value)
         defaults.set(attentionTileRows, forKey: Keys.attentionTileRows)
+        clearPresetMarker()
     }
 
     func setDirectLinearMPSIO(_ value: Bool) {
         directLinearMPSIO = value
         defaults.set(value, forKey: Keys.directLinearMPSIO)
+        clearPresetMarker()
     }
 
     func setPingPongWeightStreaming(_ value: Bool) {
         pingPongWeightStreaming = value
         defaults.set(value, forKey: Keys.pingPongWeightStreaming)
+        clearPresetMarker()
     }
 
     func setNumericalMonitoring(_ value: Bool) {
         numericalMonitoring = value
         defaults.set(value, forKey: Keys.numericalMonitoring)
+        clearPresetMarker()
     }
 
     func setFusedNormModulation(_ value: Bool) {
         fusedNormModulation = value
         defaults.set(value, forKey: Keys.fusedNormModulation)
+        clearPresetMarker()
     }
 
     func setFusedMLPActivation(_ value: Bool) {
         fusedMLPActivation = value
         defaults.set(value, forKey: Keys.fusedMLPActivation)
+        clearPresetMarker()
     }
 
     func setStridedTokenMajorAttention(_ value: Bool) {
         stridedTokenMajorAttention = value
         defaults.set(value, forKey: Keys.stridedTokenMajorAttention)
+        clearPresetMarker()
     }
 
     func setCrossKVCache(_ value: Bool) {
         crossKVCache = value
         defaults.set(value, forKey: Keys.crossKVCache)
+        clearPresetMarker()
     }
 
     func setNoCopyWeightSource(_ value: Bool) {
@@ -139,11 +160,16 @@ final class InferenceOptimizationSettings: ObservableObject {
         // cause.
         noCopyWeightSource = false
         defaults.set(false, forKey: Keys.noCopyWeightSource)
+        // Task 9: an individual manual mutation clears the active-preset
+        // marker — the preset combination no longer exactly describes the
+        // current controls, so Diagnostics shows "Custom".
+        clearPresetMarker()
     }
 
     func setAttentionBackend(_ value: DiTAttentionBackend) {
         attentionBackend = value
         defaults.set(value.rawValue, forKey: Keys.attentionBackend)
+        clearPresetMarker()
     }
 
     /// QUARANTINED (Task 4): the P8 direct packed QGEMM backends
@@ -166,6 +192,16 @@ final class InferenceOptimizationSettings: ObservableObject {
     /// (`WeightNoCopyPolicy.makeAlias` / `WeightStreamer`) stays intact.
     static let p6NoCopyDisabledReason = "P6 mmap no-copy weight source is temporarily disabled: a physical A12 run hit a real GPU page fault (kIOGPUCommandBufferCallbackErrorPageFault) while no-copy bytes were being served. This is correctness/safety hardening, not a proof of the historical root cause; the research implementation remains intact for an isolated hardware test."
 
+    /// Task 9: the central-validator reasons live on `InferenceOptimizationConfig`
+    /// (`noCopyBlockingReason`, `linearBackendBlockingReason`,
+    /// `bf16StridedAttentionBlockingReason`) — the single source of truth for
+    /// Generate-time blocking text. These aliases keep the Diagnostics-side
+    /// wording identical to the validator's wording so the UI never shows two
+    /// different explanations for the same block.
+    static var noCopyBlockingReason: String { InferenceOptimizationConfig.noCopyBlockingReason }
+    static var linearBackendBlockingReason: String { InferenceOptimizationConfig.linearBackendBlockingReason }
+    static var bf16StridedAttentionBlockingReason: String { InferenceOptimizationConfig.bf16StridedAttentionBlockingReason }
+
     func setLinearBackend(_ value: DiTLinearBackend) {
         // QUARANTINED (Task 4): reject direct/hybrid selections for normal
         // device settings — normalize to the known-good baseline and never
@@ -175,13 +211,15 @@ final class InferenceOptimizationSettings: ObservableObject {
         let sanitized = value.isQuarantined ? DiTLinearBackend.dequantizedMPS : value
         linearBackend = sanitized
         defaults.set(sanitized.rawValue, forKey: Keys.linearBackend)
+        clearPresetMarker()
     }
 
     /// P9 (runbook §14): applies a named preset by setting every underlying
     /// optimization control to the preset's combination. The preset is
     /// recorded (and persisted) as the active preset so a relaunch restores
     /// it. After applying, the individual controls remain fully adjustable;
-    /// adjusting any single control does NOT silently clear the preset label.
+    /// adjusting any single control clears the marker (Task 9) so Diagnostics
+    /// shows "Custom" rather than a stale preset name.
     func setPreset(_ preset: InferencePreset) {
         let config = preset.makeConfig()
         linearTileRows = config.linearTileRows
@@ -267,8 +305,10 @@ final class InferenceOptimizationSettings: ObservableObject {
         defaults.set(baseline.noCopyWeightSource, forKey: Keys.noCopyWeightSource)
         defaults.set(baseline.attentionBackend.rawValue, forKey: Keys.attentionBackend)
         defaults.set(baseline.linearBackend.rawValue, forKey: Keys.linearBackend)
-        activePreset = nil
-        defaults.removeObject(forKey: Keys.activePreset)
+        // Manual reset: semantically a "Custom" configuration — clear the
+        // preset marker and its persisted key (same path every individual
+        // setter uses).
+        clearPresetMarker()
     }
 
     // MARK: - Loading

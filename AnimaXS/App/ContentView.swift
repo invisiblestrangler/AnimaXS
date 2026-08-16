@@ -60,6 +60,7 @@ struct ContentView: View {
                 DiagnosticsView(
                     lastMetricsText: coordinator.lastMetricsText,
                     optimizationSettings: optimizationSettings,
+                    ditNumericsPolicy: resolvedDitNumericsPolicy,
                     isGenerating: coordinator.isGenerating)
             }
             .scrollDismissesKeyboard(.interactively)
@@ -284,16 +285,37 @@ struct ContentView: View {
 
     // MARK: - Helpers
 
+    /// Task 9: the resolved DiT pack's numerics policy — the policy the
+    /// production path actually runs (GenerationEngine resolves it the same
+    /// way). Defaults to the W4 policy when the DiT pack is not resolved yet;
+    /// the W8-v2 policy only matters once a W8 pack is installed and resolved.
+    private var resolvedDitNumericsPolicy: DiTNumericsPolicy {
+        if let resolved = catalog.resolved {
+            return DiTNumericsPolicy.fromVariantID(resolved.dit.variant.id)
+        }
+        return .w4Legacy
+    }
+
     /// Single eligibility source for the Generate button, the visible blocked
     /// reason, and the start guard — a tapped Generate can never silently
     /// return while the UI claims it is enabled.
+    ///
+    /// Task 9: the central compatibility validator runs against the CURRENT
+    /// optimization settings snapshot plus the resolved DiT pack's numerics
+    /// policy. The verdict is threaded into eligibility so an incompatible
+    /// configuration blocks Generate with the visible reason — the config is
+    /// NEVER silently mutated at Generate time.
     private var eligibility: GenerationEligibility {
-        GenerationEligibility.evaluate(
+        let optimizationBlockingReason = InferenceOptimizationConfig.blockingReason(
+            for: optimizationSettings.snapshot,
+            numerics: resolvedDitNumericsPolicy)
+        return GenerationEligibility.evaluate(
             modelsResolved: catalog.resolved != nil,
             isGenerating: isGenerating,
             prompt: prompt,
             seedText: seedText,
-            metalAvailable: coordinator.isMetalAvailable)
+            metalAvailable: coordinator.isMetalAvailable,
+            optimizationBlockingReason: optimizationBlockingReason)
     }
 
     /// Stops the repeating elapsed timer. When `updateFinalElapsed` is true the
@@ -336,7 +358,9 @@ struct ContentView: View {
         // Capture the immutable config snapshot at Generate time so a
         // mid-run toggle change can never affect this run. The DiT pack is
         // whatever variant (W4 or W8-v2) was imported into the .dit slot;
-        // `models.dit` already points at it.
+        // `models.dit` already points at it. The snapshot is passed through
+        // UNCHANGED — the central validator (Task 9) only blocks incompatible
+        // configurations via eligibility; it never mutates the config here.
         let config = optimizationSettings.snapshot
         coordinator.generate(
             prompt: prompt, seed: seed, models: models,

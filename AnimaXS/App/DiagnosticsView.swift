@@ -34,6 +34,11 @@ struct DiagnosticsView: View {
     /// Runtime inference-optimization settings (persistent, Diagnostics-only).
     @ObservedObject var optimizationSettings: InferenceOptimizationSettings
 
+    /// Task 9: the resolved DiT pack's numerics policy (defaults to the W4
+    /// policy when the pack is not resolved yet). Used to evaluate the
+    /// central compatibility validator for the current configuration.
+    var ditNumericsPolicy: DiTNumericsPolicy
+
     /// Whether a generation is currently active (controls are disabled while
     /// it runs so a toggle can never mutate an in-flight run).
     var isGenerating: Bool
@@ -43,10 +48,12 @@ struct DiagnosticsView: View {
     init(
         lastMetricsText: String? = nil,
         optimizationSettings: InferenceOptimizationSettings,
+        ditNumericsPolicy: DiTNumericsPolicy = .w4Legacy,
         isGenerating: Bool = false
     ) {
         self.lastMetricsText = lastMetricsText
         self.optimizationSettings = optimizationSettings
+        self.ditNumericsPolicy = ditNumericsPolicy
         self.isGenerating = isGenerating
     }
 
@@ -141,6 +148,12 @@ struct DiagnosticsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Picker("Preset (P9)", selection: presetBinding) {
+                // Task 9: when the user has manually adjusted any individual
+                // control the active-preset marker is cleared, and the picker
+                // shows a "Custom" row instead of pretending a named preset
+                // (e.g. Baseline) is active. Picking a named preset applies
+                // it and re-establishes the marker.
+                Text("Custom").tag(nil as InferencePreset?)
                 ForEach(InferencePreset.allCases, id: \.self) { preset in
                     // QUARANTINED (Task 4) + DISABLED (Task 5): presets whose
                     // QGEMM part is quarantined, or whose P6 mmap no-copy part
@@ -150,19 +163,33 @@ struct DiagnosticsView: View {
                     // so applying one can never run the 10x-slower direct
                     // path or the no-copy weight path — and the disabled look
                     // makes it impossible to miss.
-                    Text(preset.label).tag(preset)
+                    Text(preset.label).tag(preset as InferencePreset?)
                         .disabled(preset.containsQuarantinedLinearBackend
                                   || preset.containsDisabledNoCopy)
                 }
             }
             .disabled(isGenerating)
+            // Task 9: the central validator's verdict — the SAME reason text
+            // that blocks Generate. Shown whenever the current configuration
+            // is incompatible (defense-in-depth; the config is never silently
+            // mutated here).
+            if let reason = optimizationBlockingReason {
+                Label {
+                    Text(reason)
+                        .font(.caption2)
+                } icon: {
+                    Image(systemName: "xmark.octagon.fill")
+                        .foregroundStyle(.red)
+                }
+                .foregroundStyle(.secondary)
+            }
             if optimizationSettings.activePreset?.containsQuarantinedLinearBackend == true {
                 quarantineNote
             }
             if optimizationSettings.activePreset?.containsDisabledNoCopy == true {
                 p6NoCopyNote
             }
-            Text("A preset sets every control below at once. Adjusting individual controls below refines it; nothing here is claimed fastest until the physical XS Max is measured.")
+            Text("A preset sets every control below at once. Adjusting any individual control below switches the preset section to Custom — the preset combination no longer exactly matches. Nothing here is claimed fastest until the physical XS Max is measured.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
             Picker("Linear tile rows", selection: linearTileSelection) {
@@ -264,14 +291,30 @@ struct DiagnosticsView: View {
         .foregroundStyle(.secondary)
     }
 
-    /// P9: binding for the preset picker. `activePreset` is `nil` once the
-    /// user refines an individual control, but the picker needs a concrete
-    /// selection — default to `.baseline` for display. Picking always applies
-    /// the chosen preset via `setPreset`.
-    private var presetBinding: Binding<InferencePreset> {
+    /// P9: binding for the preset picker. `activePreset` is `nil` when the
+    /// user refines an individual control (or after reset), and the picker
+    /// shows the "Custom" row (nil tag) — it never pretends a named preset is
+    /// active. Picking always applies the chosen preset via `setPreset`.
+    private var presetBinding: Binding<InferencePreset?> {
         Binding(
-            get: { optimizationSettings.activePreset ?? .baseline },
-            set: { optimizationSettings.setPreset($0) })
+            get: { optimizationSettings.activePreset },
+            set: { newValue in
+                if let newValue {
+                    optimizationSettings.setPreset(newValue)
+                }
+                // Selecting "Custom" (nil) keeps the current controls exactly
+                // as they are — it only clears the marker.
+            })
+    }
+
+    /// Task 9: the central compatibility validator's verdict for the CURRENT
+    /// configuration. Visible whenever the current config is blocked (even
+    /// while a named preset is active), so the user sees the exact reason
+    /// Generate is disabled — with the same wording as the Generate screen.
+    private var optimizationBlockingReason: String? {
+        InferenceOptimizationConfig.blockingReason(
+            for: optimizationSettings.snapshot,
+            numerics: ditNumericsPolicy)
     }
 
     private var linearTileSelection: Binding<Int> {
