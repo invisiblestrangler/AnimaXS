@@ -237,15 +237,22 @@ final class NumericalMonitor {
     }
 
     /// Per-probe serious-condition detail strings for the metrics summary.
+    /// Magnitude evidence (the slot's recorded maxAbs) is included when it is
+    /// finite and nonzero, so a report says e.g. "...FP16 finite range,
+    /// maxAbs=103424" instead of only the condition.
     func warningDetails() -> String {
         let raw = readRaw()
         var details: [String] = []
         for probe in Probe.allCases {
             let flags = seriousFlags(at: probe.rawValue, raw: raw, probe: probe)
             guard flags != 0 else { continue }
-            var stats = Stats()
+            var stats = stats(at: probe.rawValue, raw: raw)
             stats.flags = flags
-            details.append("\(probe.stageLabel): \(stats.condition)")
+            var detail = "\(probe.stageLabel): \(stats.condition)"
+            if stats.maxAbs.isFinite && stats.maxAbs != 0 {
+                detail += ", maxAbs=\(stats.maxAbs)"
+            }
+            details.append(detail)
         }
         return details.joined(separator: "; ")
     }

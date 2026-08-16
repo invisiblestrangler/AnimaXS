@@ -159,13 +159,17 @@ final class FullInferenceTests: XCTestCase {
         // Explicit diagnostic overrides (attention_numerics / activation_numerics
         // present in the config) keep the legacy override path exactly as before:
         // each value is built from its own key with a "legacy" default. Otherwise
-        // the sampler is constructed from the variant-derived policy, i.e. the
-        // exact numerics GenerationEngine resolves for this pack.
+        // the sampler is constructed from the variant-derived policy — the exact
+        // numerics GenerationEngine resolves for this pack, INCLUDING the
+        // policy-specific final-residual boundary. Constructing from explicit
+        // attention/activation numerics alone would bypass that boundary, so the
+        // no-override path must go through `numerics: policy`.
         let attentionOverride = diagnosticConfig("attention_numerics")
         let activationOverride = diagnosticConfig("activation_numerics")
+        let hasNumericsOverrides = attentionOverride != nil || activationOverride != nil
         let attentionNumerics: AttentionNumerics
         let activationNumerics: ActivationNumerics
-        if attentionOverride != nil || activationOverride != nil {
+        if hasNumericsOverrides {
             attentionNumerics = AttentionNumerics(
                 rawValue: attentionOverride ?? "legacy") ?? .legacy
             activationNumerics = ActivationNumerics(
@@ -176,10 +180,32 @@ final class FullInferenceTests: XCTestCase {
         }
         print("FULL_ATTENTION_NUMERICS=\(attentionNumerics.rawValue)")
         print("FULL_ACTIVATION_NUMERICS=\(activationNumerics.rawValue)")
-        let sampler = try DiffusionSampler(
-            context: context, file: AnimapkFile(url: ditURL),
-            attentionNumerics: attentionNumerics,
-            activationNumerics: activationNumerics)
+        // The final-residual ENTRY boundary is decoupled from activation
+        // numerics (policy-driven). With overrides it mirrors
+        // DiffusionSampler.init's explicit-construction rule; without overrides
+        // it comes from the policy resolver.
+        let finalResidualBoundary: FinalResidualBoundary
+        if hasNumericsOverrides {
+            finalResidualBoundary = activationNumerics == .bf16Compute
+                ? .bf16RNEInFP32 : .fp16Legacy
+        } else {
+            finalResidualBoundary =
+                DiffusionSampler.resolvedFinalResidualBoundary(for: policy)
+        }
+        print("FULL_FINAL_RESIDUAL_BOUNDARY=\(finalResidualBoundary.rawValue)")
+        let sampler: DiffusionSampler
+        if hasNumericsOverrides {
+            sampler = try DiffusionSampler(
+                context: context, file: AnimapkFile(url: ditURL),
+                attentionNumerics: attentionNumerics,
+                activationNumerics: activationNumerics)
+        } else {
+            // Production-equivalent path: the policy carries the final-residual
+            // boundary (W8-v2 -> BF16-RNE-in-FP32, W4 -> FP16 legacy).
+            sampler = try DiffusionSampler(
+                context: context, file: AnimapkFile(url: ditURL),
+                numerics: policy)
+        }
         let diffusionStart = Date()
         var stepSeconds: [Double] = []
         var completedSteps = 0
@@ -429,6 +455,7 @@ final class FullInferenceTests: XCTestCase {
             "dit_numerics_policy": policy.rawValue,
             "attention_numerics": attentionNumerics.rawValue,
             "activation_numerics": activationNumerics.rawValue,
+            "final_residual_boundary": finalResidualBoundary.rawValue,
             "golden_qwen_context": diagnosticConfig("golden_qwen_context") ?? "0",
             "latent_cosine": latentCosineText,
             "latent_rmse": latentRMSText,
@@ -483,12 +510,44 @@ final class FullInferenceTests: XCTestCase {
             }
         }
 
-        let attentionNumerics = AttentionNumerics(
-            rawValue: diagnosticConfig("attention_numerics") ?? "legacy") ?? .legacy
-        let activationNumerics = ActivationNumerics(
-            rawValue: diagnosticConfig("activation_numerics") ?? "legacy") ?? .legacy
+        // Same variant-derived policy as canonical production inference
+        // (ANIMAXS_DIT_VARIANT env, else bundled pack metadata) so the stress
+        // matrix exercises the production final-residual boundary. Explicit
+        // diagnostic overrides keep the legacy override path; otherwise the
+        // sampler is constructed from the policy (production-equivalent).
+        let variantID: String
+        if let injected = env("ANIMAXS_DIT_VARIANT"), !injected.isEmpty {
+            variantID = injected
+        } else {
+            variantID = packMetadataValue(envKey: "ANIMAXS_DIT_VARIANT", jsonKey: "variant")
+        }
+        let policy = DiTNumericsPolicy.fromVariantID(variantID)
+        print("FULL_STRESS_DIT_NUMERICS_POLICY=\(policy.rawValue)")
+        let attentionOverride = diagnosticConfig("attention_numerics")
+        let activationOverride = diagnosticConfig("activation_numerics")
+        let hasNumericsOverrides = attentionOverride != nil || activationOverride != nil
+        let attentionNumerics: AttentionNumerics
+        let activationNumerics: ActivationNumerics
+        if hasNumericsOverrides {
+            attentionNumerics = AttentionNumerics(
+                rawValue: attentionOverride ?? "legacy") ?? .legacy
+            activationNumerics = ActivationNumerics(
+                rawValue: activationOverride ?? "legacy") ?? .legacy
+        } else {
+            (activationNumerics, attentionNumerics) =
+                DiffusionSampler.resolvedNumerics(for: policy)
+        }
         print("FULL_STRESS_ATTENTION_NUMERICS=\(attentionNumerics.rawValue)")
         print("FULL_STRESS_ACTIVATION_NUMERICS=\(activationNumerics.rawValue)")
+        let finalResidualBoundary: FinalResidualBoundary
+        if hasNumericsOverrides {
+            finalResidualBoundary = activationNumerics == .bf16Compute
+                ? .bf16RNEInFP32 : .fp16Legacy
+        } else {
+            finalResidualBoundary =
+                DiffusionSampler.resolvedFinalResidualBoundary(for: policy)
+        }
+        print("FULL_STRESS_FINAL_RESIDUAL_BOUNDARY=\(finalResidualBoundary.rawValue)")
         NumericalMonitor.detailedProbesEnabled = true
         defer { NumericalMonitor.detailedProbesEnabled = false }
 
@@ -509,10 +568,19 @@ final class FullInferenceTests: XCTestCase {
             let initial = makeBuffer(noise, on: context.device)
             let finalLatent = try XCTUnwrap(context.device.makeBuffer(
                 length: DiffusionSampler.latentElements * 4, options: .storageModeShared))
-            let sampler = try DiffusionSampler(
-                context: context, file: AnimapkFile(url: ditURL),
-                attentionNumerics: attentionNumerics,
-                activationNumerics: activationNumerics)
+            let sampler: DiffusionSampler
+            if hasNumericsOverrides {
+                sampler = try DiffusionSampler(
+                    context: context, file: AnimapkFile(url: ditURL),
+                    attentionNumerics: attentionNumerics,
+                    activationNumerics: activationNumerics)
+            } else {
+                // Production-equivalent path: the policy carries the
+                // final-residual boundary.
+                sampler = try DiffusionSampler(
+                    context: context, file: AnimapkFile(url: ditURL),
+                    numerics: policy)
+            }
             let start = Date()
             do {
                 try await sampler.executeDiagnostic(

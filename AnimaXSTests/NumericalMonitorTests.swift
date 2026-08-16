@@ -213,6 +213,60 @@ final class NumericalMonitorTests: XCTestCase {
         XCTAssertEqual(issue.stats.condition, "value exceeded FP16 finite range")
     }
 
+    // MARK: - warningDetails magnitude evidence
+
+    /// `warningDetails()` must include the slot's recorded maxAbs magnitude
+    /// (not just the condition) for a probe with a serious flag, and must stay
+    /// silent for healthy probes.
+    func testWarningDetailsIncludesRecordedMaxAbs() throws {
+        let context = try requireContext()
+        let monitor = try NumericalMonitor(context: context)
+        monitor.beginRun()
+        var raw = [UInt32](repeating: 0, count: NumericalMonitor.Probe.allCases.count * 4)
+        // Serious halfOverflow on finalResidualToHalf with a real magnitude,
+        // and a magnitude recorded on a healthy slot that must NOT appear.
+        let seriousSlot = NumericalMonitor.Probe.finalResidualToHalf.rawValue
+        let healthySlot = NumericalMonitor.Probe.patchesToHalf.rawValue
+        raw[seriousSlot * 4 + 0] = NumericalMonitor.Flag.halfOverflow.rawValue
+        raw[seriousSlot * 4 + 1] = Float(103_424.0).bitPattern
+        raw[seriousSlot * 4 + 2] = 7
+        raw[healthySlot * 4 + 1] = Float(300_000.0).bitPattern
+        raw.withUnsafeBytes { bytes in
+            memcpy(monitor.statsBufferForTesting, bytes.baseAddress!, bytes.count)
+        }
+        let details = monitor.warningDetails()
+        XCTAssertTrue(details.contains("final-layer residual conversion"),
+                      "condition's stage label must be present")
+        XCTAssertTrue(details.contains("value exceeded FP16 finite range"),
+                      "condition string must be present")
+        XCTAssertTrue(details.contains("maxAbs=103424.0"),
+                      "recorded maxAbs magnitude must be present in the detail")
+        XCTAssertFalse(details.contains("patchesToHalf"),
+                       "healthy probes must not appear in warning details")
+        XCTAssertFalse(details.contains("300000"),
+                       "magnitudes of healthy probes must not be reported")
+        XCTAssertEqual(monitor.warningCount(), 1)
+    }
+
+    /// A serious probe whose slot has no usable magnitude (zero) must still
+    /// report its condition, without an invented maxAbs.
+    func testWarningDetailsOmitsZeroMaxAbs() throws {
+        let context = try requireContext()
+        let monitor = try NumericalMonitor(context: context)
+        monitor.beginRun()
+        var raw = [UInt32](repeating: 0, count: NumericalMonitor.Probe.allCases.count * 4)
+        let slot = NumericalMonitor.Probe.selfScores.rawValue
+        raw[slot * 4 + 0] = NumericalMonitor.Flag.posInf.rawValue
+        raw[slot * 4 + 2] = 42
+        raw.withUnsafeBytes { bytes in
+            memcpy(monitor.statsBufferForTesting, bytes.baseAddress!, bytes.count)
+        }
+        let details = monitor.warningDetails()
+        XCTAssertTrue(details.contains("self-attention scores: positive Inf detected"))
+        XCTAssertFalse(details.contains("maxAbs"),
+                       "no maxAbs suffix when the recorded magnitude is zero")
+    }
+
     // MARK: - Monitoring OFF (§18.5)
 
     /// When the numerical monitor is disabled, the sampler has no monitor; a

@@ -1,6 +1,22 @@
 import Foundation
 import Metal
 
+/// The numerical boundary applied to the LARGE FP32 residual at final-layer
+/// entry (predict2.py:930 casts the residual to the cross-attention dtype
+/// before FinalLayer). Deliberately DECOUPLED from `ActivationNumerics`:
+/// production W8-v2 runs legacy activation numerics yet must never convert the
+/// large residual to FP16 (values above 65,504 would overflow to Inf and
+/// poison the fp32-stat LayerNorm).
+enum FinalResidualBoundary: String, Equatable {
+    /// W4 legacy: fp16 residual boundary followed by fp32-stat LayerNorm
+    /// (known-good path, byte-for-byte unchanged).
+    case fp16Legacy
+    /// Source-faithful BF16 RNE rounding retained in FP32 storage, then
+    /// LayerNorm in FP32 over the BF16-rounded values. Selected for production
+    /// W8-v2 (w8LegacyStabilized) and the explicit w8BF16Experimental policy.
+    case bf16RNEInFP32
+}
+
 /// Streamed MiniTrainDIT FinalLayer + unpatchify for the fixed image model shape.
 final class DiTFinalLayerExecutor {
     private static let tokens = 1_024
@@ -18,6 +34,10 @@ final class DiTFinalLayerExecutor {
     private let buffers: BufferPool
     private let linear: LinearExecutor
     private let activationNumerics: ActivationNumerics
+    /// Decoupled final-residual ENTRY boundary (see `FinalResidualBoundary`):
+    /// selects how the large FP32 residual enters the final layer BEFORE
+    /// LayerNorm, independent of the activation-numerics compute boundaries.
+    private let finalResidualBoundary: FinalResidualBoundary
     private let monitor: NumericalMonitor?
     /// Immutable optimization snapshot (captured at Generate). Used for the
     /// P6 no-copy weight source toggle and linear tile config.
@@ -28,6 +48,7 @@ final class DiTFinalLayerExecutor {
 
     init(context: MetalContext, file: AnimapkFile,
          activationNumerics: ActivationNumerics = .legacy,
+         finalResidualBoundary: FinalResidualBoundary = .fp16Legacy,
          monitor: NumericalMonitor? = nil,
          optimization: InferenceOptimizationConfig = .currentBaseline) throws {
         let range = try DiTFinalLayerLocator(file: file).range
@@ -45,6 +66,7 @@ final class DiTFinalLayerExecutor {
             directMPSIO: optimization.directLinearMPSIO,
             linearBackend: optimization.linearBackend)
         self.activationNumerics = activationNumerics
+        self.finalResidualBoundary = finalResidualBoundary
         self.monitor = monitor
     }
 
@@ -84,13 +106,16 @@ final class DiTFinalLayerExecutor {
         try encodeComputeBoundary(command, modulation, count: Self.modulationSize)
 
         // predict2.py:930 casts the large fp32 residual to cross-attention dtype
-        // before FinalLayer. For W4 (legacy) that is an fp16 boundary followed by
-        // an fp32-stat LayerNorm — the known-good path. For the BF16 experimental
-        // policy (w8BF16Experimental / explicit .bf16Compute request), an FP16
-        // conversion of the large residual would overflow above 65,504, so
-        // the residual is rounded to BF16 RNE while retained in fp32 storage, and
-        // LayerNorm runs in fp32 over those BF16-rounded values (source-faithful).
-        // Production W8-v2 resolves to legacy numerics and does NOT take this path.
+        // before FinalLayer. The ENTRY boundary is decoupled from
+        // activationNumerics via `finalResidualBoundary`:
+        //  - .fp16Legacy (W4): fp16 residual boundary followed by an fp32-stat
+        //    LayerNorm — the known-good W4 path, byte-for-byte unchanged.
+        //  - .bf16RNEInFP32 (production W8-v2 = w8LegacyStabilized, and the
+        //    explicit w8BF16Experimental policy): the large residual is rounded
+        //    to BF16 RNE while retained in fp32 storage, and LayerNorm runs in
+        //    fp32 over those BF16-rounded values (source-faithful). An FP16
+        //    conversion of the large residual would overflow above 65,504, so
+        //    it must NEVER be converted to half at final-layer entry.
         let normalized = buffer("final.normalized.f32", Self.tokens * Self.dim, Float.self)
         let normalizedHalf = buffer("final.normalized.f16", Self.tokens * Self.dim, Float16.self)
         let normalizedBoundary = buffer(
@@ -98,17 +123,13 @@ final class DiTFinalLayerExecutor {
         let modulated = buffer("final.modulated.f32", Self.tokens * Self.dim, Float.self)
         let projectionInput = buffer("final.projectionInput.f16", Self.tokens * Self.dim, Float16.self)
 
-        if emulatesBF16 {
-            // Experimental BF16 path (explicit .bf16Compute request, never the
-            // production W8-v2 resolution): BF16 RNE rounding of the large
-            // residual while stored in FP32, then LayerNorm in FP32 over the
-            // BF16-rounded values. The large residual is never converted to
-            // half here.
+        switch finalResidualBoundary {
+        case .bf16RNEInFP32:
             let boundaryFloat = buffer("final.boundary.f32", Self.tokens * Self.dim, Float.self)
             try encodeUnary(command, "round_f32_to_bf16", residual, boundaryFloat,
                             Self.tokens * Self.dim)
             try encodeLayerNorm(command, input: boundaryFloat, output: normalized)
-        } else {
+        case .fp16Legacy:
             // W4 legacy: fp16 residual boundary then fp32-stat LayerNorm (unchanged).
             let residualHalf = buffer("final.residual.f16", Self.tokens * Self.dim, Float16.self)
             let boundaryFloat = buffer("final.boundary.f32", Self.tokens * Self.dim, Float.self)

@@ -219,6 +219,21 @@ final class GenerationMetricsTests: XCTestCase {
         XCTAssertFalse(disabledText.contains("Numerical warnings: 0"))
     }
 
+    // P0: warning detail text carrying a maxAbs magnitude must pass through to
+    // the summary unchanged, so physical reports show e.g. "...FP16 finite
+    // range, maxAbs=103424" instead of only the condition.
+    func testNumericalDetailsWithMaxAbsPassThroughToSummary() {
+        let collector = MetricsCollector()
+        collector.setNumericalWarnings(1)
+        collector.setNumericalDetails(
+            "final-layer residual conversion: value exceeded FP16 finite range, maxAbs=103424.0")
+        collector.finalize(totalWall: 10)
+        let text = collector.snapshot().summaryText
+        XCTAssertTrue(text.contains("final-layer residual conversion"))
+        XCTAssertTrue(text.contains("value exceeded FP16 finite range"))
+        XCTAssertTrue(text.contains("maxAbs=103424.0"))
+    }
+
     // P2-A: eight completed steps each appear in stepMetrics with wall time and
     // completed == true.
     func testRecordsAllEightCompletedSteps() {

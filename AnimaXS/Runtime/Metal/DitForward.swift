@@ -45,6 +45,7 @@ final class DitForward {
     init(context: MetalContext, file: AnimapkFile,
          attentionNumerics: AttentionNumerics = .legacy,
          activationNumerics: ActivationNumerics = .legacy,
+         finalResidualBoundary: FinalResidualBoundary = .fp16Legacy,
          monitor: NumericalMonitor? = nil,
          optimization: InferenceOptimizationConfig = .currentBaseline,
          crossKVCache: CrossKVCache? = nil) throws {
@@ -52,8 +53,12 @@ final class DitForward {
             context: context, file: file, attentionNumerics: attentionNumerics,
             activationNumerics: activationNumerics, monitor: monitor,
             optimization: optimization, crossKVCache: crossKVCache)
+        // The final-residual ENTRY boundary is final-layer-only: it must NOT
+        // feed into block execution (the block loop keeps the activation
+        // numerics as-is).
         finalLayer = try DiTFinalLayerExecutor(
             context: context, file: file, activationNumerics: activationNumerics,
+            finalResidualBoundary: finalResidualBoundary,
             monitor: monitor, optimization: optimization)
     }
 

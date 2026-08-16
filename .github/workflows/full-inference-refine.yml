@@ -206,6 +206,22 @@ jobs:
             echo "::error::numerics policy mismatch for variant ${{ matrix.variant }}: expected FULL_DIT_NUMERICS_POLICY=$EXPECTED_DIT_NUMERICS_POLICY"
             exit 1
           }
+          # Final-residual-boundary gate: the decoupled final-layer ENTRY
+          # boundary must match the production policy mapping. W4 keeps the
+          # byte-for-byte FP16 legacy boundary; W8-v2 must run the
+          # source-faithful BF16-RNE-in-FP32 boundary (never FP16 conversion of
+          # the large residual). A future regression that routes the W8 residual
+          # through float_to_half (or loses the boundary) fails here.
+          case "${{ matrix.variant }}" in
+            w4-v2) EXPECTED_FINAL_RESIDUAL_BOUNDARY=fp16Legacy ;;
+            w8-v2) EXPECTED_FINAL_RESIDUAL_BOUNDARY=bf16RNEInFP32 ;;
+            *) echo "::error::unexpected matrix variant ${{ matrix.variant }}"; exit 1 ;;
+          esac
+          grep -q "FULL_FINAL_RESIDUAL_BOUNDARY=$EXPECTED_FINAL_RESIDUAL_BOUNDARY" \
+            "$RUNNER_TEMP/${{ matrix.variant }}-full-inference.log" || {
+            echo "::error::final-residual boundary mismatch for variant ${{ matrix.variant }}: expected FULL_FINAL_RESIDUAL_BOUNDARY=$EXPECTED_FINAL_RESIDUAL_BOUNDARY"
+            exit 1
+          }
         timeout-minutes: 90
 
       - name: Export generated/reference/comparison/metrics attachments

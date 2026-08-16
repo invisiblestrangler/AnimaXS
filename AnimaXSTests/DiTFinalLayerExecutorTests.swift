@@ -54,11 +54,13 @@ final class DiTFinalLayerExecutorTests: XCTestCase {
         print("H007_FINAL_LAYER_SYNTHETIC=PASS rangeBytes=\(located.length)")
     }
 
-    // P1-D: with W8 BF16 emulation (.bf16Compute), the large residual is rounded
-    // to BF16 RNE while retained in fp32 storage, so residual magnitudes above
-    // the FP16 max (65,504) must stay finite through the final layer. The
-    // legacy W4 path converts the residual through fp16 and would overflow.
-    func testW8BF16EmulatedFinalLayerKeepsLargeResidualFinite() async throws {
+    // P0: production W8-v2 resolves to w8LegacyStabilized (legacy
+    // activation/attention numerics), but its final-residual ENTRY boundary is
+    // decoupled to .bf16RNEInFP32: the large residual is rounded to BF16 RNE
+    // while retained in fp32 storage, so residual magnitudes above the FP16 max
+    // (65,504) must stay finite through the final layer. The legacy W4 boundary
+    // (.fp16Legacy) converts the residual through fp16 and would overflow.
+    func testW8ProductionFinalBoundaryKeepsLargeResidualFinite() async throws {
         guard let context = MetalContext() else {
             throw XCTSkip("SKIPPED_NO_METAL: default Metal device/library unavailable")
         }
@@ -82,6 +84,7 @@ final class DiTFinalLayerExecutorTests: XCTestCase {
             let velocity = try sharedBuffer(bytes: 16 * 64 * 64 * 4, context: context)
             let residualValues = residual.contents().bindMemory(
                 to: Float.self, capacity: 1_024 * 2_048)
+            // Alternate positive/negative so LayerNorm sees real variance.
             for index in 0..<(1_024 * 2_048) {
                 residualValues[index] = magnitude * (index.isMultiple(of: 2) ? 1 : -1)
             }
@@ -89,15 +92,61 @@ final class DiTFinalLayerExecutorTests: XCTestCase {
                 to: Float.self, capacity: 16 * 64 * 64)
             for index in 0..<(16 * 64 * 64) { output[index] = 1_234_567 }
 
+            // Production W8 contract: LEGACY activation numerics (w8LegacyStabilized)
+            // with the decoupled BF16-RNE-in-FP32 final-residual boundary.
             try await DiTFinalLayerExecutor(
                 context: context, file: file,
-                activationNumerics: .bf16Compute).execute(
+                activationNumerics: .legacy,
+                finalResidualBoundary: .bf16RNEInFP32).execute(
                     residual: residual, emb: emb, adalnLora: adaln, velocity: velocity)
 
             XCTAssertTrue((0..<(16 * 64 * 64)).allSatisfy { output[$0].isFinite },
-                          "W8 BF16-emulated final layer produced non-finite output at residual magnitude \(magnitude)")
+                          "production W8 final boundary produced non-finite output at residual magnitude \(magnitude)")
         }
-        print("H007_W8_BF16_LARGE_RESIDUAL=PASS magnitudes=60000,70000,100000,280000")
+        print("H007_W8_PRODUCTION_FINAL_BOUNDARY=PASS magnitudes=60000,70000,100000,280000")
+    }
+
+    // W4 contract: the policy resolves to .fp16Legacy, and the executor's
+    // default boundary keeps the byte-for-byte FP16 residual path. This test
+    // does NOT feed >65,504 through the W4 path and require finite — that
+    // would redefine W4. It only asserts the small-residual W4 path is intact.
+    func testW4FinalBoundaryResolvesToFP16LegacyAndExecutes() async throws {
+        guard let context = MetalContext() else {
+            throw XCTSkip("SKIPPED_NO_METAL: default Metal device/library unavailable")
+        }
+        XCTAssertEqual(DiffusionSampler.resolvedFinalResidualBoundary(for: .w4Legacy),
+                       .fp16Legacy)
+        let url = try TestPackFactory.writePack(
+            named: "dit-final-w4", componentCode: 1, quantScheme: "w4", quantGroup: 64,
+            blobs: [
+                zeroW4("model.diffusion_model.final_layer.adaln_modulation.1.weight",
+                       rows: 256, columns: 2_048),
+                zeroW4("model.diffusion_model.final_layer.adaln_modulation.2.weight",
+                       rows: 4_096, columns: 256),
+                zeroW4("model.diffusion_model.final_layer.linear.weight",
+                       rows: 64, columns: 2_048),
+            ], to: tmpDir)
+        let file = try AnimapkFile(url: url)
+
+        let residual = try sharedBuffer(bytes: 1_024 * 2_048 * 4, context: context)
+        let emb = try sharedBuffer(bytes: 2_048 * 4, context: context)
+        let adaln = try sharedBuffer(bytes: 4_096 * 4, context: context)
+        let velocity = try sharedBuffer(bytes: 16 * 64 * 64 * 4, context: context)
+        let residualValues = residual.contents().bindMemory(
+            to: Float.self, capacity: 1_024 * 2_048)
+        for index in 0..<(1_024 * 2_048) {
+            residualValues[index] = Float(index % 31 - 15) / 16
+        }
+        let output = velocity.contents().bindMemory(to: Float.self, capacity: 16 * 64 * 64)
+        for index in 0..<(16 * 64 * 64) { output[index] = 1_234_567 }
+
+        // Default boundary is .fp16Legacy (W4 path, byte-for-byte unchanged).
+        try await DiTFinalLayerExecutor(context: context, file: file).execute(
+            residual: residual, emb: emb, adalnLora: adaln, velocity: velocity)
+
+        XCTAssertTrue((0..<(16 * 64 * 64)).allSatisfy { output[$0] == 0 },
+                      "W4 FP16-legacy final boundary must execute unchanged")
+        print("H007_W4_FINAL_BOUNDARY=PASS boundary=fp16Legacy")
     }
 
     func testRealFinalLayerAgainstSameW4Oracle() async throws {
