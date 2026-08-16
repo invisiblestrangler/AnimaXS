@@ -287,9 +287,16 @@ final class GenerationCoordinator: ObservableObject {
     func isFatalMetalFault(_ error: Error) -> Bool {
         // 1. Raw Metal command-buffer NSError with a fatal code.
         let nsError = error as NSError
-        if nsError.domain == MTLCommandBufferErrorDomain, nsError.code >= 0 {
-            switch MTLCommandBufferError(rawValue: UInt(nsError.code)) {
-            case .pageFault, .invalidResource, .internal:
+        if nsError.domain == MTLCommandBufferErrorDomain {
+            // Compare the raw NSError code against the fatal cases' raw
+            // values. This avoids constructing an `MTLCommandBufferError`
+            // from an arbitrary code (whose Swift raw-value init signature
+            // varies across SDK versions) and is unambiguous about intent.
+            let code = nsError.code
+            switch code {
+            case Int(MTLCommandBufferError.pageFault.rawValue),
+                 Int(MTLCommandBufferError.invalidResource.rawValue),
+                 Int(MTLCommandBufferError.internal.rawValue):
                 return true
             default:
                 break
