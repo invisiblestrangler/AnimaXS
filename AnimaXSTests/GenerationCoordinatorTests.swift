@@ -1020,4 +1020,165 @@ final class GenerationCoordinatorTests: XCTestCase {
             return probe
         }
     }
+
+    // MARK: - Task 8: a fresh Generate owns the image/metrics surface
+
+    /// Run 1 succeeds (image + metrics published); run 2 is accepted and then
+    /// fails in diffusion (before VAE/decode). The fresh-run clears mean run 2
+    /// never displays run 1's image, and metrics are per-run: cleared at the
+    /// accepted Generate, re-published by run 2's own defer.
+    @MainActor
+    func testFreshGenerateClearsPriorImageAndMetricsBeforeFailing() async throws {
+        let context = try makeContext()
+        let factory = ProbeFactory()
+        let coordinator = GenerationCoordinator(context: context, factory: factory)
+        let models = testModels()
+
+        // Run 1: success → image + metrics published.
+        coordinator.generate(prompt: "run 1", seed: 1, models: models)
+        for _ in 0..<250 {
+            if !coordinator.isGenerating { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertFalse(coordinator.isGenerating)
+        XCTAssertNotNil(coordinator.image, "run 1 must publish an image")
+        if case .completed = coordinator.state {
+            // expected
+        } else {
+            XCTFail("expected completed after run 1, got \(coordinator.state)")
+        }
+        // Metrics are published from the run's defer on a MainActor hop; poll.
+        for _ in 0..<250 {
+            if coordinator.lastMetricsText != nil { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertNotNil(coordinator.lastMetricsText, "run 1 must publish metrics")
+
+        // Run 2: the next diffusion stage throws (fails before decode).
+        factory.samplerOnExecute = { throw GenerationError.diffusionPack("boom") }
+        coordinator.generate(prompt: "run 2", seed: 2, models: models)
+        // Synchronously after the ACCEPTED Generate: run 1's image/metrics are
+        // gone, so a failure cannot show run 1's image.
+        XCTAssertNil(coordinator.image, "fresh Generate must clear the prior image")
+        XCTAssertNil(coordinator.lastMetricsText, "fresh Generate must clear prior metrics")
+        XCTAssertTrue(coordinator.isGenerating, "run 2 was accepted")
+
+        for _ in 0..<250 {
+            if !coordinator.isGenerating { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertFalse(coordinator.isGenerating)
+        XCTAssertNil(coordinator.image, "a failed run must not display an image")
+        if case .failed(let message) = coordinator.state {
+            XCTAssertTrue(message.contains("Diffusion"), "got \(message)")
+        } else {
+            XCTFail("expected failed after run 2, got \(coordinator.state)")
+        }
+        // The failed run still publishes its own metrics (defer runs on
+        // failure too), so the summary shown belongs to run 2, not run 1.
+        for _ in 0..<250 {
+            if coordinator.lastMetricsText != nil { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertNotNil(coordinator.lastMetricsText,
+                        "the failed run still publishes its own metrics")
+    }
+
+    /// A blocked Generate (poisoned context) must not delete the prior run's
+    /// result: state, image, and metrics stay exactly as the last run left
+    /// them, and no new engine run starts.
+    @MainActor
+    func testBlockedGenerateAfterPoisoningPreservesLastRunResults() async throws {
+        let context = try makeContext()
+        let factory = ProbeFactory()
+        let coordinator = GenerationCoordinator(context: context, factory: factory)
+        let models = testModels()
+
+        // Run 1: success → image + metrics.
+        coordinator.generate(prompt: "run 1", seed: 1, models: models)
+        for _ in 0..<250 {
+            if !coordinator.isGenerating { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertFalse(coordinator.isGenerating)
+        XCTAssertNotNil(coordinator.image)
+        for _ in 0..<250 {
+            if coordinator.lastMetricsText != nil { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertNotNil(coordinator.lastMetricsText)
+
+        // Run 2: fatal Metal fault — accepted (clears image/metrics at start),
+        // then poisons the context.
+        let fatalError = makeFatalMetalError(
+            .pageFault,
+            description: "kIOGPUCommandBufferCallbackErrorPageFault while serving no-copy bytes")
+        factory.samplerOnExecute = { throw fatalError }
+        coordinator.generate(prompt: "run 2", seed: 2, models: models)
+        XCTAssertNil(coordinator.image, "accepted run 2 cleared run 1's image")
+        for _ in 0..<250 {
+            if !coordinator.isGenerating { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertFalse(coordinator.isGenerating)
+        XCTAssertTrue(coordinator.metalContextPoisoned, "run 2's fault poisons the context")
+        XCTAssertNil(coordinator.image, "the fatal run never produced an image")
+        for _ in 0..<250 {
+            if coordinator.lastMetricsText != nil { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        let metricsAfterRun2 = try XCTUnwrap(coordinator.lastMetricsText)
+
+        // Run 3: blocked by the poisoned context — nothing may change.
+        let callsBefore = factory.calls.count
+        let stateBefore = coordinator.state
+        coordinator.generate(prompt: "run 3", seed: 3, models: models)
+        XCTAssertEqual(factory.calls.count, callsBefore,
+                       "a blocked Generate must not start an engine run")
+        XCTAssertEqual(coordinator.state, stateBefore,
+                       "a blocked Generate must not change state")
+        XCTAssertNil(coordinator.image, "a blocked Generate must not clear/alter the image")
+        XCTAssertEqual(coordinator.lastMetricsText, metricsAfterRun2,
+                       "a blocked Generate must not delete the last run's metrics")
+    }
+
+    /// A Generate tapped while a run is in-flight is rejected at the
+    /// `!isGenerating` guard and must leave the in-flight run's state, image,
+    /// and metrics untouched (no engine run, no clears).
+    @MainActor
+    func testBlockedGenerateWhileGeneratingDoesNotClearInFlightState() async throws {
+        let context = try makeContext()
+        let factory = BlockingFactory()
+        let coordinator = GenerationCoordinator(context: context, factory: factory)
+
+        coordinator.generate(prompt: "first", seed: 1, models: testModels())
+        XCTAssertTrue(coordinator.isGenerating, "first generation starts synchronously")
+        XCTAssertNil(coordinator.image, "in-flight run owns an empty image surface")
+        XCTAssertNil(coordinator.lastMetricsText, "no metrics before the run publishes")
+
+        let callsBefore = factory.callCount
+        let stateBefore = coordinator.state
+        coordinator.generate(prompt: "second", seed: 2, models: testModels())
+        XCTAssertEqual(factory.callCount, callsBefore,
+                       "second Generate rejected while one is running")
+        XCTAssertEqual(coordinator.state, stateBefore,
+                       "blocked Generate must not change the in-flight state")
+        XCTAssertNil(coordinator.image, "blocked Generate must not touch the image surface")
+        XCTAssertNil(coordinator.lastMetricsText,
+                     "blocked Generate must not publish or clear metrics")
+
+        for _ in 0..<250 {
+            if factory.isAnySamplerBlocked { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertTrue(factory.isAnySamplerBlocked, "first sampler reached the blocked stage")
+        factory.releaseAll()
+        for _ in 0..<250 {
+            if !coordinator.isGenerating { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertFalse(coordinator.isGenerating)
+        XCTAssertNotNil(coordinator.image,
+                        "the in-flight run completes and publishes its image")
+    }
 }

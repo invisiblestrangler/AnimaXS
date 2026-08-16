@@ -50,7 +50,9 @@ enum GenerationError: Error, LocalizedError {
 /// - reports diffusion step AND block progress to the UI;
 /// - exposes cooperative cancellation (K003 core) — there is no checkpoint or
 ///   resume state, so backgrounding / memory warnings just cancel the run;
-/// - keeps the last successful image across failed runs.
+/// - makes every accepted fresh Generate own the output surface: the previous
+///   run's image and metrics are cleared at start, so a failed run never
+///   displays a prior successful image.
 @MainActor
 final class GenerationCoordinator: ObservableObject {
     @Published private(set) var state: GenerationState = .idle
@@ -140,6 +142,13 @@ final class GenerationCoordinator: ObservableObject {
             state = .failed(GenerationError.metal("Metal device unavailable").localizedDescription)
             return
         }
+        // A fresh Generate owns the output surface: clear the previous run's
+        // image and metrics BEFORE entering the first stage, so a failed run
+        // never shows a prior successful image. Blocked Generates returned
+        // above and leave the prior result untouched. The current run's
+        // metrics are published (publishMetrics) on completion/failure/cancel.
+        image = nil
+        lastMetricsText = nil
         // Enter the generating state synchronously so a second `generate`
         // call (even on the same runloop tick) is rejected.
         state = .tokenizing
