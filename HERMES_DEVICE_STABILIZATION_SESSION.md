@@ -15,9 +15,9 @@
 - [x] T8 Fresh-run image ownership (verified + committed)
 - [x] T9 Diagnostics preset drift + compat validator (verified + committed)
 - [x] T10 Numerical-monitor label cleanup (verified + committed)
-- [ ] T11 Docs/state correction (pending)
+- [x] T11 Docs/state correction (verified + committed)
 - [x] CI Gate A (PASS after T1)
-- [ ] CI Gate B (after T1-T10)
+- [ ] CI Gate B (IN PROGRESS after T1-T11)
 - [ ] Full-inference W4/W8 gate
 
 ## Commits
@@ -35,6 +35,7 @@
 - f48deca docs: update session ledger (T7, T8 committed)
 - f647908 fix: Diagnostics preset drift + central compatibility validator (T9)
 - 605300f fix: numerical-monitor gate/add probe labels identify the gate input boundary (T10)
+- de61aa6 docs: correct project state — device stabilization decisions recorded (T11)
 
 ## CI Runs
 - bootstrap-project #31932812543: success (pbxproj regenerated for T1)
