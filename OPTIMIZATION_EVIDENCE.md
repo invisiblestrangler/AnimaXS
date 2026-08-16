@@ -73,3 +73,12 @@ result: ALL PASS. project-consistency ✓, simulator-tests ✓ (302 tests, 14 ex
 key metrics: 0 failures. Adds WeightStorageMode (copied/noCopy) + WeightLoadResult + WeightNoCopyPolicy (page-aligned eligibility; makeBuffer(bytesNoCopy:) MTLBuffer alias over the mmap'd pack region, deallocator nil so AnimapkFile retains the mmap). noCopyWeightSource toggle (default OFF) wired through DiTBlock/DiTPreparation/DiTFinalLayer executors; WeightStreamer.load(mode:) with no-copy fast path + copied fallback; buffer(for:) returns the alias on the no-copy path; recordMmapNoCopyBytes + summary "Weight bytes served mmap no-copy". Qwen/VAE/LLMAdapter unchanged (DiT-scoped). Fixed: added GenerationMetrics.mmapNoCopyBytes global field + stored optimization snapshot in DiTPreparation/DiTFinalLayer executors.
 artifact/run id: 31915690478 (PR #17 draft)
 interpretation: P6 gate met. no-copy gated behind toggle (W4 default unchanged); page-aligned-only with safe copied fallback; device decides speed benefit later. Next: P7.
+
+## 2026-08-16 (P7) — Normal CI green on P7 (streaming MPS + pure Metal Flash attention)
+HEAD: 153ac1f (P7 complete on opt/a12-sustained-io)
+command: gh workflow run ci.yml --ref opt/a12-sustained-io; gh run watch 31918808645
+configuration: normal CI (ci.yml): project-consistency, simulator-tests, iphone-build
+result: ALL PASS. project-consistency ✓, simulator-tests ✓ (305 tests, 14 expected skips, 0 failures), iphone-build ✓ (Metal Flash + streaming kernels compile).
+key metrics: 0 failures. Adds DiTAttentionBackend selector (legacyHeadMajorMPS/stridedTokenMajorMPS/streamingMPS/metalFlash, default legacy preserves W4). P7-A streaming/online-softmax MPS (chunked keys 64/128/256, running FP32 max/sum, FP32 accumulator, no per-chunk wait, non-causal refusal). P7-B DiT-specialized pure-Metal Flash (dit_flash_attention_h128_q4_k32 + _k16; headDim=128, heads=16, token-major, FP32 accumulation, running-max/rescale, no simdgroup_matrix). Tests: streaming MPS parity, Metal Flash parity (DiT shape), non-DiT headDim rejection. DiagnosticsView backend picker.
+artifact/run id: 31918808645 (PR #17 draft)
+interpretation: P7 gate met. Backends runtime-selectable behind DiTAttentionBackend (default legacy preserves W4). Physical A12 (P7-D) selects the winner on sustained later steps — not done by CI. Next: P8.
