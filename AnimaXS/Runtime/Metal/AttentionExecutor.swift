@@ -200,7 +200,7 @@ final class AttentionExecutor {
                     key: key, keyOffset: keyOffset, value: value, valueOffset: valueOffset,
                     output: output, outputOffset: outputOffset,
                     heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
-                    kvHeads: kvHeads, tokenStride: tokenStride, causal: causal,
+                    kvHeads: kvHeads, tokenStride: tokenStride, causal: causal, probe: probe,
                     scoreScratch: scoreScratch, softmax: softmax, halfBytes: halfBytes,
                     scoreRowBytes: scoreRowBytes, scale: scale)
                 return
@@ -616,7 +616,7 @@ final class AttentionExecutor {
                         throw AnimapkError.validation("failed to create streaming attention accumulate encoder")
                     }
                     accEncoder.setComputePipelineState(accumulate)
-                    accEncoder.setBuffer(chunkOutMatrix.buffer, offset: chunkOutMatrix.offset, index: 0)
+                    accEncoder.setBuffer(chunkOutMatrix.data, offset: chunkOutMatrix.offset, index: 0)
                     accEncoder.setBuffer(accumulator, offset: 0, index: 1)
                     accEncoder.setBuffer(runningAlpha, offset: 0, index: 2)
                     accEncoder.setBytes(&rowCount, length: 4, index: 3)
@@ -642,7 +642,7 @@ final class AttentionExecutor {
                 finalizeEncoder.setComputePipelineState(finalize)
                 finalizeEncoder.setBuffer(accumulator, offset: 0, index: 0)
                 finalizeEncoder.setBuffer(runningSum, offset: 0, index: 1)
-                finalizeEncoder.setBuffer(outputMatrix.buffer, offset: outputMatrix.offset, index: 2)
+                finalizeEncoder.setBuffer(outputMatrix.data, offset: outputMatrix.offset, index: 2)
                 finalizeEncoder.setBytes(&rowCount, length: 4, index: 3)
                 finalizeEncoder.setBytes(&dim, length: 4, index: 4)
                 finalizeEncoder.setBytes(&stride, length: 4, index: 5)
