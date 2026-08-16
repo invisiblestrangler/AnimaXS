@@ -141,7 +141,7 @@ struct DiagnosticsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Picker("Preset (P9)", selection: presetBinding) {
-                ForEach(InferencePreset.allCases, id: \\.self) { preset in
+                ForEach(InferencePreset.allCases, id: \.self) { preset in
                     Text(preset.label).tag(preset)
                 }
             }

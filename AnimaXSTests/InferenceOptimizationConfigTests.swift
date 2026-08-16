@@ -308,7 +308,7 @@ final class InferenceOptimizationConfigTests: XCTestCase {
                 break
             case .streamingMPS, .metalFlash:
                 XCTAssertTrue(c.stridedTokenMajorAttention,
-                              "\\(preset): \\(c.attentionBackend) requires token-major")
+                              "\(preset): \(c.attentionBackend) requires token-major")
             }
         }
     }
