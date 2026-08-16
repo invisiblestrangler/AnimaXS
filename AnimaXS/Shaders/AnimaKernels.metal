@@ -917,126 +917,105 @@ kernel void fp16_matvec_f32(
 // Profiles: qgemm_8x8x64 (TM=8, TN=8, 64 threads) and qgemm_8x16x64 (TM=8,
 // TN=16, 128 threads).
 // ---------------------------------------------------------------------------
-template <typename TileConfig>
-kernel void qgemm_template(
-    device const half   *input      [[buffer(0)]],  // [M, K] fp16
-    device const uchar  *packed     [[buffer(1)]],  // [N, packedRowStride] packed
-    device const half   *scale      [[buffer(2)]],  // [N, groupsPerRow]
-    device const half   *zero       [[buffer(3)]],  // [N, groupsPerRow]
-    device half         *output     [[buffer(4)]],  // [M, N] fp16
-    constant uint       &M          [[buffer(5)]],
-    constant uint       &N          [[buffer(6)]],
-    constant uint       &K          [[buffer(7)]],
-    constant uint       &rowStride  [[buffer(8)]],  // packed bytes per row (may include pad)
-    constant uint       &inputStride [[buffer(9)]], // fp16 elements per input row (may include pad)
-    constant uint       &outputStride [[buffer(10)]], // fp16 elements per output row (may include pad)
-    uint3 group [[threadgroup_position_in_grid]],
-    uint tid [[thread_index_in_threadgroup]])
-{
-    constexpr uint TM = TileConfig::TM;
-    constexpr uint TN = TileConfig::TN;
-    constexpr uint TK = 64;                 // one quant group (group K = 64)
-    constexpr uint THREADS = TM * TN;       // one thread per output element
-
-    uint mBase = group.x * TM;
-    uint nBase = group.y * TN;
-    if (mBase >= M || nBase >= N) return;
-    uint mCount = min(TM, M - mBase);
-    uint nCount = min(TN, N - nBase);
-
-    uint groupsPerRow = (K + W4_GROUP - 1) / W4_GROUP;
-    uint mRow = tid / TN;                   // 0..TM-1
-    uint nCol = tid % TN;                   // 0..TN-1
-    uint row = mBase + mRow;                // activation/output row this thread owns
-    uint wRow = nBase + nCol;               // weight row this thread owns
-
-    threadgroup half aTile[TM * TK];
-    threadgroup half wTile[TN * TK];
-
-    float acc = 0.0f;
-
-    uint kBase = 0;
-    while (kBase < K) {
-        uint kCount = min(TK, K - kBase);
-
-        // Cooperative load of the activation tile [TM][TK] (fp16) for THIS K
-        // group: the TN threads of each row share the row's 64 columns.
-        // Lanes beyond kCount write 0 so the uniform MAC never reads stale
-        // data.
-        for (uint k = nCol; k < TK; k += TN) {
-            if (k < kCount) {
-                aTile[mRow * TK + k] = input[row * inputStride + kBase + k];
-            } else {
-                aTile[mRow * TK + k] = 0;
-            }
-        }
-
-        // Cooperative packed decode of the [TN][TK] W tile for this K group,
-        // using the EXACT dequant_*_to_half indexing. The TM threads of each
-        // weight row share the row's 64 columns (TM * (TK/TM) = 64).
-        {
-            uint packedBase = wRow * rowStride;
-            uint paramBase = wRow * groupsPerRow;
-            uint g = kBase / W4_GROUP;
-            half sc = scale[paramBase + g];
-            half ze = zero[paramBase + g];
-            if (TileConfig::IS_W4) {
-                for (uint i = 0; i < TK / TM; ++i) {
-                    uint k = mRow * (TK / TM) + i;
-                    if (k < kCount) {
-                        uchar byte = packed[packedBase + ((kBase + k) >> 1)];
-                        uint q = ((kBase + k) & 1) == 0 ? uint(byte & 0x0F) : uint(byte >> 4);
-                        wTile[nCol * TK + k] = half(float(q) * float(sc) + float(ze));
-                    } else {
-                        wTile[nCol * TK + k] = 0;
-                    }
-                }
-            } else {
-                for (uint i = 0; i < TK / TM; ++i) {
-                    uint k = mRow * (TK / TM) + i;
-                    if (k < kCount) {
-                        uint q = uint(packed[packedBase + kBase + k]);
-                        wTile[nCol * TK + k] = half(float(q) * float(sc) + float(ze));
-                    } else {
-                        wTile[nCol * TK + k] = 0;
-                    }
-                }
-            }
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        // MAC phase: acc = sum_k a[row][k] * w[wRow][k], FP32 accumulator,
-        // vectorized 4 halves at a time over the K tile.
-        for (uint k = 0; k < TK; k += 4) {
-            float a0 = float(aTile[mRow * TK + k + 0]);
-            float a1 = float(aTile[mRow * TK + k + 1]);
-            float a2 = float(aTile[mRow * TK + k + 2]);
-            float a3 = float(aTile[mRow * TK + k + 3]);
-            uint wBase = nCol * TK + k;
-            acc = fma(a0, float(wTile[wBase + 0]), acc);
-            acc = fma(a1, float(wTile[wBase + 1]), acc);
-            acc = fma(a2, float(wTile[wBase + 2]), acc);
-            acc = fma(a3, float(wTile[wBase + 3]), acc);
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        kBase += TK;
-    }
-
-    // Write half(FP32 accumulator) for this thread's single output element.
-    if (mRow < mCount && nCol < nCount) {
-        output[row * outputStride + nBase + nCol] = half(acc);
-    }
+// Direct packed W4/W8 GEMM (P8). Quant group K = 64, so TK = 64. Each K
+// group's [TN][64] W tile is decoded ONCE into threadgroup memory and reused
+// across TM activation rows; accumulation is FP32; output is half. Two tile
+// profiles: 8x8 (64 threads) and 8x16 (128 threads). Generated as concrete
+// kernels via a macro because MSL does not allow template-parameter structs.
+// The W4/W8 decode matches dequant_w4_to_half / dequant_w8_to_half exactly.
+#define QGEMM_KERNEL(KNAME, TM, TN, ISW4)                                             \
+kernel void KNAME(                                                                    \
+    device const half   *input       [[buffer(0)]],  /* [M, K] fp16 */                \
+    device const uchar  *packed      [[buffer(1)]],  /* [N, packedRowStride] */       \
+    device const half   *scale       [[buffer(2)]],  /* [N, groupsPerRow] */          \
+    device const half   *zero        [[buffer(3)]],  /* [N, groupsPerRow] */          \
+    device half         *output      [[buffer(4)]],  /* [M, N] fp16 */                \
+    constant uint       &M           [[buffer(5)]],                                  \
+    constant uint       &N           [[buffer(6)]],                                  \
+    constant uint       &K           [[buffer(7)]],                                  \
+    constant uint       &rowStride   [[buffer(8)]],                                  \
+    constant uint       &inputStride [[buffer(9)]],                                  \
+    constant uint       &outputStride [[buffer(10)]],                                \
+    uint3 group [[threadgroup_position_in_grid]],                                    \
+    uint tid [[thread_index_in_threadgroup]])                                        \
+{                                                                                     \
+    constexpr uint TK = 64;                                                          \
+    threadgroup half aTile[TM * TK];                                                 \
+    threadgroup half wTile[TN * TK];                                                 \
+    uint mBase = group.x * TM;                                                       \
+    uint nBase = group.y * TN;                                                       \
+    if (mBase >= M || nBase >= N) return;                                            \
+    uint mCount = min(TM, M - mBase);                                                \
+    uint nCount = min(TN, N - nBase);                                                \
+    uint groupsPerRow = (K + W4_GROUP - 1) / W4_GROUP;                               \
+    uint mRow = tid / TN;                                                            \
+    uint nCol = tid % TN;                                                            \
+    uint row = mBase + mRow;                                                         \
+    uint wRow = nBase + nCol;                                                        \
+    float acc = 0.0f;                                                                \
+    uint kBase = 0;                                                                  \
+    while (kBase < K) {                                                              \
+        uint kCount = min(TK, K - kBase);                                            \
+        for (uint k = nCol; k < TK; k += TN) {                                       \
+            if (k < kCount) {                                                        \
+                aTile[mRow * TK + k] = input[row * inputStride + kBase + k];         \
+            } else {                                                                 \
+                aTile[mRow * TK + k] = 0;                                            \
+            }                                                                        \
+        }                                                                            \
+        {                                                                            \
+            uint packedBase = wRow * rowStride;                                      \
+            uint paramBase = wRow * groupsPerRow;                                    \
+            uint g = kBase / W4_GROUP;                                               \
+            half sc = scale[paramBase + g];                                          \
+            half ze = zero[paramBase + g];                                           \
+            if (ISW4) {                                                              \
+                for (uint i = 0; i < TK / TM; ++i) {                                 \
+                    uint k = mRow * (TK / TM) + i;                                   \
+                    if (k < kCount) {                                                \
+                        uchar byte = packed[packedBase + ((kBase + k) >> 1)];        \
+                        uint q = ((kBase + k) & 1) == 0 ? uint(byte & 0x0F) : uint(byte >> 4); \
+                        wTile[nCol * TK + k] = half(float(q) * float(sc) + float(ze)); \
+                    } else {                                                         \
+                        wTile[nCol * TK + k] = 0;                                    \
+                    }                                                                \
+                }                                                                    \
+            } else {                                                                 \
+                for (uint i = 0; i < TK / TM; ++i) {                                 \
+                    uint k = mRow * (TK / TM) + i;                                   \
+                    if (k < kCount) {                                                \
+                        uint q = uint(packed[packedBase + kBase + k]);               \
+                        wTile[nCol * TK + k] = half(float(q) * float(sc) + float(ze)); \
+                    } else {                                                         \
+                        wTile[nCol * TK + k] = 0;                                    \
+                    }                                                                \
+                }                                                                    \
+            }                                                                        \
+        }                                                                            \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                             \
+        for (uint k = 0; k < TK; k += 4) {                                           \
+            float a0 = float(aTile[mRow * TK + k + 0]);                              \
+            float a1 = float(aTile[mRow * TK + k + 1]);                              \
+            float a2 = float(aTile[mRow * TK + k + 2]);                              \
+            float a3 = float(aTile[mRow * TK + k + 3]);                              \
+            uint wBase = nCol * TK + k;                                              \
+            acc = fma(a0, float(wTile[wBase + 0]), acc);                             \
+            acc = fma(a1, float(wTile[wBase + 1]), acc);                             \
+            acc = fma(a2, float(wTile[wBase + 2]), acc);                             \
+            acc = fma(a3, float(wTile[wBase + 3]), acc);                             \
+        }                                                                            \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                             \
+        kBase += TK;                                                                 \
+    }                                                                                \
+    if (mRow < mCount && nCol < nCount) {                                            \
+        output[row * outputStride + nBase + nCol] = half(acc);                       \
+    }                                                                                \
 }
 
-struct QGEMM_8x8x64  { static constexpr uint TM = 8;  static constexpr uint TN = 8;  static constexpr uint THREADS = 64;  static constexpr bool IS_W4 = true; };
-struct QGEMM_8x16x64 { static constexpr uint TM = 8;  static constexpr uint TN = 16; static constexpr uint THREADS = 128; static constexpr bool IS_W4 = true; };
-struct QGEMMW8_8x8x64  { static constexpr uint TM = 8;  static constexpr uint TN = 8;  static constexpr uint THREADS = 64;  static constexpr bool IS_W4 = false; };
-struct QGEMMW8_8x16x64 { static constexpr uint TM = 8;  static constexpr uint TN = 16; static constexpr uint THREADS = 128; static constexpr bool IS_W4 = false; };
-
-template [[host_name("qgemm_8x8x64")]]  kernel void qgemm_template<QGEMM_8x8x64>(device const half*, device const uchar*, device const half*, device const half*, device half*, constant uint&, constant uint&, constant uint&, constant uint&, constant uint&, constant uint&, uint3, uint);
-template [[host_name("qgemm_8x16x64")]] kernel void qgemm_template<QGEMM_8x16x64>(device const half*, device const uchar*, device const half*, device const half*, device half*, constant uint&, constant uint&, constant uint&, constant uint&, constant uint&, constant uint&, uint3, uint);
-template [[host_name("qgemm_w8_8x8x64")]]  kernel void qgemm_template<QGEMMW8_8x8x64>(device const half*, device const uchar*, device const half*, device const half*, device half*, constant uint&, constant uint&, constant uint&, constant uint&, constant uint&, constant uint&, uint3, uint);
-template [[host_name("qgemm_w8_8x16x64")]] kernel void qgemm_template<QGEMMW8_8x16x64>(device const half*, device const uchar*, device const half*, device const half*, device half*, constant uint&, constant uint&, constant uint&, constant uint&, constant uint&, constant uint&, uint3, uint);
+QGEMM_KERNEL(qgemm_8x8x64, 8, 8, true)
+QGEMM_KERNEL(qgemm_8x16x64, 8, 16, true)
+QGEMM_KERNEL(qgemm_w8_8x8x64, 8, 8, false)
+QGEMM_KERNEL(qgemm_w8_8x16x64, 8, 16, false)
 
 // Stable row softmax. Scores/probabilities are fp16 at MPS boundaries, while
 // max, exp, and sum are evaluated and reduced in fp32.
