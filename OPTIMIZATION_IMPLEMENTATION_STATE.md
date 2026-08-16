@@ -2,10 +2,10 @@
 
 Baseline main SHA: f89b1d867883f04b2d9aa4b59e9322b36111c8b4 (origin/main, planner-verified baseline)
 Working branch: opt/a12-sustained-io
-Current HEAD: 1cb1d93 (P8 complete, CI green)
+Current HEAD: c876404 (P9 presets + tests implemented; CI run 31924308805 in progress)
 ## Current phase: P9 — combine winners + presets + final integration/report (runbook §14, §23)
 Current phase gate: P9 — InferencePreset enum; diagnostics presets; no winner forced without A12 data; final report
-Working tree: clean (at 1cb1d93)
+Working tree: clean (at c876404)
 
 ## Completed phases
 - P0 COMPLETE: branch created from origin/main f89b1d8; state files committed; PR #17; normal CI green (31896517851).
@@ -19,10 +19,10 @@ Working tree: clean (at 1cb1d93)
 - P8 COMPLETE (commits 781a54a..1cb1d93): direct packed W4/W8 GEMM — DiTLinearFamily (attentionProjection/mlpUp/mlpDown/other) tagged at DiT call sites; DiTLinearBackend selector (dequantizedMPS/directQuantized/hybrid, default dequantizedMPS preserves W4); qgemm_8x8x64/qgemm_8x16x64 (+ W8 variants) macro-generated MSL kernels with EXACT dequant_w4_to_half/dequant_w8_to_half decode (group K=64), threadgroup W-tile dequant reused across TM rows, FP32 accumulator, no full [N,K] fp16 scratch; hybrid dispatch (MLP→QGEMM, attention→MPS); M=1 matvec preserved; qgemmCalls + per-family metrics; DiagnosticsView selector. CI green on run 31922667679 (307 tests, 0 failures).
 
 ## Current exact objective
-- P8 COMPLETE (normal CI green on run 31922667679: 307 tests, 0 failures). Next: P9 — combine winners + presets + final integration/report (runbook §14, §23).
+- P8 COMPLETE (normal CI green on run 31922667679: 307 tests, 0 failures). P9 IN PROGRESS: InferencePreset enum (10 cases) + setPreset persistence/sanitization + DiagnosticsView preset picker implemented and pushed (HEAD c876404). CI run 31924308805 pending. Then: final report (runbook §23) + state files → "ready for physical A12 validation".
 
 ## Current files being modified
-- P8 complete: working tree clean at 1cb1d93.
+- P9: AnimaXS/Runtime/Generation/InferenceOptimizationConfig.swift (InferencePreset + makeConfig), AnimaXS/App/InferenceOptimizationSettings.swift (setPreset + activePreset + loadPreset + reset clears marker), AnimaXS/App/DiagnosticsView.swift (preset picker), AnimaXSTests/InferenceOptimizationConfigTests.swift (P9 preset tests). Working tree clean at c876404.
 
 ## Invariants that must not regress
 - W4 known-good path
