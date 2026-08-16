@@ -8,8 +8,8 @@
 - [x] T1 Checkpoint/resume removal (verified + committed + CI Gate A green)
 - [x] T2 W8 legacy numerical policy (verified + committed)
 - [x] T3 Full-inference CI policy alignment (verified + committed)
-- [ ] T4 Quarantine directQuantized/hybrid (pending)
-- [ ] T5 Disable P6 mmap no-copy + fatal-Metal poisoning (pending)
+- [x] T4 Quarantine directQuantized/hybrid (verified + committed)
+- [x] T5 Disable P6 mmap no-copy + fatal-Metal poisoning (verified + committed)
 - [ ] T6 Import vs Download + single-flight (pending)
 - [ ] T7 Persist prompt/seed (pending)
 - [ ] T8 Fresh-run image ownership (pending)
@@ -26,6 +26,9 @@
 - 5e9933b docs: add device-stabilization runbook and session ledger
 - 82026cc fix: W8-v2 production resolves to stabilized legacy numerics (T2)
 - 27d3eb7 fix: full-inference CI executes the production numerical policy (T3)
+- fd3e31f docs: update session ledger (T2, T3 committed)
+- e536bd7 fix: quarantine P8 directQuantized/hybrid from production device settings (T4)
+- b14b88b fix: disable P6 mmap no-copy and poison context on fatal Metal faults (T5)
 
 ## CI Runs
 - bootstrap-project #31932812543: success (pbxproj regenerated for T1)
