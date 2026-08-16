@@ -242,3 +242,65 @@ No thermal logic. No silent clamping. No global FP32. Small, reversible commits.
 - **Tests:** multi-chunk streaming import, alternate-variant import/replace/
   receipt, SHA-mismatch cleanup, and the W8-v2 manifest pin live in
   `ModelStoreTests`/`SmokeTests`. No 2.23 GB pack in CI.
+
+---
+
+## Device stabilization (2026-08-16, branch `fix/device-stability-no-checkpoint`) — decisions (append-only)
+
+Built on `1756ab8` (PR #17, A12 sustained-performance + reliability). These decisions
+supersede the earlier experiment-era statements above wherever they conflict — in
+particular "W8 checkpointing is disabled in this batch" and "Checkpointing is always
+on" described the pre-stabilization branches; **checkpointing is now removed entirely**.
+
+1. **Checkpoint/resume is removed from production** (`90ca169`). It no longer
+   justifies its complexity/per-step overhead for the sub-100 s target.
+   `Checkpoint.swift`/`CheckpointStore.swift` are deleted; there is no Resume UI,
+   no cold-launch resume, no checkpoint identity, and no per-step latent CPU snapshot
+   (`readFloats(latent...)` is gone from the production path — the 256 KiB fp32
+   readback no longer runs every diffusion step). Background/memory warning simply
+   cooperatively cancels.
+2. **W8-v2 production temporarily uses stabilized legacy numerics** (`82026cc`).
+   `DiTNumericsPolicy` is `w4Legacy` / `w8LegacyStabilized` / `w8BF16Experimental`;
+   `fromVariantID("w8-v2")` → `w8LegacyStabilized` → legacy attention/activation
+   numerics (the mode behind the coherent full-inference CI output). The FP16-backed
+   BF16 emulation remains experimental, is not claimed range-safe internally, and is
+   only reachable via explicit diagnostics.
+3. **Full-inference CI derives its numerical policy from the production resolver**
+   (`27d3eb7`). `testCanonicalProductionInference` builds the sampler via
+   `DiTNumericsPolicy.fromVariantID(ANIMAXS_DIT_VARIANT)` →
+   `DiffusionSampler.resolvedNumerics` (same as `GenerationEngine`), prints
+   `FULL_DIT_NUMERICS_POLICY`, and `full-inference-refine.yml` gates each matrix
+   variant on its expected marker (w4-v2 → `w4Legacy`, w8-v2 → `w8LegacyStabilized`).
+4. **P8 `directQuantized`/`hybrid` is quarantined from production/device presets**
+   (`e536bd7`). Physical A12 measurement showed approximately a 10× slowdown versus
+   `dequantizedMPS` (performance regression, not proven incorrect). Device settings
+   migrate/reject it; `directQGEMMCandidate`/`allCandidate` force `dequantizedMPS`;
+   Diagnostics hides the backends/presets with a visible A12 note. The kernel remains
+   research code.
+5. **P6 mmap no-copy is disabled** (`b14b88b`) after a physical A12 GPU page fault
+   (`kIOGPUCommandBufferCallback` ErrorPageFault). `noCopyWeightSource` cannot be true
+   in production/device settings (persisted true migrates to false; presets force
+   false). Not re-enabled without a future GPU-read hardware proof.
+6. **Fatal Metal command-buffer faults poison the process generation context**
+   (`b14b88b`). `metalContextPoisoned` is set on `.pageFault`/`.invalidResource`/
+   `.internal` (or a narrow IOGPU page-fault text fallback); state fails with "Fatal
+   GPU fault. Restart AnimaXS before generating again.", `isMetalAvailable` goes false,
+   Generate is blocked until restart. No context recreate, no retry. Cooperative
+   cancellation and ordinary failures never poison.
+7. **Manual Import is local-only** (`f64eb5c`). Action buttons in model rows are
+   `.borderless` so tapping Import can never cross-trigger Download; the picker target
+   is cleared immediately on completion; `ModelStore` has a true per-component
+   single-flight guard (`activeOperations`) for download/importPack/repair/verifyExisting
+   (same-component overlap fails with "operation already active"). App launch and model
+   discovery never auto-download packs.
+8. **Prompt/seed persist across relaunch** (`a4a1c60`) via `generation.lastPrompt` /
+   `generation.lastSeed` (`@AppStorage`), including Randomize.
+9. **Fresh Generate owns the image/metrics surface** (`b25b845`); **Diagnostics preset
+   marker cannot lie after manual edits, with a central compatibility validator**
+   (`f647908`, blocks P6 no-copy, non-`dequantizedMPS` backends, and experimental BF16 +
+   strided attention based on the RESOLVED policy); **numerical-monitor gate/add probe
+   labels are disambiguated** (`605300f`).
+
+**Physical XS Max validation after this patch is PENDING user test.** CI green on
+simulator/macOS does not prove real-device success. See the stabilization plan §17
+configuration and DEVICE_TESTS.md.

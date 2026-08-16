@@ -1,11 +1,43 @@
 # AnimaXS TODO
 
-## Real-device stabilization (2026-08-15) — IN PROGRESS (PR #8, branch fix/real-device-stabilization)
+## Device-stabilization patch (2026-08-16, branch fix/device-stability-no-checkpoint) — source DONE, validation PENDING
 
-Physical iPhone XS Max run exposed: Files import permission error, generic `AnimapkError error 3`,
-unwanted auto-downloads, no keyboard dismissal, silent Generate no-op, Diagnostics crash, idle warmth.
+Physical iPhone XS Max run (2026-08-15) exposed: Files import permission error, generic
+`AnimapkError error 3`, unwanted auto-downloads, no keyboard dismissal, silent Generate
+no-op, Diagnostics crash, idle warmth. The stabilization patch on top of the A12
+optimization work (`1756ab8`) addresses these and removes the ambiguities that made
+optimization benchmarking unreliable.
 
-### Repository side — DONE
+### Source — DONE (committed; CI Gate A green on 31932848703)
+- [x] Checkpoint/resume removed from production (no Resume UI, no per-step latent CPU snapshot)
+- [x] W8-v2 production resolves to stabilized legacy numerics (`w8LegacyStabilized`);
+      BF16 emulation stays experimental and unproven range-safe
+- [x] Full-inference CI derives the production numerical policy from
+      `DiTNumericsPolicy.fromVariantID`; `full-inference-refine.yml` asserts per-variant markers
+- [x] P8 `directQuantized`/`hybrid` quarantined from production/device presets (~10× A12 slowdown)
+- [x] P6 mmap no-copy disabled (A12 GPU page fault); not re-enabled without a hardware proof
+- [x] Fatal Metal command-buffer faults poison generation context until restart
+- [x] Manual Import local-only (no accidental Download); per-component model ops single-flight
+- [x] Prompt/seed persist across relaunch (`generation.lastPrompt` / `generation.lastSeed`)
+- [x] Fresh Generate owns the image/metrics surface; Diagnostics preset marker cannot lie;
+      central compatibility validator; monitor probe labels disambiguated
+- [x] Regression tests for the above (GenerationCoordinatorTests, ModelStoreTests,
+      InferenceOptimizationConfigTests, WeightStreamerTests, GenerationEligibilityTests)
+
+### CI / validation — PENDING
+- [x] CI Gate A PASS (project-consistency, iphone-build, simulator-tests — run 31932848703)
+- [ ] CI Gate B (final normal CI after all stabilization tasks)
+- [ ] Full-inference W4/W8 gate under the corrected production policy (plan §15)
+- [ ] **Physical iPhone XS Max retest (user) — REQUIRED before claiming device fixes.**
+      CI green on simulator/macOS does NOT prove device success. Use the stabilization-plan
+      §17 configuration: W8-v2, baseline preset, `dequantizedMPS`, no-copy unavailable,
+      checkpointing absent.
+
+## Closed: real-device stabilization (2026-08-15, PR #8) — historical, superseded by the patch above
+
+The PR #8 stabilization line (`fix/real-device-stabilization`) is superseded for device
+testing by `fix/device-stability-no-checkpoint`. Its fixes are recorded for history:
+
 - [x] Fix A: model discovery local-only (`discover`/`discoverInstalled`/`resolveInstalledModels`);
   acquisition explicit (`download`/`repair`/`importPack`/`verifyExisting`); `prepare()` removed
 - [x] Fix B: verification receipts — launch does cheap stat checks; no ~2.07 GB re-hash, no double-hash
@@ -27,13 +59,13 @@ unwanted auto-downloads, no keyboard dismissal, silent Generate no-op, Diagnosti
 - [x] Endpoint checks: all three `model-assets-v1` assets → 206 partial, content-length matches manifest
 - [x] Docs updated (README/STATUS/DEVICE_TESTS/NEXT_TASK_HANDOFF/DECISIONS/TEST_MATRIX)
 
-### CI — IN PROGRESS
+### PR #8 CI (historical)
 - [x] project-consistency PASS (bootstrap bot commit `92b544c`)
-- [ ] iphone-build PASS
-- [ ] simulator-tests PASS (incl. new stabilization tests)
-- [ ] PR #8 merged to main after green
+- [x] iphone-build PASS
+- [x] simulator-tests PASS (incl. new stabilization tests)
+- [x] PR #8 merged to main after green
 
-### Physical retest (K, ordered) — REQUIRED before claiming device fixes
+### Physical retest of PR #8 (historical — superseded; the new patch is what the user tests)
 - [ ] Phase 1 idle: no downloads, quick ready, no warmth drift
 - [ ] Phase 2: import Qwen3/DiT/VAE, relaunch, quick ready
 - [ ] Phase 3: Generate (seed 1337) → first visible state; record last stage
@@ -49,4 +81,6 @@ unwanted auto-downloads, no keyboard dismissal, silent Generate no-op, Diagnosti
 ## Backlog (not scheduled)
 
 - [ ] Physical A12 acceptance per DEVICE_TESTS.md (microbenchmarks, memory record, thermal)
+      — after the stabilization retest passes
 - [ ] Residual W8 texture investigation if quality work resumes (see NEXT_TASK_HANDOFF.md)
+- [ ] P6 no-copy re-enable only with a future GPU-read hardware proof

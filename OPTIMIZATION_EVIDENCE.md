@@ -101,6 +101,16 @@ key metrics: 0 failures. baseline preset == currentBaseline; allCandidate is one
 artifact/run id: 31924467039 (PR #17 draft). Prior failing runs: 31924014986 (escaped key path), 31924308805 (leading-dot type inference) — both fixed.
 interpretation: P9 gate met. Presets ready for the §17 physical XS Max benchmark matrix. Final report (§23) + state files → "ready for physical A12 validation".
 
+## 2026-08-16 (DEVICE STABILIZATION) — stabilization patch committed; CI Gate A green; physical validation PENDING
+branch: fix/device-stability-no-checkpoint (off 1756ab8, the opt/a12-sustained-io merge)
+HEAD: 605300f
+command: gh run watch 31932848703 (ci.yml Gate A after the checkpoint-removal refactor)
+configuration: normal CI (ci.yml): project-consistency, iphone-build, simulator-tests
+result: ALL PASS. Stabilization commits: 90ca169 (checkpoint/resume REMOVED — Checkpoint.swift/CheckpointStore.swift deleted, no Resume UI, no cold-launch resume, GenerationEngine always starts at step 0, no per-step 256 KiB fp32 latent CPU readback), 82026cc (W8-v2 production → `w8LegacyStabilized`; `w8BF16Experimental` retained only for explicit diagnostics, NOT claimed range-safe), 27d3eb7 (full-inference CI derives numerics from `DiTNumericsPolicy.fromVariantID` via `DiffusionSampler.resolvedNumerics`; `full-inference-refine.yml` asserts w4-v2→w4Legacy / w8-v2→w8LegacyStabilized markers), e536bd7 (P8 `directQuantized`/`hybrid` quarantined — ~10× A12 slowdown vs dequantizedMPS), b14b88b (P6 mmap no-copy disabled after A12 GPU page fault; `metalContextPoisoned` on fatal Metal faults), f64eb5c (Import local-only + per-component single-flight), a4a1c60 (prompt/seed persist), b25b845 (fresh-run image ownership), f647908 (preset drift + compat validator), 605300f (monitor probe labels).
+key metrics: 0 failures. Previous evidence entries above remain valid history for what CI proved about the optimization branch — they do NOT claim physical-device success.
+artifact/run id: 31932848703 (CI Gate A); prior branch CI: full-inference W4/W8 PASS at run 31925685619 (DEFAULT baseline config only, §16).
+interpretation: The stabilization patch is source-complete and CI Gate A green. PHYSICAL XS MAX VALIDATION REMAINS **PENDING** (user test, plan §17): simulator/macOS CI green does not prove real-device success. The W4/W8 full-inference gate under the corrected production policy (plan §15) is also still pending. This corrects the earlier "ready for physical A12 validation" phrasing: the branch is ready to BE validated, not already validated.
+
 ## 2026-08-16 (P9/FULL-INFERENCE) — Final §16 milestone full-inference gate: PASS (W4 + W8)
 HEAD: ff171f0 (opt/a12-sustained-io, P0-P9 complete)
 command: gh workflow run full-inference-refine.yml --ref opt/a12-sustained-io; run 31925685619

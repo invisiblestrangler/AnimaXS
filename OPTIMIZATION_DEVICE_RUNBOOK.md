@@ -1,5 +1,16 @@
 # AnimaXS Optimization Phase — Device Runbook (unplugged iPhone XS Max)
 
+> **Status note (2026-08-16):** this runbook was written for the earlier
+> `opt/reliability-telemetry` phase (PR #11). The current build to install is the
+> **device-stabilization branch `fix/device-stability-no-checkpoint`** (HEAD 605300f).
+> The checklist below is still the right on-device procedure, but the final
+> handoff configuration for the stabilization build is defined in
+> HERMES_DEVICE_STABILIZATION_PLAN.md §17: W8-v2 pack, baseline preset,
+> `dequantizedMPS` linear backend, mmap no-copy **unavailable/off** (P6 disabled
+> after the A12 GPU page fault), checkpointing **absent** (removed), P8
+> direct/hybrid **quarantined**. W8-v2 production numerics are legacy-stabilized
+> (`w8LegacyStabilized`), not BF16-emulated.
+
 Branch: `opt/reliability-telemetry` (PR #11). Build and install this branch's
 build on the physical XS Max. Everything below is done **unplugged** — charging
 materially heats this device and roughly doubles inference time, so tethered

@@ -4,11 +4,15 @@
 > a GitHub Actions M1 simulator for CI-only characterization. Nothing here counts as A12 validation unless
 > it was produced on the actual device.
 
-## A12 DEVICE ACCEPTANCE: **PENDING** (physical-device run 2026-08-15 observed)
+## A12 DEVICE ACCEPTANCE: **PENDING** (physical-device runs 2026-08-15 observed; stabilization patch 2026-08-16 NOT yet device-tested)
 
 A physical iPhone XS Max **has** been used in this project (first real-device run, 2026-08-15).
 Only the facts below were observed on it. Everything else on this page remains pending until the
-retest checklist at the bottom is executed against the stabilization build.
+retest checklist at the bottom is executed against the stabilization build
+(`fix/device-stability-no-checkpoint`, HEAD 605300f). The device-stabilization patch
+(checkpoint removed, W8 legacy numerics, P8/P6 quarantined/disabled, fatal-Metal poisoning,
+Import local-only, prompt/seed persistence) is CI-verified on simulator/macOS only —
+**CI green does not prove real-device success**.
 
 ## Observed on the physical iPhone XS Max (2026-08-15)
 
@@ -19,8 +23,11 @@ retest checklist at the bottom is executed against the stabilization build.
 | 3 | Explicit model Download produced a generic `AnimaXS.AnimapkError error 3` message (root cause of that specific Download failure not yet determined) | observed |
 | 4 | Prompt keyboard had no obvious dismissal control | observed |
 | 5 | Tapping Generate could leave the status at `Ready.` with no visible error | observed |
-| 6 | Diagnostics crashed the app on the physical device (crash root cause NOT yet proven — Metal/MPS assertion, jetsam, or other) | observed |
-| 7 | With all three packs installed, the app became slightly warm after launch while idle | observed |
+| 6 | Diagnostics crashed the app on the physical device (crash root cause NOT yet proven — Metal/MPS assertion, jetsam, or other) | observed (2026-08-15) |
+| 7 | With all three packs installed, the app became slightly warm after launch while idle | observed (2026-08-15) |
+| 8 | W8-v2 manual import (2.233 GB) terminated the app during import (2026-08-15) — addressed by the single-pass streaming import (PR #15), now in the normal path; NOT yet re-verified on device | observed (2026-08-15) |
+| 9 | P6 mmap no-copy weight serving produced a real GPU page fault (`kIOGPUCommandBufferCallback` ErrorPageFault, A12) — P6 is now DISABLED in production/device settings; no re-enable without a hardware proof | observed (2026-08-16) |
+| 10 | P8 direct-quantized GEMM measured approximately 10× slower than `dequantizedMPS` on A12 — P8 `directQuantized`/`hybrid` are now QUARANTINED from production/device presets | observed (2026-08-16) |
 
 **Do not state why Diagnostics crashed until evidence proves it.** The repository-side fixes
 (MPS rowBytes alignment via the MPS helper, command-buffer status inspection, crash-localizing
@@ -49,6 +56,11 @@ Use standard hosted Simulator CI for functional Metal/MPS parity. Do not use the
 - [ ] A12 page-cache behavior (mmap/copy MB/s)
 - [ ] Diagnostics hardware tests do not crash the app on A12
 - [ ] Idle thermal behavior after launch with all packs installed
+- [ ] W8-v2 import completes on device (single-pass streaming import)
+- [ ] P6 no-copy stays unavailable/off on device (post-page-fault)
+- [ ] P8 direct/hybrid cannot be selected on device (quarantined)
+- [ ] Prompt/seed persist across relaunch on device
+- [ ] Fatal-GPU-fault poisoning behaves (restart required) if reproduced on device
 
 ## Physical retest checklist (stabilization build)
 
@@ -59,9 +71,13 @@ Use standard hosted Simulator CI for functional Metal/MPS parity. Do not use the
 - [ ] Qwen3 manual Import succeeds
 - [ ] DiT manual Import succeeds
 - [ ] VAE manual Import succeeds
+- [ ] W8-v2 manual Import succeeds (single-pass streaming; run 1 of the device matrix is W4, run G is W8)
 - [ ] Relaunch rediscovers imported packs quickly
+- [ ] Prompt and seed persist across relaunch (incl. Randomize)
 - [ ] Keyboard can be dismissed
 - [ ] Generate either starts or displays exact blocked reason
+- [ ] No Resume / Discard-checkpoint UI exists (checkpointing removed)
+- [ ] P6 no-copy control is unavailable/off; P8 direct/hybrid cannot be selected
 - [ ] Generation reaches Tokenizing
 - [ ] Generation reaches Encoding prompt
 - [ ] Generation reaches Adapter
@@ -119,7 +135,8 @@ under materially different conditions are discarded rather than misinterpreted.
 
 ### Rules for valid comparisons
 
-- Use **fresh Generate**, never Resume, for all benchmark timings.
+- Use **fresh Generate** for all benchmark timings. (Checkpoint/Resume was removed from
+  production in the 2026-08-16 stabilization patch, so there is no Resume path anymore.)
 - Keep the iPhone **unplugged** for authoritative performance tests.
 - Same prompt, seed, image dimensions, step count, text encoder, VAE, binary.
 - Check the summary's power/thermal start/end lines: discard runs where one is
@@ -137,8 +154,12 @@ under materially different conditions are discarded rather than misinterpreted.
 - Ping-pong weight streaming: on/off (existing two-slot optimization vs the
   1-slot synchronous control)
 - Numerical monitor: on/off (Euler finite guard stays on either way)
-- DiT pack: Production W4 | Experimental W8 v2 (W8 = Diagnostics-only import;
-  checkpointing disabled for W8 runs)
+- DiT pack: Production W4 | W8-v2 (W8 is a normal alternate of the `.dit` slot;
+  checkpointing is REMOVED for all packs — the W8 "checkpointing disabled" caveat
+  below no longer applies)
+- Linear backend: dequantizedMPS (P8 `directQuantized`/hybrid are QUARANTINED and
+  cannot be selected for device runs)
+- Mmap no-copy: unavailable/off (P6 disabled after the A12 GPU page fault)
 - Reset to current baseline
 
 ### Seven-run minimum matrix
@@ -167,6 +188,6 @@ Linear GEMM tiles: N      Linear input tiles: X direct / Y copied
 Linear output tiles: X direct / Y copied   Attention query tiles: N
 Peak Metal allocation: N GB                Minimum available process memory: N MB
 Numerical warnings: N | not collected
-Inference configuration block (pack, tiles, direct I/O, ping-pong, monitor, checkpointing)
+Inference configuration block (pack, tiles, direct I/O, ping-pong, monitor, linear backend)
 Environment block (Power / Battery / Thermal / Low Power Mode start -> end)
 ```

@@ -1,9 +1,68 @@
 # Current Project Status
 
 - **Base main:** `d2c4fad` (Wan21 latent-format boundary fix, 8px grid root cause closed).
-- **Active branch:** `fix/real-device-stabilization` (PR #8) — physical-device stabilization
-  from the first iPhone XS Max run (2026-08-15).
-- **Current phase:** stabilization fixes implemented; CI verification in progress.
+- **Active branch:** `fix/device-stability-no-checkpoint` — device-stabilization patch on
+  top of the A12 optimization work (`1756ab8`, PR #17). Supersedes the PR #8
+  stabilization line for device testing.
+- **Current phase:** stabilization patch committed (checkpoint removed, W8 legacy
+  numerics, P8/P6 quarantined/disabled, fatal-Metal poisoning, Import local-only,
+  prompt/seed persistence); CI Gate A green. Physical XS Max validation and the
+  W4/W8 full-inference gate are **PENDING**.
+
+## Device-stabilization patch (2026-08-16, `fix/device-stability-no-checkpoint`)
+
+Committed on top of `1756ab8`. These are the ACTUAL decisions now in the code; they are
+proven at the source/CI level only — no physical-device success is claimed until the
+user re-tests on the XS Max.
+
+1. **Checkpoint/resume removed from production** (`90ca169`) — `Checkpoint.swift` /
+   `CheckpointStore.swift` and all wiring (Resume UI, cold-launch load, `canResume`,
+   `checkpointingEnabled` metrics, per-step latent snapshot) deleted. `GenerationEngine`
+   always starts at step 0; the 256 KiB fp32 per-step CPU latent readback is gone. No
+   per-step latent CPU snapshot remains in production. Background/memory warning =
+   cooperative cancel.
+2. **W8-v2 production temporarily uses stabilized legacy numerics** (`82026cc`) —
+   `DiTNumericsPolicy` = `w4Legacy` / `w8LegacyStabilized` / `w8BF16Experimental`;
+   `fromVariantID("w8-v2")` → `w8LegacyStabilized` (legacy attention/activation). The
+   FP16-backed BF16 emulation (`w8BF16Experimental`) remains experimental and is NOT
+   claimed range-safe internally; only explicit diagnostics reach it.
+3. **Full-inference CI executes the production policy** (`27d3eb7`) —
+   `testCanonicalProductionInference` derives numerics from
+   `DiTNumericsPolicy.fromVariantID(ANIMAXS_DIT_VARIANT)` via
+   `DiffusionSampler.resolvedNumerics` (the production resolver); `full-inference-refine.yml`
+   asserts the per-variant marker (w4-v2 → `w4Legacy`, w8-v2 → `w8LegacyStabilized`).
+4. **P8 `directQuantized`/`hybrid` quarantined** (`e536bd7`) — physical A12 measurement
+   showed ~10× slowdown vs `dequantizedMPS` (performance regression, not proven
+   incorrect). Device settings sanitize/reject it; `directQGEMMCandidate`/`allCandidate`
+   force `dequantizedMPS`; Diagnostics hides them with a visible note. Kernel remains
+   research code.
+5. **P6 mmap no-copy disabled** (`b14b88b`) — physical A12 GPU page fault
+   (`kIOGPUCommandBufferCallback` ErrorPageFault). `noCopyWeightSource` cannot be true in
+   production/device settings; not re-enabled without a future GPU-read hardware proof.
+6. **Fatal Metal faults poison the generation context** (`b14b88b`) —
+   `metalContextPoisoned` on `.pageFault`/`.invalidResource`/`.internal` (or narrow IOGPU
+   text fallback): state fails with "Fatal GPU fault. Restart AnimaXS before generating
+   again.", Generate blocked until restart. No context recreate/retry. Cooperative
+   cancellation and ordinary failures never poison.
+7. **Manual Import is local-only** (`f64eb5c`) — `.borderless` buttons so Import can
+   never cross-trigger Download; `ModelStore` per-component single-flight guard
+   (`activeOperations`); app launch never auto-downloads model packs.
+8. **Prompt/seed persist across relaunch** (`a4a1c60`) — `generation.lastPrompt` /
+   `generation.lastSeed` (`@AppStorage`), Randomize included.
+9. Also on this branch: fresh Generate owns the image/metrics surface (`b25b845`);
+   Diagnostics preset marker cannot lie after manual edits + central compatibility
+   validator (`f647908`); numerical-monitor gate/add probe labels disambiguated
+   (`605300f`).
+
+### Status
+
+- [x] Stabilization source committed; CI Gate A green (run `31932848703`:
+  project-consistency, iphone-build, simulator-tests)
+- [ ] CI Gate B (final normal CI after all stabilization tasks)
+- [ ] Full-inference W4/W8 gate under the corrected production policy
+- [ ] **Physical iPhone XS Max retest (user) — PENDING.** Simulator/macOS CI green does
+      NOT prove device success. Use the stabilization-plan §17 configuration (W8-v2,
+      baseline preset, `dequantizedMPS`, no-copy unavailable, checkpointing absent).
 
 ## Real-device stabilization (2026-08-15)
 
@@ -110,7 +169,9 @@ The first physical-device run exposed bugs that simulator/CI did not catch:
   shared by download and manual import. The old full-SHA + `copyItem` two-pass
   is gone from the normal path too.
 - Generation config no longer carries a DiT variant; checkpointing is always
-  on; run metrics report the actual DiT pack filename.
+  on; run metrics report the actual DiT pack filename. *(Historical for this
+  2026-08-15 branch — checkpointing is now REMOVED on
+  `fix/device-stability-no-checkpoint`; see the section at the top of this file.)*
 - **CI:** PASS (run `31888994142`) — project-consistency ✓, iphone-build ✓,
   simulator-tests ✓ (262 tests, 0 failures, 14 real-pack-gated skips).
   Final acceptance = physical device retest (DEVICE_TESTS.md checklist).
