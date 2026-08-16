@@ -486,7 +486,7 @@ final class LinearExecutorTests: XCTestCase {
             mps[index] = loadHalf(mpsOut, byteOffset: index * scalarBytes)
             qgemm[index] = loadHalf(qgemmOut, byteOffset: index * scalarBytes)
         }
-        let stats = metrics(actual: qgemm, reference: mps)
+        let stats = metrics(actual: qgemm.map(Double.init), reference: mps.map(Double.init))
         XCTAssertEqual(stats.maxAbs, 0, accuracy: 0.01,
                        "QGEMM max abs error \(stats.maxAbs) exceeds tolerance")
         XCTAssertLessThanOrEqual(stats.rmse, 0.005, "QGEMM rmse too large: \(stats.rmse)")
