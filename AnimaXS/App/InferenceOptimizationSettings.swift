@@ -20,6 +20,7 @@ final class InferenceOptimizationSettings: ObservableObject {
         static let stridedTokenMajorAttention = "inference.stridedTokenMajorAttention"
         static let crossKVCache = "inference.crossKVCache"
         static let noCopyWeightSource = "inference.noCopyWeightSource"
+        static let attentionBackend = "inference.attentionBackend"
     }
 
     private let defaults: UserDefaults
@@ -34,6 +35,7 @@ final class InferenceOptimizationSettings: ObservableObject {
     @Published private(set) var stridedTokenMajorAttention: Bool
     @Published private(set) var crossKVCache: Bool
     @Published private(set) var noCopyWeightSource: Bool
+    @Published private(set) var attentionBackend: DiTAttentionBackend
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -60,6 +62,8 @@ final class InferenceOptimizationSettings: ObservableObject {
             ?? baseline.crossKVCache
         noCopyWeightSource = defaults.object(forKey: Keys.noCopyWeightSource) as? Bool
             ?? baseline.noCopyWeightSource
+        attentionBackend = InferenceOptimizationSettings.loadAttentionBackend(
+            from: defaults, baseline: baseline.attentionBackend)
     }
 
     // MARK: - Mutations (validate before persist)
@@ -114,6 +118,11 @@ final class InferenceOptimizationSettings: ObservableObject {
         defaults.set(value, forKey: Keys.noCopyWeightSource)
     }
 
+    func setAttentionBackend(_ value: DiTAttentionBackend) {
+        attentionBackend = value
+        defaults.set(value.rawValue, forKey: Keys.attentionBackend)
+    }
+
     /// Immutable snapshot of the current settings, used by a single
     /// generation. Never mutated mid-run.
     var snapshot: InferenceOptimizationConfig {
@@ -127,7 +136,8 @@ final class InferenceOptimizationSettings: ObservableObject {
             fusedMLPActivation: fusedMLPActivation,
             stridedTokenMajorAttention: stridedTokenMajorAttention,
             crossKVCache: crossKVCache,
-            noCopyWeightSource: noCopyWeightSource
+            noCopyWeightSource: noCopyWeightSource,
+            attentionBackend: attentionBackend
         )
     }
 
@@ -145,6 +155,7 @@ final class InferenceOptimizationSettings: ObservableObject {
         stridedTokenMajorAttention = baseline.stridedTokenMajorAttention
         crossKVCache = baseline.crossKVCache
         noCopyWeightSource = baseline.noCopyWeightSource
+        attentionBackend = baseline.attentionBackend
         defaults.set(baseline.linearTileRows, forKey: Keys.linearTileRows)
         defaults.set(baseline.attentionTileRows, forKey: Keys.attentionTileRows)
         defaults.set(baseline.directLinearMPSIO, forKey: Keys.directLinearMPSIO)
@@ -155,6 +166,7 @@ final class InferenceOptimizationSettings: ObservableObject {
         defaults.set(baseline.stridedTokenMajorAttention, forKey: Keys.stridedTokenMajorAttention)
         defaults.set(baseline.crossKVCache, forKey: Keys.crossKVCache)
         defaults.set(baseline.noCopyWeightSource, forKey: Keys.noCopyWeightSource)
+        defaults.set(baseline.attentionBackend.rawValue, forKey: Keys.attentionBackend)
     }
 
     // MARK: - Loading
@@ -162,5 +174,12 @@ final class InferenceOptimizationSettings: ObservableObject {
     private static func loadTileRows(from defaults: UserDefaults, key: String, baseline: Int) -> Int {
         guard let raw = defaults.object(forKey: key) as? Int else { return baseline }
         return InferenceOptimizationConfig.sanitizedTileRows(raw)
+    }
+
+    private static func loadAttentionBackend(from defaults: UserDefaults,
+                                             baseline: DiTAttentionBackend) -> DiTAttentionBackend {
+        guard let raw = defaults.string(forKey: Keys.attentionBackend),
+              let value = DiTAttentionBackend(rawValue: raw) else { return baseline }
+        return value
     }
 }
