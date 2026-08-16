@@ -141,3 +141,106 @@ struct InferenceOptimizationConfig: Equatable {
         true
     }
 }
+
+/// P9 (runbook §14): named combinations of the existing per-toggle/per-backend
+/// optimization controls, so the user can exercise realistic "combined" configs
+/// (and, on the physical XS Max, the full §17 benchmark matrix) without
+/// hand-setting every toggle. Each preset maps to a specific
+/// `InferenceOptimizationConfig`. The individual A/B controls are NOT removed;
+/// a preset is just a convenience that sets every underlying field at once.
+///
+/// `allCandidate` is not automatically "best" — it is simply one test
+/// configuration. No preset claims physical-A12 victory; the user must measure
+/// on the device (§17) before a `recommendedA12` preset can be added.
+enum InferencePreset: String, CaseIterable {
+    /// Everything at defaults: legacy W4-known-good path (runbook §17 #1 control
+    /// with 128-tile rows and direct MPS I/O / ping-pong at their defaults).
+    case baseline
+    /// The §17 first-pass control: linear/attention 1024, direct MPS I/O on,
+    /// ping-pong on, all new optimizations off.
+    case current1024Control
+    /// Control + fused LayerNorm+AdaLN+to-half + fused in-place MLP GELU.
+    case fusedTraffic
+    /// Fused + strided token-major MPS attention.
+    case stridedMPS
+    /// Strided + cross-attention K/V cache.
+    case stridedMPSKV
+    /// KV + mmap no-copy weight source (experimental).
+    case noCopyCandidate
+    /// Fused + KV + streaming MPS attention backend.
+    case streamingMPSCandidate
+    /// Fused + KV + pure-Metal Flash attention backend.
+    case metalFlashCandidate
+    /// Best attention candidate + direct packed QGEMM for the MLP only
+    /// (`.hybrid` linear backend) — the §17 preset 8 "MLP QGEMM hybrid".
+    case directQGEMMCandidate
+    /// All currently-winning components combined — one test configuration,
+    /// NOT an automatic "best".
+    case allCandidate
+
+    /// Human-friendly label for UI selection.
+    var label: String {
+        switch self {
+        case .baseline: return "Baseline"
+        case .current1024Control: return "1024 Control"
+        case .fusedTraffic: return "Fused traffic"
+        case .stridedMPS: return "Strided MPS"
+        case .stridedMPSKV: return "Strided MPS + KV"
+        case .noCopyCandidate: return "No-copy candidate"
+        case .streamingMPSCandidate: return "Streaming MPS"
+        case .metalFlashCandidate: return "Metal Flash"
+        case .directQGEMMCandidate: return "Direct QGEMM"
+        case .allCandidate: return "All candidates"
+        }
+    }
+
+    /// Builds the `InferenceOptimizationConfig` this preset names, starting
+    /// from `currentBaseline` and layering the intended combination on top.
+    /// Immutable snapshot semantics are unchanged: callers keep the returned
+    /// value for the whole generation and never mutate it mid-run.
+    func makeConfig() -> InferenceOptimizationConfig {
+        var c = InferenceOptimizationConfig.currentBaseline
+        switch self {
+        case .baseline:
+            break
+        case .current1024Control:
+            c.linearTileRows = 1024
+            c.attentionTileRows = 1024
+            c.directLinearMPSIO = true
+            c.pingPongWeightStreaming = true
+        case .fusedTraffic:
+            c = .current1024Control.makeConfig()
+            c.fusedNormModulation = true
+            c.fusedMLPActivation = true
+        case .stridedMPS:
+            c = .fusedTraffic.makeConfig()
+            c.stridedTokenMajorAttention = true
+            c.attentionBackend = .stridedTokenMajorMPS
+        case .stridedMPSKV:
+            c = .stridedMPS.makeConfig()
+            c.crossKVCache = true
+        case .noCopyCandidate:
+            c = .stridedMPSKV.makeConfig()
+            c.noCopyWeightSource = true
+        case .streamingMPSCandidate:
+            c = .fusedTraffic.makeConfig()
+            c.crossKVCache = true
+            c.stridedTokenMajorAttention = true
+            c.attentionBackend = .streamingMPS
+        case .metalFlashCandidate:
+            c = .fusedTraffic.makeConfig()
+            c.crossKVCache = true
+            c.stridedTokenMajorAttention = true
+            c.attentionBackend = .metalFlash
+        case .directQGEMMCandidate:
+            c = .stridedMPSKV.makeConfig()
+            c.linearBackend = .hybrid
+        case .allCandidate:
+            c = .stridedMPSKV.makeConfig()
+            c.noCopyWeightSource = true
+            c.attentionBackend = .streamingMPS
+            c.linearBackend = .hybrid
+        }
+        return c
+    }
+}

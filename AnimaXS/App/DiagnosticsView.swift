@@ -140,6 +140,15 @@ struct DiagnosticsView: View {
             Text("Applies to the next fresh generation. Use Generate, not Resume, for performance comparisons.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Picker("Preset (P9)", selection: presetBinding) {
+                ForEach(InferencePreset.allCases, id: \\.self) { preset in
+                    Text(preset.label).tag(preset)
+                }
+            }
+            .disabled(isGenerating)
+            Text("A preset sets every control below at once. Adjusting individual controls below refines it; nothing here is claimed fastest until the physical XS Max is measured.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             Picker("Linear tile rows", selection: linearTileSelection) {
                 ForEach(InferenceOptimizationConfig.allowedTileRows, id: \.self) { rows in
                     Text("\(rows)").tag(rows)
@@ -190,6 +199,16 @@ struct DiagnosticsView: View {
                     .foregroundStyle(.orange)
             }
         }
+    }
+
+    /// P9: binding for the preset picker. `activePreset` is `nil` once the
+    /// user refines an individual control, but the picker needs a concrete
+    /// selection — default to `.baseline` for display. Picking always applies
+    /// the chosen preset via `setPreset`.
+    private var presetBinding: Binding<InferencePreset> {
+        Binding(
+            get: { optimizationSettings.activePreset ?? .baseline },
+            set: { optimizationSettings.setPreset($0) })
     }
 
     private var linearTileSelection: Binding<Int> {
