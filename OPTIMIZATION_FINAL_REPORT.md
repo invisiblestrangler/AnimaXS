@@ -29,9 +29,10 @@ P9 presets: `InferencePreset` (baseline/current1024Control/fusedTraffic/stridedM
 ## Tests
 Normal CI: ci.yml green on P9 final — run 31924467039.
 Simulator tests: 324 tests, 14 expected skips, 0 failures.
-Full-inference W4: NOT run locally on VPS (no toolchain/models per §0.2). Milestone `full-inference-refine.yml` gates remain available for the final candidate.
-Full-inference W8: NOT run (deferred to physical device; W8 correctness covered by CI parity/unit tests, not timing).
-Artifact/run IDs: P0 31896517851 · P1 31904926712 · P2 31906565105 · P3 31908033162 · P4 31911189760 · P5 31913876755 · P6 31915690478 · P7 31918808645 · P8 31922667679 · P9 31924467039. (PR #17 draft.)
+Full-inference W4: PASS — run 31925685619 (final §16 milestone gate). latent_cosine 0.8231, rgb_cosine 0.7818 (floor ≥ 0.65), 8 steps × 28 blocks, 512×512 RGBA healthy; generated/reference/comparison PNG artifacts.
+Full-inference W8: PASS — run 31925685619 (final §16 milestone gate). latent_cosine 0.9105, rgb_cosine 0.8613 (floor ≥ 0.65), 8 steps × 28 blocks, 512×512 RGBA healthy; generated/reference/comparison PNG artifacts.
+Artifact/run IDs: P0 31896517851 · P1 31904926712 · P2 31906565105 · P3 31908033162 · P4 31911189760 · P5 31913876755 · P6 31915690478 · P7 31918808645 · P8 31922667679 · P9 31924467039 · Full-inference 31925685619. (PR #17 draft.)
+NOTE: full-inference ran at the DEFAULT baseline config (all P1-P9 optimizations off), proving no regression of the known-good pipeline. It does NOT time or validate the optimized presets — that is physical-device §17 work.
 
 ## Traffic changes proven by tests
 Dequant traffic: P8 direct QGEMM avoids the full dequantized [N,K] fp16 weight scratch; `recordQGEMMCall`; parity (cosine 0.9999998).

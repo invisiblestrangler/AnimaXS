@@ -101,12 +101,16 @@ key metrics: 0 failures. baseline preset == currentBaseline; allCandidate is one
 artifact/run id: 31924467039 (PR #17 draft). Prior failing runs: 31924014986 (escaped key path), 31924308805 (leading-dot type inference) — both fixed.
 interpretation: P9 gate met. Presets ready for the §17 physical XS Max benchmark matrix. Final report (§23) + state files → "ready for physical A12 validation".
 
-## 2026-08-16 (P9/FULL-INFERENCE) — Final §16 milestone full-inference gate triggered
+## 2026-08-16 (P9/FULL-INFERENCE) — Final §16 milestone full-inference gate: PASS (W4 + W8)
 HEAD: ff171f0 (opt/a12-sustained-io, P0-P9 complete)
 command: gh workflow run full-inference-refine.yml --ref opt/a12-sustained-io; run 31925685619
-configuration: full-inference-refine.yml matrix (w4-v2 + w8-v2 parallel), real production prompt→image chain (Qwen→adapter→DiffusionSampler→VAE), latent+RGB regression floors (cosine ≥ 0.65), FULL_INFERENCE=PASS required. Runs DEFAULT baseline config (all P1-P9 optimizations off, per §16 synthetic-vs-device separation). Runner downloads pinned packs (~3.4 GB total).
-result: IN PROGRESS — run 31925685619. This was the missing runbook §16 milestone gate (after P1, after P3/4/5, and final candidate were all skipped). Proves the P1-P9 runtime changes did not break the known-good full-pipeline output; does NOT time or validate the optimized presets (that is physical-device §17 work).
-key metrics: TBD once complete — expected FULL_FINAL_LATENT_COSINE / FULL_RGB_COSINE ≥ 0.65, 8 steps × 28 blocks, 512×512 RGBA image health.
-artifact/run id: 31925685619 (PR #17 draft)
-interpretation: Awaiting result. Records closing the end-to-end inference evidence gap flagged by the user.
+configuration: full-inference-refine.yml matrix (w4-v2 + w8-v2 parallel), real production prompt→image chain (Qwen→adapter→DiffusionSampler→VAE), latent+RGB regression floors (cosine ≥ 0.65), FULL_INFERENCE=PASS required. Runs DEFAULT baseline config (all P1-P9 optimizations off, per §16 synthetic-vs-device separation). Runner downloaded pinned packs (~3.4 GB total).
+result: ALL PASS. Run conclusion success. W4 job 12m, W8 job 20m56s. Both produced FULL_INFERENCE=PASS with generated/reference/comparison PNG + metrics.txt artifacts (downloaded to /root/fullinf-w4, /root/fullinf-w8). This closes the previously-missing runbook §16 milestone gate (after P1, after P3/4/5, and final candidate were all skipped).
+key metrics (DEFAULT baseline config, regression floor cosine ≥ 0.65):
+- W4 (w4-v2): latent_cosine 0.8231 (≥0.65 ✓), rgb_cosine 0.7818 (≥0.65 ✓), latent_rmse 0.7500, rgb_rmse 0.4302; diffusion 67.76s, total 82.09s.
+- W8 (w8-v2): latent_cosine 0.9105 (≥0.65 ✓), rgb_cosine 0.8613 (≥0.65 ✓), latent_rmse 0.5488, rgb_rmse 0.3576; diffusion 101.54s, total 120.23s.
+- Both: 8 completed Euler steps × 28 block callbacks, 512×512 RGBA, alpha 255, non-degenerate; attention/activation numerics legacy (baseline).
+- Visual check of comparison.png: reference + generated show the same subject/scene (girl, brown hair, blue eyes, cherry blossom) — coherent, correct output.
+interpretation: The P1-P9 runtime changes did NOT regress the known-good full-pipeline output on either W4 or W8. Full-inference evidence gap closed. (This is a correctness gate at DEFAULT config; it does NOT time or validate the optimized presets — that remains physical-device §17 work.)
+artifact/run id: 31925685619 (PR #17 draft). Artifacts: anima-xs-refine-w4-v2-images (9257881115), anima-xs-refine-w8-v2-images (9257990324).
 
