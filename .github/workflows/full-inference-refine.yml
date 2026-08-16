@@ -191,6 +191,21 @@ jobs:
           [ "$result" -eq 0 ] || exit "$result"
           grep -q 'FULL_INFERENCE=PASS' "$RUNNER_TEMP/${{ matrix.variant }}-full-inference.log"
           ! grep -q 'SKIPPED_NO_METAL' "$RUNNER_TEMP/${{ matrix.variant }}-full-inference.log"
+          # Numerical-policy gate: the test must have run under the SAME policy
+          # production resolves for this pack variant (DiTNumericsPolicy
+          # fromVariantID). A future accidental mismatch (e.g. a test-side
+          # hardcoded default, or a resolver drift) must fail the step instead
+          # of producing a false green.
+          case "${{ matrix.variant }}" in
+            w4-v2) EXPECTED_DIT_NUMERICS_POLICY=w4Legacy ;;
+            w8-v2) EXPECTED_DIT_NUMERICS_POLICY=w8LegacyStabilized ;;
+            *) echo "::error::unexpected matrix variant ${{ matrix.variant }}"; exit 1 ;;
+          esac
+          grep -q "FULL_DIT_NUMERICS_POLICY=$EXPECTED_DIT_NUMERICS_POLICY" \
+            "$RUNNER_TEMP/${{ matrix.variant }}-full-inference.log" || {
+            echo "::error::numerics policy mismatch for variant ${{ matrix.variant }}: expected FULL_DIT_NUMERICS_POLICY=$EXPECTED_DIT_NUMERICS_POLICY"
+            exit 1
+          }
         timeout-minutes: 90
 
       - name: Export generated/reference/comparison/metrics attachments

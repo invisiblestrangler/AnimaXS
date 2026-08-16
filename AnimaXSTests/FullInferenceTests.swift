@@ -140,13 +140,41 @@ final class FullInferenceTests: XCTestCase {
         let initial = makeBuffer(noiseValues, on: context.device)
         let finalLatent = try XCTUnwrap(context.device.makeBuffer(
             length: DiffusionSampler.latentElements * 4, options: .storageModeShared))
-        let attentionNumerics = AttentionNumerics(
-            rawValue: diagnosticConfig("attention_numerics") ?? "legacy")
-            ?? .legacy
+        // ---- 4a. Numerical policy: the production resolver, not a default ----
+        // The workflow injects ANIMAXS_DIT_VARIANT (matrix variant, e.g.
+        // "w4-v2"/"w8-v2"); local runs fall back to the bundled pack metadata.
+        // DiTNumericsPolicy.fromVariantID is the SAME resolver GenerationEngine
+        // uses on the production path (ModelManifest.swift), and
+        // DiffusionSampler.resolvedNumerics(for:) is the single source of truth
+        // for the policy -> (activation, attention) mapping. Using them here
+        // makes this test prove the same numerical policy production runs.
+        let variantID: String
+        if let injected = env("ANIMAXS_DIT_VARIANT"), !injected.isEmpty {
+            variantID = injected
+        } else {
+            variantID = packMetadataValue(envKey: "ANIMAXS_DIT_VARIANT", jsonKey: "variant")
+        }
+        let policy = DiTNumericsPolicy.fromVariantID(variantID)
+        print("FULL_DIT_NUMERICS_POLICY=\(policy.rawValue)")
+        // Explicit diagnostic overrides (attention_numerics / activation_numerics
+        // present in the config) keep the legacy override path exactly as before:
+        // each value is built from its own key with a "legacy" default. Otherwise
+        // the sampler is constructed from the variant-derived policy, i.e. the
+        // exact numerics GenerationEngine resolves for this pack.
+        let attentionOverride = diagnosticConfig("attention_numerics")
+        let activationOverride = diagnosticConfig("activation_numerics")
+        let attentionNumerics: AttentionNumerics
+        let activationNumerics: ActivationNumerics
+        if attentionOverride != nil || activationOverride != nil {
+            attentionNumerics = AttentionNumerics(
+                rawValue: attentionOverride ?? "legacy") ?? .legacy
+            activationNumerics = ActivationNumerics(
+                rawValue: activationOverride ?? "legacy") ?? .legacy
+        } else {
+            (activationNumerics, attentionNumerics) =
+                DiffusionSampler.resolvedNumerics(for: policy)
+        }
         print("FULL_ATTENTION_NUMERICS=\(attentionNumerics.rawValue)")
-        let activationNumerics = ActivationNumerics(
-            rawValue: diagnosticConfig("activation_numerics") ?? "legacy")
-            ?? .legacy
         print("FULL_ACTIVATION_NUMERICS=\(activationNumerics.rawValue)")
         let sampler = try DiffusionSampler(
             context: context, file: AnimapkFile(url: ditURL),
@@ -398,6 +426,7 @@ final class FullInferenceTests: XCTestCase {
             "prompt": prompt,
             "case": "case1_danbooru_seed1337",
             "packs": "qwen3-0.6b-xsmax-fp16-matrices.animapk / \(packMetadataValue(envKey: "ANIMAXS_DIT_VARIANT", jsonKey: "variant")) / qwen-image-vae-xsmax-fp16.animapk",
+            "dit_numerics_policy": policy.rawValue,
             "attention_numerics": attentionNumerics.rawValue,
             "activation_numerics": activationNumerics.rawValue,
             "golden_qwen_context": diagnosticConfig("golden_qwen_context") ?? "0",
@@ -696,7 +725,7 @@ final class FullInferenceTests: XCTestCase {
         for key in [
             "commit", "run_id", "run_attempt", "workflow", "ref", "variant",
             "prompt", "case", "packs",
-            "attention_numerics", "activation_numerics", "golden_qwen_context",
+            "dit_numerics_policy", "attention_numerics", "activation_numerics", "golden_qwen_context",
             "latent_cosine", "latent_rmse", "latent_maxabs",
             "rgb_cosine", "rgb_rmse", "rgb_mae", "rgb_maxabs",
             "qwen_seconds", "adapter_seconds", "diffusion_seconds",
