@@ -2057,8 +2057,8 @@ kernel void dit_flash_attention_h128_q4_k32(
     constant uint     &tokenStride [[buffer(6)]],
     constant float    &scale      [[buffer(7)]],
     uint3 group [[threadgroup_position_in_grid]],
-    uint3 tid3 [[thread_index_in_threadgroup]],
-    uint3 simdGroup [[simdgroup_index_in_threadgroup]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
     uint simdLane [[thread_index_in_simdgroup]])
 {
     constexpr uint HEAD_DIM = 128;
@@ -2067,7 +2067,7 @@ kernel void dit_flash_attention_h128_q4_k32(
     constexpr uint THREADS = 128;
 
     uint lane = simdLane;                 // 0..31
-    uint simd = simdGroup.x;              // 0..3  → query row within the group
+    // `simd` is 0..3 (simdgroup_index_in_threadgroup) → query row within group.
     uint head = group.z;                  // head index (grid.z = heads)
     uint queryRow = group.x * SIMD_GROUPS + simd;
     if (queryRow >= queryCount) return;
@@ -2076,7 +2076,7 @@ kernel void dit_flash_attention_h128_q4_k32(
     threadgroup half kTile[K_TILE * HEAD_DIM];
     threadgroup half vTile[K_TILE * HEAD_DIM];
 
-    uint tid = tid3.x;                    // 0..127
+    // `tid` is 0..127 (thread_index_in_threadgroup).
     uint headColBase = head * HEAD_DIM;   // column base of this head in the token row
 
     // Running online-softmax state (FP32, IDENTICAL on every lane).
@@ -2188,8 +2188,8 @@ kernel void dit_flash_attention_h128_q4_k16(
     constant uint     &tokenStride [[buffer(6)]],
     constant float    &scale      [[buffer(7)]],
     uint3 group [[threadgroup_position_in_grid]],
-    uint3 tid3 [[thread_index_in_threadgroup]],
-    uint3 simdGroup [[simdgroup_index_in_threadgroup]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint simd [[simdgroup_index_in_threadgroup]],
     uint simdLane [[thread_index_in_simdgroup]])
 {
     constexpr uint HEAD_DIM = 128;
@@ -2198,7 +2198,6 @@ kernel void dit_flash_attention_h128_q4_k16(
     constexpr uint THREADS = 128;
 
     uint lane = simdLane;
-    uint simd = simdGroup.x;
     uint head = group.z;                  // head index (grid.z = heads)
     uint queryRow = group.x * SIMD_GROUPS + simd;
     if (queryRow >= queryCount) return;
@@ -2206,7 +2205,6 @@ kernel void dit_flash_attention_h128_q4_k16(
     threadgroup half kTile[K_TILE * HEAD_DIM];
     threadgroup half vTile[K_TILE * HEAD_DIM];
 
-    uint tid = tid3.x;
     uint headColBase = head * HEAD_DIM;
 
     float rowMax = -INFINITY;
