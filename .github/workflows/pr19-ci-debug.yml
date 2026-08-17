@@ -1,0 +1,68 @@
+name: PR 19 CI Debug
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+
+jobs:
+  iphone-build-diagnostic:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Select Xcode 26.3 + Metal toolchain
+        run: |
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          xcodebuild -version
+          if ! xcrun --find metal >/dev/null 2>&1; then
+            xcodebuild -downloadComponent MetalToolchain
+            sudo xcode-select -s "$DEVELOPER_DIR"
+          fi
+      - name: Build and capture generic iOS diagnostic
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project AnimaXS.xcodeproj \
+            -scheme AnimaXS \
+            -configuration Debug \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath .derivedData-debug \
+            CODE_SIGNING_ALLOWED=NO \
+            build 2>&1 | tee "$RUNNER_TEMP/iphone-build.log"
+      - name: Post focused compiler diagnostic to PR
+        if: failure() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          python3 - "$RUNNER_TEMP/iphone-build.log" <<'PY' > "$RUNNER_TEMP/iphone-diagnostic.md"
+          import pathlib, re, sys
+          path = pathlib.Path(sys.argv[1])
+          lines = path.read_text(errors="replace").splitlines() if path.exists() else []
+          hits = [i for i, line in enumerate(lines) if re.search(r"(?:^|\s)(?:fatal )?error:\s", line, re.I)]
+          selected = []
+          seen = set()
+          for i in hits[:40]:
+              for j in range(max(0, i - 1), min(len(lines), i + 2)):
+                  if j not in seen:
+                      seen.add(j)
+                      selected.append(lines[j])
+          if not selected:
+              selected = lines[-120:]
+          print("<!-- animaxs-ci-debug -->")
+          print("### Generic-iPhone compiler diagnostic")
+          print("```text")
+          for line in selected[:160]:
+              print(line[:4000])
+          print("```")
+          PY
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body-file "$RUNNER_TEMP/iphone-diagnostic.md"
