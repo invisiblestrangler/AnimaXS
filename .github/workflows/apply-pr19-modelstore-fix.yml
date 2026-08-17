@@ -1,0 +1,97 @@
+name: Apply PR 19 ModelStore Fix
+
+on:
+  push:
+    branches: [feat/ane-native-w8-pack]
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/ane-native-w8-pack
+      - name: Remove redundant ModelStore ANE preparation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('AnimaXS/Runtime/ModelStore/ModelStore.swift')
+          s = p.read_text()
+
+          replacements = [
+          ('''        if receiptIsValid(for: entry, at: destination) {
+            do {
+                try ensureANEPreparationIfNeeded(for: entry, at: destination)
+                states[entry.component] = .ready(destination)
+                return .ready(destination)
+            } catch {
+                let message = error.localizedDescription
+                states[entry.component] = .failed(message)
+                return .failed(message)
+            }
+        }
+''', '''        if receiptIsValid(for: entry, at: destination) {
+            states[entry.component] = .ready(destination)
+            return .ready(destination)
+        }
+'''),
+          ('''            let variant = try verifier(destination, entry)
+            try ensureANEPreparationIfNeeded(for: entry, at: destination)
+            writeReceipt(for: entry, at: destination, variant: variant)
+''', '''            let variant = try verifier(destination, entry)
+            writeReceipt(for: entry, at: destination, variant: variant)
+'''),
+          ('''        let finalURL = try installVerified(staging, to: destination, entry: entry)
+        try ensureANEPreparationIfNeeded(for: entry, at: finalURL)
+        writeReceipt(for: entry, at: finalURL, variant: variant.matched)
+''', '''        let finalURL = try installVerified(staging, to: destination, entry: entry)
+        writeReceipt(for: entry, at: finalURL, variant: variant.matched)
+'''),
+          ('''            let finalURL = try installVerified(staging, to: destination, entry: entry)
+            try ensureANEPreparationIfNeeded(for: entry, at: finalURL)
+            writeReceipt(for: entry, at: finalURL, variant: variant.matched)
+''', '''            let finalURL = try installVerified(staging, to: destination, entry: entry)
+            writeReceipt(for: entry, at: finalURL, variant: variant.matched)
+'''),
+          ('''    /// Native ANE packs have a derived Espresso cache that must exist before
+    /// the DiT slot becomes ready. Normal W4/W8-v2 packs return immediately.
+    /// This never downloads a model and never runs private ANE evaluation.
+    private func ensureANEPreparationIfNeeded(
+        for entry: ModelManifestEntry, at url: URL
+    ) throws {
+        guard entry.component == .dit else { return }
+        let file = try AnimapkFile(url: url)
+        guard file.quantScheme == ANEW8NativePack.quantScheme else { return }
+        _ = try ANEW8ModelPreparer.ensurePrepared(file: file)
+    }
+
+''', ''),
+          ]
+
+          for old, new in replacements:
+              count = s.count(old)
+              if count != 1:
+                  raise SystemExit(f'expected exactly one replacement, got {count}: {old[:80]!r}')
+              s = s.replace(old, new, 1)
+
+          if 'ensureANEPreparationIfNeeded' in s:
+              raise SystemExit('stale ensureANEPreparationIfNeeded reference remains')
+
+          p.write_text(s)
+          PY
+
+          xcrun swiftc -parse AnimaXS/Runtime/ModelStore/ModelStore.swift
+          git diff --check
+          git diff -- AnimaXS/Runtime/ModelStore/ModelStore.swift
+      - name: Commit and push fix
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add AnimaXS/Runtime/ModelStore/ModelStore.swift
+          git commit -m 'Keep ANE preparation at diffusion boundary only'
+          git push origin HEAD:feat/ane-native-w8-pack
