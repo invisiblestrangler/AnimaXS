@@ -280,10 +280,14 @@ enum ANEW8ModelPreparer {
                     hits += 1
                     continue
                 }
-                _ = try A12ANEPrepareProjectionModel(
+                var prepareError: NSError?
+                guard A12ANEPrepareProjectionModel(
                     native.q, native.biasF32, native.scaleF32,
                     UInt(spec.columns), UInt(spec.rows), UInt(spec.spatial),
-                    "dit_b\(block)_\(spec.tag)", key)
+                    "dit_b\(block)_\(spec.tag)", key, &prepareError) else {
+                    throw prepareError ?? AnimapkError.validation(
+                        "failed to prepare ANE projection \(spec.tag) for block \(block)")
+                }
                 misses += 1
                 bytesWritten += UInt64(native.payloadBytes)
             }
