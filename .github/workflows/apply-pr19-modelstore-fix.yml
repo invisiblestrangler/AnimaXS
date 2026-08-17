@@ -1,8 +1,8 @@
 name: Apply PR 19 ModelStore Fix
 
 on:
-  push:
-    branches: [feat/ane-native-w8-pack]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write
