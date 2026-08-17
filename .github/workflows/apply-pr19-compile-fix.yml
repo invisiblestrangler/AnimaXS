@@ -1,0 +1,75 @@
+name: Apply PR 19 Compile Fix
+
+on:
+  push:
+    branches: [feat/ane-native-w8-pack]
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/ane-native-w8-pack
+      - name: Apply exact NSError bridge fix
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('AnimaXS/Runtime/ANE/ANEW8MLPBackend.swift')
+          s = p.read_text()
+          old = '''                _ = try A12ANEPrepareQKVModel(
+                              selfQ.q, selfQ.biasF32, selfQ.scaleF32,
+                              selfK.q, selfK.biasF32, selfK.scaleF32,
+                              selfV.q, selfV.biasF32, selfV.scaleF32,
+                              UInt(DiTBlockExecutor.dim), UInt(DiTBlockExecutor.tokens),
+                              "dit_b\\(block)_self_qkv", qkvKey)
+                          misses += 1
+          '''
+          new = '''                var prepareError: NSError?
+                          guard A12ANEPrepareQKVModel(
+                              selfQ.q, selfQ.biasF32, selfQ.scaleF32,
+                              selfK.q, selfK.biasF32, selfK.scaleF32,
+                              selfV.q, selfV.biasF32, selfV.scaleF32,
+                              UInt(DiTBlockExecutor.dim), UInt(DiTBlockExecutor.tokens),
+                              "dit_b\\(block)_self_qkv", qkvKey, &prepareError) else {
+                              throw prepareError ?? AnimapkError.validation(
+                                  "failed to prepare ANE fused QKV model for block \\(block)")
+                          }
+                          misses += 1
+          '''
+          if old not in s:
+              raise SystemExit('QKV call site did not match expected source')
+          s = s.replace(old, new, 1)
+          old = '''                _ = try A12ANEPrepareProjectionModel(
+                              native.q, native.biasF32, native.scaleF32,
+                              UInt(spec.columns), UInt(spec.rows), UInt(spec.spatial),
+                              "dit_b\\(block)_\\(spec.tag)", key)
+                          misses += 1
+          '''
+          new = '''                var prepareError: NSError?
+                          guard A12ANEPrepareProjectionModel(
+                              native.q, native.biasF32, native.scaleF32,
+                              UInt(spec.columns), UInt(spec.rows), UInt(spec.spatial),
+                              "dit_b\\(block)_\\(spec.tag)", key, &prepareError) else {
+                              throw prepareError ?? AnimapkError.validation(
+                                  "failed to prepare ANE projection \\(spec.tag) for block \\(block)")
+                          }
+                          misses += 1
+          '''
+          if old not in s:
+              raise SystemExit('projection call site did not match expected source')
+          p.write_text(s)
+          PY
+          swiftc -parse AnimaXS/Runtime/ANE/ANEW8MLPBackend.swift
+          git diff --check
+          git diff -- AnimaXS/Runtime/ANE/ANEW8MLPBackend.swift
+      - name: Commit exact source fix
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add AnimaXS/Runtime/ANE/ANEW8MLPBackend.swift
+          git commit -m 'Fix ANE preparation NSError bridge calls'
+          git push origin HEAD:feat/ane-native-w8-pack
