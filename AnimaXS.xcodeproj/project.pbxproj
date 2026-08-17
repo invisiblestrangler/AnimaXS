@@ -31,6 +31,7 @@
 		2880011FD933427AFBD8F0C1 /* ModelStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9821619B19E4168905FA0A1F /* ModelStoreTests.swift */; };
 		2AB966E0818F8C5953CC0DB0 /* DiTFinalLayerExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9D7829F4398EB3A23033ECD8 /* DiTFinalLayerExecutorTests.swift */; };
 		2BB3F23123E300162C938052 /* Hub in Frameworks */ = {isa = PBXBuildFile; productRef = A3FB76126987D0B653947E56 /* Hub */; };
+		2C3B1F704B3B393A65A60E8B /* Conv2048W8Template.bundle in Resources */ = {isa = PBXBuildFile; fileRef = 4434CD2A8D6583879C2F67BC /* Conv2048W8Template.bundle */; };
 		2F02983AD55700559562DA54 /* qwen_tokenizer.json in Resources */ = {isa = PBXBuildFile; fileRef = F28A65A79E0706DF0F0D5AB2 /* qwen_tokenizer.json */; };
 		30116E9CBC6BF3DBEA66C41E /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C8E968875980A2C9ACC94E5 /* ContentView.swift */; };
 		36CD88A5B125EC98797E0F65 /* case1_cond_context.f32 in Resources */ = {isa = PBXBuildFile; fileRef = FA91D9A84879D3562284E548 /* case1_cond_context.f32 */; };
@@ -39,6 +40,7 @@
 		473AE0F68178293C9A58882C /* AttentionExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3F286C454EBE7A92C592214 /* AttentionExecutor.swift */; };
 		47ABE68F485121B325537344 /* DiTInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EBD5ADCDE21EF89090D0058 /* DiTInput.swift */; };
 		49F5054A68EAECB93D9D643A /* case1_dit_context.f32 in Resources */ = {isa = PBXBuildFile; fileRef = 8576A01525AFE9CF6314191E /* case1_dit_context.f32 */; };
+		4B59C78B9770A5CC294C79BE /* ANEW8MLPBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 451C73A98E67AF4B94675559 /* ANEW8MLPBackend.swift */; };
 		4CF42C1FB7991B03E9360B0D /* DitRoPE.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63D78F224C62E12AE65A076F /* DitRoPE.swift */; };
 		5506617DD3116BF72E8154BD /* QuantDecoders.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A12B10FC621499B2CA281B3 /* QuantDecoders.swift */; };
 		556D3B10877CD4D85A9D4D9F /* TestPackFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 830D15B6FF7E37A06B2C08B2 /* TestPackFactory.swift */; };
@@ -78,6 +80,7 @@
 		96A3E7AC0E8DAFE6CAF9490A /* case1_decoded_rgb8.bin in Resources */ = {isa = PBXBuildFile; fileRef = 5679855EA2DD29C171356B8B /* case1_decoded_rgb8.bin */; };
 		9BB95C99C0CE9E2E635AB3D8 /* InferenceOptimizationConfigTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B768CB432E290374A2CB8A /* InferenceOptimizationConfigTests.swift */; };
 		9FFBC0EBD2D6A5BEE293A722 /* NumericalMonitorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F0FBCFD0D5556ED4202A14E /* NumericalMonitorTests.swift */; };
+		A81536E00900A77262672E65 /* A12ANEBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = 6775F1821B1EC813A10138D5 /* A12ANEBridge.m */; };
 		ABDB45E6553263148CA027AB /* Wan21LatentFormatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6223C8A55E7E942B28480E48 /* Wan21LatentFormatTests.swift */; };
 		ACF5E6ADE5026984036BFFEC /* QwenEncoderMetalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63A581535AFB0BECB025A73F /* QwenEncoderMetalTests.swift */; };
 		AD481E2836797AA5BE0359AA /* WeightStreamer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B8E57358726DCBA4B39C22A /* WeightStreamer.swift */; };
@@ -145,6 +148,7 @@
 		1506F4F789C146E6B646F18C /* AnimapkParsingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimapkParsingTests.swift; sourceTree = "<group>"; };
 		1A1319CA9D168F08F49BA3EB /* TokenizerParityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenizerParityTests.swift; sourceTree = "<group>"; };
 		1BA93420FE0BF5285E6DBB6D /* DiTBlockCPU.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTBlockCPU.swift; sourceTree = "<group>"; };
+		1E0C767F4DA500EA0FBCB9A8 /* AnimaXS-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "AnimaXS-Bridging-Header.h"; sourceTree = "<group>"; };
 		2065AFCA0431940F828D9427 /* ModelManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelManifest.swift; sourceTree = "<group>"; };
 		21050D453899FA878AFF60FA /* DiffusionSampler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffusionSampler.swift; sourceTree = "<group>"; };
 		220DB7AE4DC9E7B009A9C5DF /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
@@ -160,9 +164,12 @@
 		3BF58306EFCA1B15CC8F2C30 /* DiagnosticsRunMarkerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsRunMarkerTests.swift; sourceTree = "<group>"; };
 		3DE378A333F7F589CD183A9A /* MetalExecutionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalExecutionTests.swift; sourceTree = "<group>"; };
 		3F14B5397CD1B2C4DE3D41CB /* DiTBlockExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTBlockExecutorTests.swift; sourceTree = "<group>"; };
+		3F2E5E90B2C010D75EC195C9 /* A12ANEBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = A12ANEBridge.h; sourceTree = "<group>"; };
 		3F6A1853CF522E32A3743ACB /* MetalContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalContext.swift; sourceTree = "<group>"; };
 		4347B31599A3D35830186731 /* GenerationEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationEngine.swift; sourceTree = "<group>"; };
 		43FB54A2EC11428E9AFC19A4 /* Crc32.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Crc32.swift; sourceTree = "<group>"; };
+		4434CD2A8D6583879C2F67BC /* Conv2048W8Template.bundle */ = {isa = PBXFileReference; lastKnownFileType = wrapper.plug-in; path = Conv2048W8Template.bundle; sourceTree = "<group>"; };
+		451C73A98E67AF4B94675559 /* ANEW8MLPBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ANEW8MLPBackend.swift; sourceTree = "<group>"; };
 		4C7A6A2DAA97C767D88AE25B /* AnimaKernels.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = AnimaKernels.metal; sourceTree = "<group>"; };
 		4C8E968875980A2C9ACC94E5 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		4C8ECADAF128C534D8C999BA /* FP16ConvolutionExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FP16ConvolutionExecutor.swift; sourceTree = "<group>"; };
@@ -177,6 +184,7 @@
 		6223C8A55E7E942B28480E48 /* Wan21LatentFormatTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wan21LatentFormatTests.swift; sourceTree = "<group>"; };
 		63A581535AFB0BECB025A73F /* QwenEncoderMetalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenEncoderMetalTests.swift; sourceTree = "<group>"; };
 		63D78F224C62E12AE65A076F /* DitRoPE.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DitRoPE.swift; sourceTree = "<group>"; };
+		6775F1821B1EC813A10138D5 /* A12ANEBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = A12ANEBridge.m; sourceTree = "<group>"; };
 		67B56E4FB7D12CC1F63A52F9 /* t5_special_tokens_map.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = t5_special_tokens_map.json; sourceTree = "<group>"; };
 		684C63379028C718819607CA /* ModelConstants.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelConstants.swift; sourceTree = "<group>"; };
 		6EBD5ADCDE21EF89090D0058 /* DiTInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTInput.swift; sourceTree = "<group>"; };
@@ -279,6 +287,16 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		2239F4E17A905DC47D073062 /* ANE */ = {
+			isa = PBXGroup;
+			children = (
+				3F2E5E90B2C010D75EC195C9 /* A12ANEBridge.h */,
+				6775F1821B1EC813A10138D5 /* A12ANEBridge.m */,
+				451C73A98E67AF4B94675559 /* ANEW8MLPBackend.swift */,
+			);
+			path = ANE;
+			sourceTree = "<group>";
+		};
 		3245A69EDC5550E24C6F2BEA /* Sampler */ = {
 			isa = PBXGroup;
 			children = (
@@ -304,6 +322,7 @@
 		6EE0DC88EAA782438F9E7217 /* AnimaXS */ = {
 			isa = PBXGroup;
 			children = (
+				1E0C767F4DA500EA0FBCB9A8 /* AnimaXS-Bridging-Header.h */,
 				EFA18C3237EA1D76A8C2CB94 /* Info.plist */,
 				6524648BBA022DD295EB8F51 /* App */,
 				887036D8E2A1A0017DA5BA1F /* Resources */,
@@ -316,6 +335,7 @@
 		781BD54167F9F29EE7367307 /* Runtime */ = {
 			isa = PBXGroup;
 			children = (
+				2239F4E17A905DC47D073062 /* ANE */,
 				050C4FD7742F731394068190 /* Animapk */,
 				CF36AD7A94A56684D4CDB503 /* Diagnostics */,
 				9D03EB80B5F6548BFFD3456B /* Generation */,
@@ -340,6 +360,7 @@
 		887036D8E2A1A0017DA5BA1F /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				9C6A8F726A1F442989E62FCE /* ANE */,
 				961585EF32A8F1E824C6F33A /* Tokenizers */,
 			);
 			path = Resources;
@@ -385,6 +406,14 @@
 				12DDD5E1C624A51A586B866E /* t5_tokenizer.json */,
 			);
 			path = Tokenizers;
+			sourceTree = "<group>";
+		};
+		9C6A8F726A1F442989E62FCE /* ANE */ = {
+			isa = PBXGroup;
+			children = (
+				4434CD2A8D6583879C2F67BC /* Conv2048W8Template.bundle */,
+			);
+			path = ANE;
 			sourceTree = "<group>";
 		};
 		9D03EB80B5F6548BFFD3456B /* Generation */ = {
@@ -629,6 +658,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				2C3B1F704B3B393A65A60E8B /* Conv2048W8Template.bundle in Resources */,
 				EED314EA6D67446AAFE181EC /* README.md in Resources */,
 				2F02983AD55700559562DA54 /* qwen_tokenizer.json in Resources */,
 				71B669F9AF60FB45E4842F57 /* t5_special_tokens_map.json in Resources */,
@@ -690,6 +720,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A81536E00900A77262672E65 /* A12ANEBridge.m in Sources */,
+				4B59C78B9770A5CC294C79BE /* ANEW8MLPBackend.swift in Sources */,
 				1303514D8DBE7F84010B07A7 /* AnimaKernels.metal in Sources */,
 				7CD76E6444C119FE1BDBC89F /* AnimaXSApp.swift in Sources */,
 				FC52DE8FE0010D498F008967 /* AnimapkFile.swift in Sources */,
@@ -775,6 +807,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.invisiblestrangler.AnimaXS;
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
+				SWIFT_OBJC_BRIDGING_HEADER = "AnimaXS/AnimaXS-Bridging-Header.h";
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
@@ -812,6 +845,7 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.invisiblestrangler.AnimaXS;
 				SDKROOT = iphoneos;
 				SUPPORTS_MACCATALYST = NO;
+				SWIFT_OBJC_BRIDGING_HEADER = "AnimaXS/AnimaXS-Bridging-Header.h";
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;

@@ -2396,3 +2396,40 @@ kernel void dit_flash_attention_h128_q4_k16(
         output[queryRow * tokenStride + headColBase + d * 32 + lane] = half(acc[d] * inverseSum);
     }
 }
+
+// ---------------------------------------------------------------------------
+// A12/H11 ANE shared-IOSurface layout bridges.
+//
+// AnimaXS activations are tight token-major [rows, channels]. The proven H11
+// Espresso ABI is channel-major, with every channel plane padded to a 64-byte
+// stride. Both buffers are fp16. These kernels are the only layout copies in
+// the ANE hybrid path; the underlying ANE surfaces are simultaneously shared
+// MTLBuffers (no CPU staging/readback).
+// ---------------------------------------------------------------------------
+kernel void dit_token_to_ane_f16(
+    device const half *tokenMajor [[buffer(0)]],
+    device half *aneMajor [[buffer(1)]],
+    constant uint &rows [[buffer(2)]],
+    constant uint &channels [[buffer(3)]],
+    constant uint &planeStrideElements [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint channel = gid.x;
+    uint row = gid.y;
+    if (channel >= channels || row >= rows) return;
+    aneMajor[channel * planeStrideElements + row] = tokenMajor[row * channels + channel];
+}
+
+kernel void dit_ane_to_token_f16(
+    device const half *aneMajor [[buffer(0)]],
+    device half *tokenMajor [[buffer(1)]],
+    constant uint &rows [[buffer(2)]],
+    constant uint &channels [[buffer(3)]],
+    constant uint &planeStrideElements [[buffer(4)]],
+    uint2 gid [[thread_position_in_grid]])
+{
+    uint channel = gid.x;
+    uint row = gid.y;
+    if (channel >= channels || row >= rows) return;
+    tokenMajor[row * channels + channel] = aneMajor[channel * planeStrideElements + row];
+}

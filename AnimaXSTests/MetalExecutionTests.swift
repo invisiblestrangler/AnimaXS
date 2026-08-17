@@ -843,4 +843,68 @@ final class MetalExecutionTests: XCTestCase {
             XCTAssertEqual(Float(actual[index]), expected, accuracy: 0.001)
         }
     }
+
+    func testANELayoutBridgeRoundTripsTokenMajorAndRespectsPlanePadding() throws {
+        let context = try requireContext()
+        let rows = 7
+        let channels = 5
+        // Deliberately padded so the test exercises the H11 plane-stride ABI,
+        // not just the spatial=1024 tight-stride production special case.
+        let planeStride = 32
+        let tokenValues = (0..<(rows * channels)).map {
+            Float16(Float($0) * 0.125 - 1.75).bitPattern
+        }
+        let paddingSentinel = Float16(123).bitPattern
+        let token = makeBuffer(tokenValues, on: context.device)
+        let ane = makeBuffer(
+            [UInt16](repeating: paddingSentinel, count: channels * planeStride),
+            on: context.device)
+        let roundTrip = makeBuffer(
+            [UInt16](repeating: 0, count: rows * channels), on: context.device)
+
+        func encode(
+            _ name: String, source: MTLBuffer, destination: MTLBuffer,
+            command: MTLCommandBuffer
+        ) throws {
+            let pipeline = try context.pipeline(named: name)
+            let encoder = try XCTUnwrap(command.makeComputeCommandEncoder())
+            var rows32 = UInt32(rows)
+            var channels32 = UInt32(channels)
+            var stride32 = UInt32(planeStride)
+            encoder.setComputePipelineState(pipeline)
+            encoder.setBuffer(source, offset: 0, index: 0)
+            encoder.setBuffer(destination, offset: 0, index: 1)
+            encoder.setBytes(&rows32, length: 4, index: 2)
+            encoder.setBytes(&channels32, length: 4, index: 3)
+            encoder.setBytes(&stride32, length: 4, index: 4)
+            encoder.dispatchThreads(
+                MTLSize(width: channels, height: rows, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: channels, height: 1, depth: 1))
+            encoder.endEncoding()
+        }
+
+        let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        try encode("dit_token_to_ane_f16", source: token, destination: ane, command: command)
+        try encode("dit_ane_to_token_f16", source: ane, destination: roundTrip, command: command)
+        command.commit()
+        command.waitUntilCompleted()
+        XCTAssertNil(command.error)
+
+        let anePtr = ane.contents().bindMemory(to: UInt16.self, capacity: channels * planeStride)
+        for channel in 0..<channels {
+            for row in 0..<rows {
+                XCTAssertEqual(
+                    anePtr[channel * planeStride + row],
+                    tokenValues[row * channels + channel])
+            }
+            for row in rows..<planeStride {
+                XCTAssertEqual(anePtr[channel * planeStride + row], paddingSentinel,
+                               "layout bridge wrote into H11 plane padding")
+            }
+        }
+        let result = roundTrip.contents().bindMemory(to: UInt16.self, capacity: rows * channels)
+        XCTAssertEqual(
+            Array(UnsafeBufferPointer(start: result, count: rows * channels)), tokenValues)
+    }
+
 }

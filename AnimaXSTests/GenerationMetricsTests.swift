@@ -89,6 +89,26 @@ final class GenerationMetricsTests: XCTestCase {
         XCTAssertEqual(metrics.stepMetrics[1].weightCopySeconds, 0.05, accuracy: 0.0001)
     }
 
+    func testANETelemetryAccumulatesGloballyAndPerStep() {
+        let collector = MetricsCollector()
+        collector.beginStep(0)
+        collector.recordANEModelLoad(seconds: 0.75)
+        collector.recordANEEvaluation(seconds: 0.020)
+        collector.recordANEEvaluation(seconds: 0.030)
+        collector.endStep()
+
+        let metrics = collector.snapshot()
+        XCTAssertEqual(metrics.aneModelLoadTime, 0.75, accuracy: 0.0001)
+        XCTAssertEqual(metrics.aneEvaluationTime, 0.05, accuracy: 0.0001)
+        XCTAssertEqual(metrics.aneEvaluationCount, 2)
+        XCTAssertEqual(metrics.stepMetrics[0].aneModelLoadSeconds, 0.75, accuracy: 0.0001)
+        XCTAssertEqual(metrics.stepMetrics[0].aneEvaluationSeconds, 0.05, accuracy: 0.0001)
+        XCTAssertEqual(metrics.stepMetrics[0].aneEvaluations, 2)
+        let text = metrics.summaryText
+        XCTAssertTrue(text.contains("ANE evaluation time: 0.1 s (2 evaluations)"))
+        XCTAssertTrue(text.contains("ANE model load time: 0.8 s"))
+    }
+
     func testSummaryTextShape() {
         let collector = MetricsCollector()
         collector.beginStep(0)

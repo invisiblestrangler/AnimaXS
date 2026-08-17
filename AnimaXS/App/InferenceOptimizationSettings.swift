@@ -179,7 +179,8 @@ final class InferenceOptimizationSettings: ObservableObject {
     /// stays intact and directly testable via `LinearExecutor`). Normal
     /// device settings must never select them while the optimization search
     /// runs, so a manual selection is rejected/normalized to
-    /// `.dequantizedMPS` and never persisted.
+    /// `.dequantizedMPS` and never persisted. `.aneHybridW8` is a separate
+    /// explicit A12/H11 backend and is allowed to persist.
     static let quarantineReason = "P8 direct QGEMM (.directQuantized / .hybrid) is temporarily disabled: it measured ~10x slower than dequantized MPS on the A12 device (performance regression, not a proven correctness failure). The research kernel remains testable directly via LinearExecutor."
 
     /// DISABLED (Task 5): human-readable reason for the P6 mmap no-copy

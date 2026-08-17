@@ -233,7 +233,7 @@ struct DiagnosticsView: View {
                 }
             }
             .disabled(isGenerating)
-            Picker("DiT linear backend (P8)", selection: linearBackendBinding) {
+            Picker("DiT linear backend", selection: linearBackendBinding) {
                 // QUARANTINED (Task 4): `.directQuantized` and `.hybrid` are
                 // filtered out of the normal device picker entirely — they
                 // measured ~10x slower than dequantized MPS on the A12 device
@@ -245,6 +245,9 @@ struct DiagnosticsView: View {
                 }
             }
             .disabled(isGenerating)
+            if optimizationSettings.linearBackend == .aneHybridW8 {
+                aneHybridNote
+            }
             quarantineNote
             Button("Reset to current baseline") {
                 optimizationSettings.resetToBaseline()
@@ -256,6 +259,21 @@ struct DiagnosticsView: View {
                     .foregroundStyle(.orange)
             }
         }
+    }
+
+    /// A12/H11 backend note. This path intentionally remains opt-in: it uses
+    /// the device-proven private ANE runtime, accepts W8 DiT packs only, and
+    /// offloads the large projection GEMMs while keeping nonlinear/attention
+    /// math on Metal.
+    private var aneHybridNote: some View {
+        Label {
+            Text("ANE hybrid (A12/H11): W8-only experimental device backend. Self/cross-attention projection GEMMs and MLP1/MLP2 run on ANE; AdaLN, RMSNorm, RoPE, attention, GELU and residual math stay on Metal. Use for sideload/device testing, not App Store distribution.")
+                .font(.caption2)
+        } icon: {
+            Image(systemName: "cpu")
+                .foregroundStyle(.secondary)
+        }
+        .foregroundStyle(.secondary)
     }
 
     /// QUARANTINED (Task 4): visible explanation shown whenever the P8 direct
