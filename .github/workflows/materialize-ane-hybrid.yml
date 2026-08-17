@@ -1,0 +1,49 @@
+name: Materialize ANE hybrid integration
+
+on:
+  push:
+    branches:
+      - ane-hybrid-integration
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout integration branch
+        uses: actions/checkout@v4
+        with:
+          ref: ane-hybrid-integration
+          fetch-depth: 0
+
+      - name: Reconstruct and apply exact ANE patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/ane-materialize/chunk_00 \
+              .github/ane-materialize/chunk_01 \
+              .github/ane-materialize/chunk_02 \
+              .github/ane-materialize/chunk_03 \
+              .github/ane-materialize/chunk_04 > /tmp/ane.patch.gz.b64
+          base64 -d /tmp/ane.patch.gz.b64 | gzip -dc > /tmp/ane.patch
+          echo "Patch SHA256: $(sha256sum /tmp/ane.patch | awk '{print $1}')"
+          test "$(sha256sum /tmp/ane.patch | awk '{print $1}')" = "60425d600ad44b0f82e91819e1734ef80f33954711ee011da891b7b534ec24e3"
+          git apply --check --binary /tmp/ane.patch
+          git apply --binary /tmp/ane.patch
+          grep -Fq 'self.modelsByBlock = [:]' AnimaXS/Runtime/ANE/ANEW8MLPBackend.swift
+          git diff --check
+
+      - name: Commit real source and remove materializer
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf .github/ane-materialize
+          rm -f .github/workflows/materialize-ane-hybrid.yml
+          git config user.name "AnimaXS CI"
+          git config user.email "ci@anima-xs.local"
+          git add -A
+          git status --short
+          git commit -m "feat: integrate A12 ANE hybrid W8 backend [ane-materialized]"
+          git push origin HEAD:ane-hybrid-integration
