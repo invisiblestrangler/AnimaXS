@@ -255,12 +255,16 @@ enum ANEW8ModelPreparer {
             if A12ANEPreparedModelExists(qkvKey) {
                 hits += 1
             } else {
-                _ = try A12ANEPrepareQKVModel(
+                var prepareError: NSError?
+                guard A12ANEPrepareQKVModel(
                     selfQ.q, selfQ.biasF32, selfQ.scaleF32,
                     selfK.q, selfK.biasF32, selfK.scaleF32,
                     selfV.q, selfV.biasF32, selfV.scaleF32,
                     UInt(DiTBlockExecutor.dim), UInt(DiTBlockExecutor.tokens),
-                    "dit_b\(block)_self_qkv", qkvKey)
+                    "dit_b\(block)_self_qkv", qkvKey, &prepareError) else {
+                    throw prepareError ?? AnimapkError.validation(
+                        "failed to prepare ANE fused QKV model for block \(block)")
+                }
                 misses += 1
                 bytesWritten += UInt64(selfQ.payloadBytes + selfK.payloadBytes + selfV.payloadBytes)
             }
