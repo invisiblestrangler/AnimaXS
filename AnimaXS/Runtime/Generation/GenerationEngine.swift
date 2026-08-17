@@ -99,12 +99,23 @@ protocol VAEDecodeStage: AnyObject {
 protocol GenerationStageFactory {
     func makePromptEncoder(context: MetalContext, fileURL: URL) throws -> PromptEncoderStage
     func makeContextAdapter(context: MetalContext, fileURL: URL) throws -> ContextAdapterStage
+    func prepareDiffusion(
+        fileURL: URL, optimization: InferenceOptimizationConfig, metrics: MetricsCollector
+    ) throws
     func makeDiffusion(
         context: MetalContext, fileURL: URL,
         optimization: InferenceOptimizationConfig,
         numerics: DiTNumericsPolicy
     ) throws -> DiffusionStage
     func makeVAE(context: MetalContext, fileURL: URL) throws -> VAEDecodeStage
+}
+
+extension GenerationStageFactory {
+    /// Test factories do not own real model packs, so preparation is a no-op
+    /// unless the production factory overrides it.
+    func prepareDiffusion(
+        fileURL: URL, optimization: InferenceOptimizationConfig, metrics: MetricsCollector
+    ) throws {}
 }
 
 /// Production factory: real executors over real `AnimapkFile` mmaps.
@@ -115,6 +126,15 @@ struct ProductionStageFactory: GenerationStageFactory {
 
     func makeContextAdapter(context: MetalContext, fileURL: URL) throws -> ContextAdapterStage {
         try LLMAdapterMetal(context: context, file: try AnimapkFile(url: fileURL))
+    }
+
+    func prepareDiffusion(
+        fileURL: URL, optimization: InferenceOptimizationConfig, metrics: MetricsCollector
+    ) throws {
+        guard optimization.linearBackend == .aneHybridW8 else { return }
+        let file = try AnimapkFile(url: fileURL)
+        let result = try ANEW8ModelPreparer.ensurePrepared(file: file)
+        metrics.recordANECachePreparation(result)
     }
 
     func makeDiffusion(
@@ -188,6 +208,11 @@ struct GenerationEngine {
     ) async throws -> DecodedRGBA8 {
         let metrics = metricsIn ?? MetricsCollector()
         metrics.recordOptimizationConfig(optimization)
+        let numerics = DiTNumericsPolicy.fromVariantID(models.dit.variant.id)
+        if let reason = InferenceOptimizationConfig.blockingReason(
+            for: optimization, numerics: numerics, ditVariantID: models.dit.variant.id) {
+            throw AnimapkError.validation(reason)
+        }
         let generationStart = ProcessInfo.processInfo.systemUptime
         defer {
             metrics.finalize(totalWall: ProcessInfo.processInfo.systemUptime - generationStart)
@@ -327,6 +352,8 @@ struct GenerationEngine {
         progress: ProgressCallback?,
         metrics: MetricsCollector, optimization: InferenceOptimizationConfig
     ) async throws -> MTLBuffer {
+        try factory.prepareDiffusion(
+            fileURL: models.dit.url, optimization: optimization, metrics: metrics)
         let sampler = try factory.makeDiffusion(
             context: context, fileURL: models.dit.url,
             optimization: optimization,

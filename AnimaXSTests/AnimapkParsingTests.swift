@@ -120,4 +120,123 @@ final class AnimapkParsingTests: XCTestCase {
         try data.write(to: url)
         XCTAssertThrowsError(try AnimapkFile(url: url))
     }
+    func testOptionalANEQuantizationMetadataDecodesWithoutBreakingLegacy() throws {
+        let data = Data([0, 127, 255, 64])
+        var scale = Data()
+        var bias = Data()
+        for value: Float in [0.01, 0.02] {
+            var bits = value.bitPattern.littleEndian
+            scale.append(contentsOf: withUnsafeBytes(of: &bits) { [UInt8]($0) })
+        }
+        for value: Float in [-1.0, 2.0] {
+            var bits = value.bitPattern.littleEndian
+            bias.append(contentsOf: withUnsafeBytes(of: &bits) { [UInt8]($0) })
+        }
+        let digest = String(repeating: "a", count: 64)
+        let blob = TestPackFactory.BlobSpec(
+            name: "model.diffusion_model.blocks.0.self_attn.q_proj.weight",
+            shape: [2, 2], logicalDtype: "w8", storageDtype: "w8", storageCode: 1,
+            data: data, scale: scale, zero: bias,
+            quantizationFormat: "ane_u8_per_row_fp32_v1", blobSHA256: digest)
+        let url = try TestPackFactory.writePack(
+            named: "ane-meta", componentCode: 1, quantScheme: "w8-ane-hybrid-v1",
+            quantGroup: 64, blobs: [blob], to: tmpDir)
+        let file = try AnimapkFile(url: url)
+        let tensor = try XCTUnwrap(file.tensors.first)
+        XCTAssertEqual(tensor.quantizationFormat, "ane_u8_per_row_fp32_v1")
+        XCTAssertEqual(tensor.blobSHA256, digest)
+
+        let legacyURL = try makeW4Pack()
+        let legacy = try AnimapkFile(url: legacyURL)
+        XCTAssertNil(legacy.tensors.first?.quantizationFormat)
+        XCTAssertNil(legacy.tensors.first?.blobSHA256)
+    }
+
+}
+final class ANEW8NativePackTests: XCTestCase {
+    private func tensor(
+        suffix: String, offset: UInt64, native: Bool,
+        rows: Int = 2, columns: Int = 2
+    ) -> AnimapkTensor {
+        let format = native ? ANEW8NativePack.tensorFormat : "group64_affine_fp16_v2"
+        let dataSize = UInt64(rows * columns)
+        let paramSize = native ? UInt64(rows * 4) : UInt64(rows * 2)
+        return AnimapkTensor(
+            name: "model.diffusion_model.blocks.0.\(suffix)",
+            shape: [rows, columns], logicalDtype: "w8", storageDtype: "w8",
+            crc32: nil, blockIndex: 0, executionIndex: nil,
+            blobOffset: offset, blobSize: 16_384,
+            dataOffsetField: 0, dataSize: dataSize,
+            scaleOffset: dataSize, scaleSize: paramSize,
+            zeroOffset: dataSize + paramSize, zeroSize: paramSize,
+            quantizationFormat: format,
+            blobSHA256: native ? String(repeating: "a", count: 64) : nil)
+    }
+
+    func testNativeTensorMetadataValidation() throws {
+        let t = tensor(
+            suffix: "self_attn.q_proj.weight", offset: 16_384,
+            native: true, rows: 2, columns: 2)
+        XCTAssertNoThrow(try ANEW8NativePack.validateNativeTensor(
+            t, expectedRows: 2, expectedColumns: 2))
+
+        let bad = AnimapkTensor(
+            name: t.name, shape: t.shape, logicalDtype: t.logicalDtype,
+            storageDtype: t.storageDtype, crc32: nil, blockIndex: 0,
+            executionIndex: nil, blobOffset: t.blobOffset, blobSize: t.blobSize,
+            dataOffsetField: 0, dataSize: t.dataSize,
+            scaleOffset: t.scaleOffset, scaleSize: 2,
+            zeroOffset: t.zeroOffset, zeroSize: t.zeroSize,
+            quantizationFormat: t.quantizationFormat, blobSHA256: t.blobSHA256)
+        XCTAssertThrowsError(try ANEW8NativePack.validateNativeTensor(
+            bad, expectedRows: 2, expectedColumns: 2))
+    }
+
+    func testCompactMetalRangeExcludesNativeProjectionBlobs() throws {
+        let metalSuffixes = [
+            "adaln_modulation_self_attn.1.weight", "adaln_modulation_self_attn.2.weight",
+            "adaln_modulation_cross_attn.1.weight", "adaln_modulation_cross_attn.2.weight",
+            "adaln_modulation_mlp.1.weight", "adaln_modulation_mlp.2.weight",
+            "self_attn.q_norm.weight", "self_attn.k_norm.weight",
+            "cross_attn.q_norm.weight", "cross_attn.k_norm.weight",
+        ]
+        let nativeSuffixes = ANEW8NativePack.projectionSpecs.map(\.suffix)
+        var tensors: [AnimapkTensor] = []
+        for (index, suffix) in metalSuffixes.enumerated() {
+            tensors.append(tensor(
+                suffix: suffix, offset: UInt64(index + 1) * 16_384, native: false))
+        }
+        for (index, suffix) in nativeSuffixes.enumerated() {
+            tensors.append(tensor(
+                suffix: suffix, offset: UInt64(index + 11) * 16_384, native: true))
+        }
+        let range = try DiTANEHybridMetalLocator.metalRange(tensors: tensors, logicalIndex: 0)
+        XCTAssertEqual(range.tensors.count, 10)
+        XCTAssertTrue(range.tensors.allSatisfy {
+            $0.tensor.quantizationFormat != ANEW8NativePack.tensorFormat
+        })
+        let fullEnd = tensors.map { $0.blobOffset + $0.blobSize }.max()!
+        XCTAssertLessThan(range.fileRange.upperBound, fullEnd)
+    }
+
+    func testCompactMetalRangeRejectsInterleavedNativeBlob() throws {
+        var tensors: [AnimapkTensor] = []
+        let metalSuffixes = [
+            "adaln_modulation_self_attn.1.weight", "adaln_modulation_self_attn.2.weight",
+            "adaln_modulation_cross_attn.1.weight", "adaln_modulation_cross_attn.2.weight",
+            "adaln_modulation_mlp.1.weight", "adaln_modulation_mlp.2.weight",
+            "self_attn.q_norm.weight", "self_attn.k_norm.weight",
+            "cross_attn.q_norm.weight", "cross_attn.k_norm.weight",
+        ]
+        for (index, suffix) in metalSuffixes.enumerated() {
+            tensors.append(tensor(
+                suffix: suffix, offset: UInt64(index + 1) * 16_384, native: false))
+        }
+        for (index, spec) in ANEW8NativePack.projectionSpecs.enumerated() {
+            let offset: UInt64 = index == 0 ? 5 * 16_384 : UInt64(index + 11) * 16_384
+            tensors.append(tensor(suffix: spec.suffix, offset: offset, native: true))
+        }
+        XCTAssertThrowsError(
+            try DiTANEHybridMetalLocator.metalRange(tensors: tensors, logicalIndex: 0))
+    }
 }

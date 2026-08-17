@@ -122,8 +122,15 @@ actor ModelStore {
             return .missing
         }
         if receiptIsValid(for: entry, at: destination) {
-            states[entry.component] = .ready(destination)
-            return .ready(destination)
+            do {
+                try ensureANEPreparationIfNeeded(for: entry, at: destination)
+                states[entry.component] = .ready(destination)
+                return .ready(destination)
+            } catch {
+                let message = error.localizedDescription
+                states[entry.component] = .failed(message)
+                return .failed(message)
+            }
         }
         // No (valid) receipt: one full local verification, then persist a
         // receipt so the next launch is cheap. This is a local read — never a
@@ -131,6 +138,7 @@ actor ModelStore {
         states[entry.component] = .verifying
         do {
             let variant = try verifier(destination, entry)
+            try ensureANEPreparationIfNeeded(for: entry, at: destination)
             writeReceipt(for: entry, at: destination, variant: variant)
             states[entry.component] = .ready(destination)
             return .ready(destination)
@@ -256,6 +264,7 @@ actor ModelStore {
         states[entry.component] = .verifying
         do {
             let variant = try verifier(destination, entry)
+            try ensureANEPreparationIfNeeded(for: entry, at: destination)
             writeReceipt(for: entry, at: destination, variant: variant)
             states[entry.component] = .ready(destination)
             return destination
@@ -311,6 +320,7 @@ actor ModelStore {
         defer { try? FileManager.default.removeItem(at: staging) }
         let destination = localURL(for: entry)
         let finalURL = try installVerified(staging, to: destination, entry: entry)
+        try ensureANEPreparationIfNeeded(for: entry, at: finalURL)
         writeReceipt(for: entry, at: finalURL, variant: variant.matched)
         states[entry.component] = .ready(finalURL)
         return finalURL
@@ -501,6 +511,7 @@ actor ModelStore {
             let staging = variant.staging
             defer { try? FileManager.default.removeItem(at: staging) }
             let finalURL = try installVerified(staging, to: destination, entry: entry)
+            try ensureANEPreparationIfNeeded(for: entry, at: finalURL)
             writeReceipt(for: entry, at: finalURL, variant: variant.matched)
             states[entry.component] = .ready(finalURL)
             return finalURL
@@ -566,6 +577,18 @@ actor ModelStore {
             return abs(modificationDate.timeIntervalSince(receiptDate)) < 0.5
         }
         return receipt.installedModificationDate == nil
+    }
+
+    /// Native ANE packs have a derived Espresso cache that must exist before
+    /// the DiT slot becomes ready. Normal W4/W8-v2 packs return immediately.
+    /// This never downloads a model and never runs private ANE evaluation.
+    private func ensureANEPreparationIfNeeded(
+        for entry: ModelManifestEntry, at url: URL
+    ) throws {
+        guard entry.component == .dit else { return }
+        let file = try AnimapkFile(url: url)
+        guard file.quantScheme == ANEW8NativePack.quantScheme else { return }
+        _ = try ANEW8ModelPreparer.ensurePrepared(file: file)
     }
 
     /// Best-effort: a failed receipt write only costs one full verification on

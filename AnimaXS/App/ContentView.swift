@@ -61,6 +61,7 @@ struct ContentView: View {
                     lastMetricsText: coordinator.lastMetricsText,
                     optimizationSettings: optimizationSettings,
                     ditNumericsPolicy: resolvedDitNumericsPolicy,
+                    ditVariantID: catalog.resolved?.dit.variant.id,
                     isGenerating: coordinator.isGenerating)
             }
             .scrollDismissesKeyboard(.interactively)
@@ -308,7 +309,8 @@ struct ContentView: View {
     private var eligibility: GenerationEligibility {
         let optimizationBlockingReason = InferenceOptimizationConfig.blockingReason(
             for: optimizationSettings.snapshot,
-            numerics: resolvedDitNumericsPolicy)
+            numerics: resolvedDitNumericsPolicy,
+            ditVariantID: catalog.resolved?.dit.variant.id)
         return GenerationEligibility.evaluate(
             modelsResolved: catalog.resolved != nil,
             isGenerating: isGenerating,

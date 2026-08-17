@@ -38,6 +38,9 @@ struct DiagnosticsView: View {
     /// policy when the pack is not resolved yet). Used to evaluate the
     /// central compatibility validator for the current configuration.
     var ditNumericsPolicy: DiTNumericsPolicy
+    /// Resolved DiT variant id, when available, so pack/backend compatibility
+    /// uses the same central validator as the Generate screen.
+    var ditVariantID: String?
 
     /// Whether a generation is currently active (controls are disabled while
     /// it runs so a toggle can never mutate an in-flight run).
@@ -49,11 +52,13 @@ struct DiagnosticsView: View {
         lastMetricsText: String? = nil,
         optimizationSettings: InferenceOptimizationSettings,
         ditNumericsPolicy: DiTNumericsPolicy = .w4Legacy,
+        ditVariantID: String? = nil,
         isGenerating: Bool = false
     ) {
         self.lastMetricsText = lastMetricsText
         self.optimizationSettings = optimizationSettings
         self.ditNumericsPolicy = ditNumericsPolicy
+        self.ditVariantID = ditVariantID
         self.isGenerating = isGenerating
     }
 
@@ -332,7 +337,8 @@ struct DiagnosticsView: View {
     private var optimizationBlockingReason: String? {
         InferenceOptimizationConfig.blockingReason(
             for: optimizationSettings.snapshot,
-            numerics: ditNumericsPolicy)
+            numerics: ditNumericsPolicy,
+            ditVariantID: ditVariantID)
     }
 
     private var linearTileSelection: Binding<Int> {

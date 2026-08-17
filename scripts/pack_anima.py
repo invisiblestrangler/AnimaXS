@@ -31,6 +31,34 @@ RECORD_SIZE = 128
 DEFAULT_METADATA_RESERVE = 8 * 1024 * 1024
 COMPONENT = {"dit": 1, "te": 2, "vae": 3}
 STORAGE_CODE = {"w4": 0, "w8": 1, "fp16": 2, "fp32": 3}
+STANDARD_PROFILE = "standard"
+ANE_HYBRID_PROFILE = "ane-hybrid-w8-v1"
+ANE_QUANT_SCHEME = "w8-ane-hybrid-v1"
+ANE_TENSOR_FORMAT = "ane_u8_per_row_fp32_v1"
+GROUP64_TENSOR_FORMAT = "group64_affine_fp16_v2"
+FP16_TENSOR_FORMAT = "fp16"
+ANE_PROJECTION_SUFFIXES = {
+    "self_attn.q_proj.weight",
+    "self_attn.k_proj.weight",
+    "self_attn.v_proj.weight",
+    "self_attn.output_proj.weight",
+    "cross_attn.q_proj.weight",
+    "cross_attn.k_proj.weight",
+    "cross_attn.v_proj.weight",
+    "cross_attn.output_proj.weight",
+    "mlp.layer1.weight",
+    "mlp.layer2.weight",
+}
+_BLOCK_RE = re.compile(r"^model\.diffusion_model\.blocks\.(\d+)\.(.+)$")
+
+
+def is_ane_projection(name: str) -> bool:
+    match = _BLOCK_RE.match(name)
+    if not match:
+        return False
+    block = int(match.group(1))
+    return 0 <= block < 28 and match.group(2) in ANE_PROJECTION_SUFFIXES
+
 
 
 def align_up(value: int, alignment: int = ALIGN) -> int:
@@ -101,6 +129,7 @@ def make_plan(
     overrides: list[dict[str, str]],
     group: int,
     metadata_reserve: int,
+    profile: str = STANDARD_PROFILE,
 ) -> list[dict[str, Any]]:
     if group != 64:
         raise ValueError("this refinement cycle requires group size 64")
@@ -111,16 +140,27 @@ def make_plan(
         rank = len(shape)
         storage = choose_storage(name, rank, default_quant, overrides)
         count = product(shape)
+        native_ane = profile == ANE_HYBRID_PROFILE and is_ane_projection(name)
+        if native_ane and (rank != 2 or storage != "w8"):
+            raise ValueError(f"ANE-native projection must be rank-2 W8: {name}")
         if rank <= 1 or storage == "fp16":
             data_size = count * 2
             scale_size = zero_size = 0
             logical = "fp16"
+            quantization_format = FP16_TENSOR_FORMAT if profile == ANE_HYBRID_PROFILE else None
+        elif native_ane:
+            rows, columns = shape
+            data_size = rows * columns
+            scale_size = zero_size = rows * 4
+            logical = "w8"
+            quantization_format = ANE_TENSOR_FORMAT
         else:
             rows, columns = shape
             groups_per_row = (columns + group - 1) // group
             data_size = rows * ((columns + 1) // 2 if storage == "w4" else columns)
             scale_size = zero_size = rows * groups_per_row * 2
             logical = storage
+            quantization_format = GROUP64_TENSOR_FORMAT if profile == ANE_HYBRID_PROFILE else None
         blob_data_size = data_size + scale_size + zero_size
         block_match = re.search(r"(?:^|\.)blocks\.(\d+)\.", name)
         plans.append({
@@ -137,12 +177,26 @@ def make_plan(
             "execution_index": execution_index,
             "source_dtype": spec.get("dtype"),
             "source_offsets": spec.get("data_offsets"),
+            "quantization_format": quantization_format,
         })
 
     table_offset = HEADER_SIZE + metadata_reserve
     payload_offset = align_up(table_offset + RECORD_SIZE * len(plans))
     cursor = payload_offset
-    for plan in plans:
+    if profile == ANE_HYBRID_PROFILE:
+        # Physical layout only: keep JSON/table order deterministic/alphabetical,
+        # but place each block's Metal-required tensors contiguously before its
+        # ANE-native projections so the runtime can stream only the compact prefix.
+        def payload_key(plan: dict[str, Any]) -> tuple[int, int, int, int]:
+            block = int(plan["block_index"])
+            if block >= 0:
+                return (0, block, 1 if plan["quantization_format"] == ANE_TENSOR_FORMAT else 0,
+                        int(plan["execution_index"]))
+            return (1, int(plan["execution_index"]), 0, 0)
+        physical_plans = sorted(plans, key=payload_key)
+    else:
+        physical_plans = plans
+    for plan in physical_plans:
         plan["blob_offset"] = cursor
         cursor += plan["blob_size"]
     return plans
@@ -242,6 +296,48 @@ def _quantize_chunk(chunk: Any, bits: int, group: int, optimize_w4: bool) -> tup
     return data, scale_data, zero_data, stats
 
 
+def _quantize_ane_row_chunk(chunk: Any) -> tuple[bytes, bytes, bytes, dict[str, float]]:
+    """Direct source -> ANE H11 row-affine U8 quantization.
+
+    One FP32 scale+bias is stored per output row. This must never consume an
+    already-quantized W8 tensor: the caller passes the original source FP32 chunk.
+    """
+    import numpy as np
+
+    values = np.asarray(chunk, dtype=np.float32)
+    if values.ndim != 2 or not np.isfinite(values).all():
+        raise ValueError("ANE-native source chunk must be finite rank-2 FP32")
+    rows, columns = values.shape
+    low = values.min(axis=1).astype(np.float32)
+    high = values.max(axis=1).astype(np.float32)
+    span = high - low
+    scale = np.where(span > 0, span / np.float32(255.0), np.float32(1.0)).astype(np.float32)
+    bias = low.astype(np.float32)
+    # Match Swift/ANE probe round-to-nearest, ties away from zero.  The
+    # normalized values are non-negative, so floor(x + 0.5) is exact.
+    normalized = (values - bias[:, None]) / scale[:, None]
+    q = np.floor(normalized + np.float32(0.5))
+    q = np.clip(q, 0, 255).astype(np.uint8)
+
+    recon = q.astype(np.float32) * scale[:, None] + bias[:, None]
+    error = recon - values
+    flat_x = values.reshape(-1)
+    flat_y = recon.reshape(-1)
+    flat_error = error.reshape(-1)
+    stats = {
+        "sum_x2": float(np.dot(flat_x, flat_x)),
+        "sum_y2": float(np.dot(flat_y, flat_y)),
+        "sum_xy": float(np.dot(flat_x, flat_y)),
+        "sum_squared_error": float(np.dot(flat_error, flat_error)),
+        "sum_absolute_error": float(np.abs(flat_error).sum()),
+        "max_absolute_error": float(np.abs(flat_error).max(initial=0.0)),
+        "element_count": float(rows * columns),
+        "q_zero_count": float((q == 0).sum()),
+        "q_max_count": float((q == 255).sum()),
+    }
+    return q.tobytes(), scale.astype("<f4").tobytes(), bias.astype("<f4").tobytes(), stats
+
+
 def _merge_stats(total: dict[str, float], current: dict[str, float]) -> None:
     for key, value in current.items():
         if key == "max_absolute_error":
@@ -288,25 +384,29 @@ def quantize_tensor_to_file(src: Any, plan: dict[str, Any], dst: Any, group: int
         _write_region(dst, data_cursor, data)
     else:
         rows, columns = array.shape
-        # 128 rows keeps candidate tensors bounded while using vectorized groups.
+        # 128 rows keeps temporary tensors bounded while retaining vectorization.
         for row_start in range(0, rows, 128):
             chunk = array[row_start:min(row_start + 128, rows), :]
-            data, scale, zero, chunk_stats = _quantize_chunk(
-                chunk, 4 if plan["storage_dtype"] == "w4" else 8,
-                group, optimize_w4 and plan["storage_dtype"] == "w4")
+            if plan.get("quantization_format") == ANE_TENSOR_FORMAT:
+                data, scale, zero, chunk_stats = _quantize_ane_row_chunk(chunk)
+            else:
+                data, scale, zero, chunk_stats = _quantize_chunk(
+                    chunk, 4 if plan["storage_dtype"] == "w4" else 8,
+                    group, optimize_w4 and plan["storage_dtype"] == "w4")
             blob_hash.update(data)
             crc = zlib.crc32(data, crc)
             _write_region(dst, data_cursor, data)
             data_cursor += len(data)
-            stats_before = stats
-            _merge_stats(stats_before, chunk_stats)
+            _merge_stats(stats, chunk_stats)
             # Parameters are written after all packed data, so retain only their
-            # small per-group arrays, never a second full quantized tensor.
+            # compact per-row/per-group arrays, never a second full quantized tensor.
             plan.setdefault("_scale_parts", bytearray()).extend(scale)
             plan.setdefault("_zero_parts", bytearray()).extend(zero)
 
         scale_data = bytes(plan.pop("_scale_parts"))
         zero_data = bytes(plan.pop("_zero_parts"))
+        if len(scale_data) != int(plan["scale_size"]) or len(zero_data) != int(plan["zero_size"]):
+            raise RuntimeError(f"parameter byte-size mismatch while packing {plan['name']}")
         blob_hash.update(scale_data)
         blob_hash.update(zero_data)
         _write_region(dst, int(plan["blob_offset"]) + int(plan["data_size"]), scale_data)
@@ -345,6 +445,7 @@ def build_metadata(
     precision_map_sha: str | None, script_sha: str, packer_commit: str,
     numpy_version: str, torch_version: str, safetensors_version: str,
     w4_algorithm: str,
+    profile: str = STANDARD_PROFILE,
 ) -> dict[str, Any]:
     tensor_meta = []
     for plan in plans:
@@ -358,10 +459,13 @@ def build_metadata(
             "scale_offset": plan["data_size"], "scale_size": plan["scale_size"],
             "zero_offset": plan["data_size"] + plan["scale_size"], "zero_size": plan["zero_size"],
         }
+        if plan.get("quantization_format") is not None:
+            entry["quantization_format"] = plan["quantization_format"]
         tensor_meta.append(entry)
-    return {
+    quant_scheme = ANE_QUANT_SCHEME if profile == ANE_HYBRID_PROFILE else quant
+    result = {
         "component": component,
-        "quant": {"scheme": quant, "group": group, "w4_algorithm": w4_algorithm},
+        "quant": {"scheme": quant_scheme, "group": group, "w4_algorithm": w4_algorithm},
         "tensor_meta": tensor_meta,
         "source_hashes": {os.path.basename(source_path): source_sha},
         "packer": {
@@ -374,12 +478,20 @@ def build_metadata(
             "path": "split_files/diffusion_models/anima-turbo-v1.0.safetensors",
             "sha256": source_sha,
         },
-        "quantization": {
+        "quantization": ({
+            "default": quant, "group": group, "w4_algorithm": w4_algorithm,
+            "scale_dtype": "mixed", "zero_dtype": "mixed",
+            "ane_native_format": ANE_TENSOR_FORMAT,
+            "ordinary_quantized_format": GROUP64_TENSOR_FORMAT,
+        } if profile == ANE_HYBRID_PROFILE else {
             "default": quant, "group": group, "w4_algorithm": w4_algorithm,
             "scale_dtype": "fp16", "zero_dtype": "fp16",
-        },
+        }),
         "precision_map_sha256": precision_map_sha,
     }
+    if profile == ANE_HYBRID_PROFILE:
+        result["profile"] = profile
+    return result
 
 
 def write_header_and_metadata(
@@ -411,12 +523,14 @@ def package(args: argparse.Namespace) -> int:
     except ImportError as error:
         raise RuntimeError(f"packing dependencies unavailable: {error}") from error
 
+    if args.profile == ANE_HYBRID_PROFILE and (args.component != "dit" or args.quant != "w8" or args.group != 64):
+        raise ValueError("ane-hybrid-w8-v1 requires --component dit --quant w8 --group 64")
     header = read_safetensors_header(args.input)
     source_sha = sha256_file(args.input)
     if args.source_sha256 and source_sha != args.source_sha256:
         raise RuntimeError(f"source SHA mismatch: expected {args.source_sha256}, got {source_sha}")
     default, overrides, precision_map_sha = parse_precision_map(args.precision_map, args.quant)
-    plans = make_plan(header, default, overrides, args.group, args.metadata_reserve)
+    plans = make_plan(header, default, overrides, args.group, args.metadata_reserve, args.profile)
     table_offset = HEADER_SIZE + args.metadata_reserve
     payload_offset = align_up(table_offset + len(plans) * RECORD_SIZE)
     file_size = payload_offset + sum(int(p["blob_size"]) for p in plans)
@@ -429,6 +543,8 @@ def package(args: argparse.Namespace) -> int:
             "file_size": file_size,
             "storage_counts": {storage: sum(p["storage_dtype"] == storage for p in plans)
                                for storage in ("w4", "w8", "fp16")},
+            "profile": args.profile,
+            "ane_native_tensor_count": sum(p.get("quantization_format") == ANE_TENSOR_FORMAT for p in plans),
         }
         print(json.dumps(plan_output, indent=2, sort_keys=True))
         if args.report:
@@ -459,7 +575,7 @@ def package(args: argparse.Namespace) -> int:
             args.source_repo, args.source_revision, precision_map_sha,
             sha256_file(Path(__file__)), os.environ.get("GITHUB_SHA", "local"),
             np.__version__, torch.__version__, getattr(safetensors, "__version__", "unknown"),
-            args.w4_algorithm)
+            args.w4_algorithm, args.profile)
         table = build_table(plans)
         write_header_and_metadata(
             dst, metadata, table, args.component, len(plans), args.metadata_reserve,
@@ -471,6 +587,8 @@ def package(args: argparse.Namespace) -> int:
     tensor_reports = []
     for plan in plans:
         entry = {k: plan[k] for k in ("name", "shape", "storage_dtype", "data_size", "scale_size", "zero_size", "blob_size", "crc32", "blob_sha256")}
+        if plan.get("quantization_format") is not None:
+            entry["quantization_format"] = plan["quantization_format"]
         if "stats" in plan:
             entry.update(plan["stats"])
             _merge_stats(summary_stats, {
@@ -484,6 +602,8 @@ def package(args: argparse.Namespace) -> int:
     report = {
         "format": "ANMA-v1-refinement-v2",
         "component": args.component, "default_quant": args.quant, "group": args.group,
+        "profile": args.profile,
+        "ane_native_tensor_count": sum(p.get("quantization_format") == ANE_TENSOR_FORMAT for p in plans),
         "w4_algorithm": args.w4_algorithm, "source_sha256": source_sha,
         "source_revision": args.source_revision, "tensor_count": len(plans),
         "output": {"filename": output.name, "bytes": output.stat().st_size, "sha256": sha256_file(output)},
@@ -510,6 +630,7 @@ def main() -> int:
     parser.add_argument("--out", required=True)
     parser.add_argument("--quant", required=True, choices=("w4", "w8"))
     parser.add_argument("--group", type=int, default=64)
+    parser.add_argument("--profile", choices=(STANDARD_PROFILE, ANE_HYBRID_PROFILE), default=STANDARD_PROFILE)
     parser.add_argument("--w4-algorithm", choices=("mseclip", "minmax"), default="mseclip")
     parser.add_argument("--precision-map")
     parser.add_argument("--report")

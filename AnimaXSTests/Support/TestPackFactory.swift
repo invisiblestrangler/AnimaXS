@@ -48,6 +48,8 @@ enum TestPackFactory {
                 "zero_size": UInt64(spec.zero.count),
             ]
             if spec.crc32 != nil { entry["crc32"] = spec.crc32! }
+            if let format = spec.quantizationFormat { entry["quantization_format"] = format }
+            if let sha = spec.blobSHA256 { entry["blob_sha256"] = sha }
             tensorMeta.append(entry)
         }
         let json: [String: Any] = [
@@ -159,10 +161,13 @@ enum TestPackFactory {
         let scale: Data
         let zero: Data
         let crc32: UInt32?
+        let quantizationFormat: String?
+        let blobSHA256: String?
 
         init(name: String, shape: [Int], logicalDtype: String, storageDtype: String,
              storageCode: UInt8, data: Data, scale: Data = Data(), zero: Data = Data(),
-             crc32: UInt32? = nil) {
+             crc32: UInt32? = nil, quantizationFormat: String? = nil,
+             blobSHA256: String? = nil) {
             self.name = name
             self.shape = shape
             self.logicalDtype = logicalDtype
@@ -172,6 +177,8 @@ enum TestPackFactory {
             self.scale = scale
             self.zero = zero
             self.crc32 = crc32
+            self.quantizationFormat = quantizationFormat
+            self.blobSHA256 = blobSHA256
         }
     }
 }

@@ -67,7 +67,10 @@ enum DiTNumericsPolicy: String, Equatable {
     case w8BF16Experimental
 
     static func fromVariantID(_ id: String) -> DiTNumericsPolicy {
-        id == "w8-v2" ? .w8LegacyStabilized : .w4Legacy
+        switch id {
+        case "w8-v2", "w8-ane-v1": return .w8LegacyStabilized
+        default: return .w4Legacy
+        }
     }
 }
 

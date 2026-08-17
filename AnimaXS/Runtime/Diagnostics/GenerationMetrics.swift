@@ -128,6 +128,12 @@ struct GenerationMetrics: Equatable {
     /// Lazy `_ANEClient` model-load cost. Kept separate from steady-state evaluation
     /// because the first diffusion step can pay a substantial one-time tax.
     var aneModelLoadTime: Double = 0
+    /// Whole-pack cache completeness/preparation work before diffusion.
+    var aneCachePreparationTime: Double = 0
+    var aneCachePreparationBytes: UInt64 = 0
+    var aneCacheHits: Int = 0
+    var aneCacheMisses: Int = 0
+    var anePreparedModels: Int = 0
     var aneEvaluationCount: Int = 0
     var hostWaitTime: Double = 0
 
@@ -201,6 +207,12 @@ struct GenerationMetrics: Equatable {
             lines.append(String(format: "ANE evaluation time: %.1f s (%d evaluations)",
                                 aneEvaluationTime, aneEvaluationCount))
             lines.append(String(format: "ANE model load time: %.1f s", aneModelLoadTime))
+        }
+        if anePreparedModels > 0 || aneCachePreparationTime > 0 {
+            lines.append(String(format: "ANE cache preparation time: %.1f s", aneCachePreparationTime))
+            lines.append(String(format: "ANE cache preparation payload written: %.0f MB",
+                                Double(aneCachePreparationBytes) / 1_048_576))
+            lines.append("ANE prepared cache hits/misses: \(aneCacheHits)/\(aneCacheMisses) (\(anePreparedModels) models)")
         }
         lines.append(String(format: "Metal encode time: %.1f s", encodeTime))
         lines.append(String(format: "Weight copy/load CPU work: %.1f s, %.0f MB",
@@ -280,6 +292,11 @@ struct GenerationMetrics: Equatable {
             + (ditPackVariantID.map { " (\($0))" } ?? "")
             + (ditPackSHA256.map { " \($0.prefix(12))…" } ?? "")
             + (ditPackBytes > 0 ? " \(ditPackBytes) bytes" : ""))
+        if ditPackVariantID == "w8-ane-v1" {
+            lines.append("ANE pack scheme: w8-ane-hybrid-v1")
+            lines.append("ANE native tensors: 280")
+            lines.append("ANE prepared models: \(anePreparedModels)")
+        }
         if let config = optimizationConfig {
             lines.append("Linear tile rows: \(config.linearTileRows)")
             lines.append("Attention tile rows: \(config.attentionTileRows)")
@@ -436,6 +453,14 @@ final class MetricsCollector {
         if let index = activeStepIndex {
             metrics.stepMetrics[index].aneModelLoadSeconds += value
         }
+    }
+
+    func recordANECachePreparation(_ result: ANEW8PreparationResult) {
+        metrics.aneCachePreparationTime += max(0, result.seconds)
+        metrics.aneCachePreparationBytes += result.payloadBytesWritten
+        metrics.aneCacheHits += result.cacheHits
+        metrics.aneCacheMisses += result.cacheMisses
+        metrics.anePreparedModels = max(metrics.anePreparedModels, result.preparedModels)
     }
 
     func recordHostWait(seconds: Double) {
