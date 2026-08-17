@@ -192,6 +192,21 @@ final class InferenceOptimizationConfigTests: XCTestCase {
                        "dequantizedMPS")
     }
 
+    // The ANE hybrid backend is an explicit, persistable diagnostic choice;
+    // unlike the failed P8 direct-QGEMM experiments it must not sanitize away.
+    @MainActor
+    func testANEHybridLinearBackendPersists() {
+        let defaults = makeDefaults()
+        let settings = InferenceOptimizationSettings(defaults: defaults)
+        settings.setLinearBackend(.aneHybridW8)
+        XCTAssertEqual(settings.linearBackend, .aneHybridW8)
+        XCTAssertEqual(settings.snapshot.linearBackend, .aneHybridW8)
+        XCTAssertEqual(defaults.string(forKey: InferenceOptimizationSettings.Keys.linearBackend),
+                       DiTLinearBackend.aneHybridW8.rawValue)
+        let reloaded = InferenceOptimizationSettings(defaults: defaults)
+        XCTAssertEqual(reloaded.linearBackend, .aneHybridW8)
+    }
+
     // DISABLED (Task 5): a persisted noCopyWeightSource == true (e.g. from a
     // pre-disable build) is migrated back to false on load, and the sanitized
     // value is re-persisted so the store is clean — a normal device launch
@@ -256,6 +271,7 @@ final class InferenceOptimizationConfigTests: XCTestCase {
         XCTAssertTrue(DiTLinearBackend.directQuantized.isQuarantined)
         XCTAssertTrue(DiTLinearBackend.hybrid.isQuarantined)
         XCTAssertFalse(DiTLinearBackend.dequantizedMPS.isQuarantined)
+        XCTAssertFalse(DiTLinearBackend.aneHybridW8.isQuarantined)
         XCTAssertTrue(InferencePreset.directQGEMMCandidate.containsQuarantinedLinearBackend)
         XCTAssertTrue(InferencePreset.allCandidate.containsQuarantinedLinearBackend)
         XCTAssertFalse(InferencePreset.baseline.containsQuarantinedLinearBackend)
@@ -731,6 +747,14 @@ final class InferenceOptimizationConfigTests: XCTestCase {
             XCTAssertNotNil(reason, "\(backend) must be blocked")
             XCTAssertTrue(reason!.contains("10x"), reason!)
         }
+    }
+
+    // The central compatibility gate allows the ANE backend itself. Runtime
+    // preflight (real device + W8 tensor inventory) is intentionally handled by
+    // ANEW8DiTModelCache because this pure config layer has no model file.
+    func testANEHybridBackendPassesCentralConfigGate() {
+        XCTAssertNil(InferenceOptimizationConfig.blockingReason(
+            for: config(linearBackend: .aneHybridW8), numerics: .w8LegacyStabilized))
     }
 
     // Experimental BF16 numerics + strided token-major attention is blocked:

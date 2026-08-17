@@ -20,6 +20,12 @@ enum DiTLinearBackend: String, Codable, CaseIterable {
     /// projections and everything else keep the dequantized-MPS path until
     /// A12 data proves otherwise.
     case hybrid
+    /// A12/H11 hybrid backend proven by the V12-V14 device harness. Large W8
+    /// DiT projection GEMMs (self QKV/O, cross Q/K/V/O, MLP up/down) execute
+    /// on ANE; AdaLN, learned RMSNorm, RoPE, attention, GELU and residual math
+    /// remain on the source-faithful Metal path. This stays opt-in until the
+    /// integrated pipeline completes a physical XS Max acceptance run.
+    case aneHybridW8
 
     /// QUARANTINED (device stabilization — Task 4): true for the P8 direct
     /// packed QGEMM backends (`.directQuantized`, `.hybrid`) that measured
@@ -230,8 +236,9 @@ struct InferenceOptimizationConfig: Equatable {
     ///
     /// It blocks:
     /// 1. `noCopyWeightSource == true` (P6 disabled — A12 GPU page fault).
-    /// 2. `linearBackend` other than `.dequantizedMPS` (P8 quarantined —
-    ///    ~10x A12 regression).
+    /// 2. A P8 quarantined direct-QGEMM `linearBackend` (`.directQuantized`
+    ///    / `.hybrid`, ~10x A12 regression). `.aneHybridW8` is a separate
+    ///    device-proven H11 backend and is not part of that quarantine.
     /// 3. An explicit experimental BF16 numerical policy — resolved
     ///    attention/activation numerics `bf16Compute` — combined with a
     ///    strided token-major attention layout (the `AttentionExecutor`
@@ -259,7 +266,7 @@ struct InferenceOptimizationConfig: Equatable {
         }
         // 2. P8 quarantined linear backends (Task 4): measured ~10x slower
         // than dequantized MPS on the A12 device.
-        if config.linearBackend != .dequantizedMPS {
+        if config.linearBackend.isQuarantined {
             return linearBackendBlockingReason
         }
         // 3. Experimental BF16 numerics + strided token-major attention:

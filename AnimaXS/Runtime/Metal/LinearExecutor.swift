@@ -117,6 +117,12 @@ final class LinearExecutor {
                 case .attentionProjection, .other:
                     break
                 }
+            case .aneHybridW8:
+                // Whole-branch ANE scheduling lives in DiTBlockExecutor because
+                // ANE/Metal dependency boundaries require command-buffer
+                // completion between projections. Any linear not explicitly
+                // offloaded there stays on this known-good MPS implementation.
+                break
             }
         }
 

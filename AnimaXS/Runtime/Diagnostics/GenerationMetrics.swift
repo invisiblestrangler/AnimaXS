@@ -33,6 +33,11 @@ struct DiffusionStepMetrics: Equatable {
     var wallSeconds: Double = 0
     var blockWallSeconds: Double = 0
     var gpuCommandSeconds: Double = 0
+    /// A12/H11 ANE projection evaluation time for this diffusion step.
+    var aneEvaluationSeconds: Double = 0
+    /// One-time/lazy ANE model load time charged to the step that first uses it.
+    var aneModelLoadSeconds: Double = 0
+    var aneEvaluations: Int = 0
     var weightCopySeconds: Double = 0
     var weightCopyBytes: UInt64 = 0
     var metalEncodeSeconds: Double = 0
@@ -118,6 +123,12 @@ struct GenerationMetrics: Equatable {
     var weightCopyBytes: Int64 = 0
     var encodeTime: Double = 0
     var gpuCommandTime: Double = 0
+    /// Time reported by the private A12/H11 ANE runtime for projection evaluations.
+    var aneEvaluationTime: Double = 0
+    /// Lazy `_ANEClient` model-load cost. Kept separate from steady-state evaluation
+    /// because the first diffusion step can pay a substantial one-time tax.
+    var aneModelLoadTime: Double = 0
+    var aneEvaluationCount: Int = 0
     var hostWaitTime: Double = 0
 
     // Memory / thermal
@@ -186,6 +197,11 @@ struct GenerationMetrics: Equatable {
         lines.append("")
         lines.append(String(format: "Average block wall time: %.2f s", averageBlockWall))
         lines.append(String(format: "Measured GPU command time: %.1f s", gpuCommandTime))
+        if aneEvaluationCount > 0 || aneModelLoadTime > 0 {
+            lines.append(String(format: "ANE evaluation time: %.1f s (%d evaluations)",
+                                aneEvaluationTime, aneEvaluationCount))
+            lines.append(String(format: "ANE model load time: %.1f s", aneModelLoadTime))
+        }
         lines.append(String(format: "Metal encode time: %.1f s", encodeTime))
         lines.append(String(format: "Weight copy/load CPU work: %.1f s, %.0f MB",
                             weightCopyTime, Double(weightCopyBytes) / 1_048_576))
@@ -396,6 +412,29 @@ final class MetricsCollector {
         metrics.gpuCommandTime += seconds
         if let index = activeStepIndex {
             metrics.stepMetrics[index].gpuCommandSeconds += seconds
+        }
+    }
+
+    /// A12/H11 ANE runtime evaluation time. This intentionally does not get
+    /// folded into GPU-command time: heterogeneous execution should remain
+    /// visible in the unplugged device report.
+    func recordANEEvaluation(seconds: Double) {
+        let value = max(0, seconds)
+        metrics.aneEvaluationTime += value
+        metrics.aneEvaluationCount += 1
+        if let index = activeStepIndex {
+            metrics.stepMetrics[index].aneEvaluationSeconds += value
+            metrics.stepMetrics[index].aneEvaluations += 1
+        }
+    }
+
+    /// Charges the lazy ANE model-load cost to the first step that loads a
+    /// block's ANE model set. Subsequent diffusion steps reuse those models.
+    func recordANEModelLoad(seconds: Double) {
+        let value = max(0, seconds)
+        metrics.aneModelLoadTime += value
+        if let index = activeStepIndex {
+            metrics.stepMetrics[index].aneModelLoadSeconds += value
         }
     }
 

@@ -77,6 +77,11 @@ final class DiTBlockExecutor {
     /// or the buffer could not be allocated). Shared across all steps of one
     /// generation; never persisted.
     private let crossKVCache: CrossKVCache?
+    /// A12/H11 ANE projection offload. Non-nil only for the explicit
+    /// `.aneHybridW8` backend; the legacy path never touches private runtime
+    /// symbols or allocates IOSurfaces.
+    private let aneModelCache: ANEW8DiTModelCache?
+    private let aneSurfaces: ANEW8DiTSurfaces?
     /// Run telemetry collector (nil in tests / diagnostic-only construction).
     /// Propagated to the child linear/attention executors so their cheap tile
     /// counters land in the SAME run metrics object (never a separate one).
@@ -107,6 +112,13 @@ final class DiTBlockExecutor {
         self.locator = locator
         self.optimization = optimization
         self.crossKVCache = crossKVCache
+        if optimization.linearBackend == .aneHybridW8 {
+            self.aneModelCache = try ANEW8DiTModelCache(file: file)
+            self.aneSurfaces = try ANEW8DiTSurfaces(device: context.device)
+        } else {
+            self.aneModelCache = nil
+            self.aneSurfaces = nil
+        }
         // Ping-pong ON keeps the existing two-slot streamer; OFF measures the
         // same generation with one slot and no look-ahead prefetch.
         let slotCount = optimization.pingPongWeightStreaming ? 2 : 1
@@ -149,6 +161,14 @@ final class DiTBlockExecutor {
     ) async throws {
         try validateInputs(residual: residual, emb: emb, adalnLora: adalnLora,
                            crossContext: crossContext, rope: rope)
+        if optimization.linearBackend == .aneHybridW8 {
+            try await executeANEHybridBlock(
+                blockIndex: blockIndex, residual: residual, emb: emb,
+                adalnLora: adalnLora, crossContext: crossContext, rope: rope,
+                slot: slot, prefetchIndex: prefetchIndex, prefetchSlot: prefetchSlot,
+                diagnosticBranchCompleted: diagnosticBranchCompleted)
+            return
+        }
         let range = try locator.block(blockIndex)
         metrics?.beginBlock(blockIndex)
         // Load the block's weights unless a prefetch (prologue or previous
@@ -256,6 +276,697 @@ final class DiTBlockExecutor {
         }
     }
 
+    /// A12/H11 hybrid block path matching the device-proven split: all large
+    /// W8 projection GEMMs execute on ANE while the exact production AdaLN,
+    /// learned RMSNorm, RoPE, attention, GELU, probes, gates and residual
+    /// boundaries remain on Metal. IOSurface-backed MTLBuffers provide the
+    /// handoff; no activation is copied through CPU memory.
+    private func executeANEHybridBlock(
+        blockIndex: Int,
+        residual: MTLBuffer,
+        emb: MTLBuffer,
+        adalnLora: MTLBuffer,
+        crossContext: MTLBuffer,
+        rope: MTLBuffer,
+        slot: Int,
+        prefetchIndex: Int?,
+        prefetchSlot: Int,
+        diagnosticBranchCompleted: DiagnosticBranchCompleted?
+    ) async throws {
+        guard let aneModelCache, let aneSurfaces else {
+            throw AnimapkError.validation("ANE hybrid backend was selected without an initialized ANE runtime")
+        }
+        metrics?.beginBlock(blockIndex)
+
+        // Model preparation reads the original mmap'd pack, not the streamed
+        // ring slot. Do it before marking the slot in-flight so first-step ANE
+        // compile/load latency never extends the ring's ownership window.
+        let modelResult = try aneModelCache.models(for: blockIndex)
+        if modelResult.newlyLoadedMilliseconds > 0 {
+            metrics?.recordANEModelLoad(seconds: modelResult.newlyLoadedMilliseconds / 1_000.0)
+        }
+        let models = modelResult.models
+
+        let range = try locator.block(blockIndex)
+        if streamer.loadedLogicalIndexes[slot] != blockIndex {
+            let copyStart = ProcessInfo.processInfo.systemUptime
+            let result = try streamer.load(range, from: file, slot: slot, mode: .copied)
+            guard result.mode != .noCopy else {
+                throw AnimapkError.validation("ANE hybrid backend must not use mmap no-copy weights")
+            }
+            metrics?.recordWeightCopy(
+                bytes: Int(range.length),
+                seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+        }
+        let weights = try BlockWeights(range: range, ring: streamer.buffer(for: slot))
+        streamer.markInFlight(slot)
+        var slotReleased = false
+        defer {
+            if !slotReleased { streamer.complete(slot) }
+        }
+
+        // Shared per-block embedding activation, exactly as the legacy path.
+        let siluEmb = buffer("dit.siluEmb.f32", Self.dim, Float.self)
+
+        // ---- S0 Metal: self AdaLN/input -> ANE layout -----------------------
+        let s0Start = ProcessInfo.processInfo.systemUptime
+        guard let s0 = context.commandQueue.makeCommandBuffer() else {
+            throw AnimapkError.validation("failed to create ANE hybrid self-input command buffer")
+        }
+        s0.label = "DiT block \(blockIndex) ANE self input"
+        try encodeUnary(s0, kernel: "silu", input: emb, output: siluEmb, count: Self.dim)
+        try encodeComputeBoundary(s0, siluEmb, count: Self.dim)
+        let selfInput = try encodeAttentionInput(
+            s0, residual: residual, siluEmb: siluEmb, adalnLora: adalnLora,
+            weights: weights, cross: false)
+        try encodeTokenToANE(
+            s0, tokenMajor: selfInput.projectionInput, aneMajor: aneSurfaces.tokenInput.metalBuffer,
+            rows: Self.tokens, channels: Self.dim,
+            planeStrideElements: aneSurfaces.tokenInput.planeStrideElements)
+        let s0End = ProcessInfo.processInfo.systemUptime
+
+        // Preserve the original ping-pong overlap: the current slot remains
+        // in-flight for the whole heterogeneous block, while the other slot can
+        // receive the next block immediately after the first Metal submit.
+        let gate0 = CommandBufferGate()
+        s0.addCompletedHandler { completed in
+            if let error = completed.error { gate0.resume(throwing: error) }
+            else { gate0.resume() }
+        }
+        let wait0Start = ProcessInfo.processInfo.systemUptime
+        s0.commit()
+        var prefetchError: Error?
+        if let prefetchIndex, prefetchSlot != slot {
+            do {
+                let nextRange = try locator.block(prefetchIndex)
+                let copyStart = ProcessInfo.processInfo.systemUptime
+                let result = try streamer.load(nextRange, from: file, slot: prefetchSlot, mode: .copied)
+                guard result.mode != .noCopy else {
+                    throw AnimapkError.validation("ANE hybrid prefetch unexpectedly selected mmap no-copy")
+                }
+                metrics?.recordWeightCopy(
+                    bytes: Int(nextRange.length),
+                    seconds: ProcessInfo.processInfo.systemUptime - copyStart)
+            } catch {
+                prefetchError = error
+            }
+        }
+        try await gate0.wait()
+        if let prefetchError { throw prefetchError }
+        recordCompletedCommand(
+            s0, encodeSeconds: s0End - s0Start,
+            hostWindowSeconds: ProcessInfo.processInfo.systemUptime - wait0Start)
+
+        try evaluateANEQKV(
+            models.selfQKV, input: aneSurfaces.tokenInput,
+            q: aneSurfaces.q, k: aneSurfaces.k, v: aneSurfaces.v,
+            blockIndex: blockIndex)
+
+        // ---- S1 Metal: exact self Q/K transforms + attention ----------------
+        let s1Start = ProcessInfo.processInfo.systemUptime
+        guard let s1 = context.commandQueue.makeCommandBuffer() else {
+            throw AnimapkError.validation("failed to create ANE hybrid self-attention command buffer")
+        }
+        s1.label = "DiT block \(blockIndex) ANE self attention"
+        let qToken = buffer("dit.q.token.f16", Self.tokens * Self.dim, Float16.self)
+        let kToken = buffer("dit.k.token.f16", Self.tokens * Self.dim, Float16.self)
+        let vToken = buffer("dit.v.token.f16", Self.tokens * Self.dim, Float16.self)
+        try encodeANEToToken(s1, aneMajor: aneSurfaces.q.metalBuffer, tokenMajor: qToken,
+                             rows: Self.tokens, channels: Self.dim,
+                             planeStrideElements: aneSurfaces.q.planeStrideElements)
+        try encodeANEToToken(s1, aneMajor: aneSurfaces.k.metalBuffer, tokenMajor: kToken,
+                             rows: Self.tokens, channels: Self.dim,
+                             planeStrideElements: aneSurfaces.k.planeStrideElements)
+        try encodeANEToToken(s1, aneMajor: aneSurfaces.v.metalBuffer, tokenMajor: vToken,
+                             rows: Self.tokens, channels: Self.dim,
+                             planeStrideElements: aneSurfaces.v.planeStrideElements)
+        let selfAttended = try encodeANEAttentionMath(
+            s1, qToken: qToken, kToken: kToken, vToken: vToken,
+            cross: false, blockIndex: blockIndex, rope: rope, weights: weights, slot: slot,
+            projectedKVAvailable: true)
+        try encodeTokenToANE(
+            s1, tokenMajor: selfAttended, aneMajor: aneSurfaces.tokenInput.metalBuffer,
+            rows: Self.tokens, channels: Self.dim,
+            planeStrideElements: aneSurfaces.tokenInput.planeStrideElements)
+        let s1End = ProcessInfo.processInfo.systemUptime
+        try await commitStandaloneCommand(s1, encodeSeconds: s1End - s1Start)
+
+        try evaluateANEProjection(
+            models.selfO, input: aneSurfaces.tokenInput, output: aneSurfaces.tokenOutput,
+            label: "self output", blockIndex: blockIndex)
+
+        // ---- S2 Metal: self residual + cross AdaLN/input --------------------
+        let s2Start = ProcessInfo.processInfo.systemUptime
+        guard let s2 = context.commandQueue.makeCommandBuffer() else {
+            throw AnimapkError.validation("failed to create ANE hybrid cross-input command buffer")
+        }
+        s2.label = "DiT block \(blockIndex) ANE cross input"
+        try encodeANEAttentionOutput(
+            s2, aneOutput: aneSurfaces.tokenOutput, residual: residual,
+            modulation: selfInput.modulation, cross: false)
+        let selfSnapshot = try diagnosticBranchCompleted.map { _ in
+            try encodeSnapshot(s2, source: residual, key: "dit.diagnostic.afterSelf.f32")
+        }
+        let crossInput = try encodeAttentionInput(
+            s2, residual: residual, siluEmb: siluEmb, adalnLora: adalnLora,
+            weights: weights, cross: true)
+        try encodeTokenToANE(
+            s2, tokenMajor: crossInput.projectionInput, aneMajor: aneSurfaces.tokenInput.metalBuffer,
+            rows: Self.tokens, channels: Self.dim,
+            planeStrideElements: aneSurfaces.tokenInput.planeStrideElements)
+        let crossCacheHit = optimization.crossKVCache && (crossKVCache?.isReady(blockIndex) ?? false)
+        if !crossCacheHit {
+            try encodeTokenToANE(
+                s2, tokenMajor: crossContext, aneMajor: aneSurfaces.contextInput.metalBuffer,
+                rows: Self.contextTokens, channels: Self.contextDim,
+                planeStrideElements: aneSurfaces.contextInput.planeStrideElements)
+        }
+        let s2End = ProcessInfo.processInfo.systemUptime
+        try await commitStandaloneCommand(s2, encodeSeconds: s2End - s2Start)
+
+        try evaluateANEProjection(
+            models.crossQ, input: aneSurfaces.tokenInput, output: aneSurfaces.q,
+            label: "cross Q", blockIndex: blockIndex)
+        if !crossCacheHit {
+            try evaluateANEProjection(
+                models.crossK, input: aneSurfaces.contextInput, output: aneSurfaces.contextK,
+                label: "cross K", blockIndex: blockIndex)
+            try evaluateANEProjection(
+                models.crossV, input: aneSurfaces.contextInput, output: aneSurfaces.contextV,
+                label: "cross V", blockIndex: blockIndex)
+        }
+
+        // ---- S3 Metal: exact cross Q/K transforms + attention ---------------
+        let s3Start = ProcessInfo.processInfo.systemUptime
+        guard let s3 = context.commandQueue.makeCommandBuffer() else {
+            throw AnimapkError.validation("failed to create ANE hybrid cross-attention command buffer")
+        }
+        s3.label = "DiT block \(blockIndex) ANE cross attention"
+        let crossQToken = buffer("dit.q.token.f16", Self.tokens * Self.dim, Float16.self)
+        let crossKCount = Self.contextTokens * Self.dim
+        let crossKToken = buffer("dit.k.token.f16", crossKCount, Float16.self)
+        let crossVToken = buffer("dit.v.token.f16", crossKCount, Float16.self)
+        try encodeANEToToken(s3, aneMajor: aneSurfaces.q.metalBuffer, tokenMajor: crossQToken,
+                             rows: Self.tokens, channels: Self.dim,
+                             planeStrideElements: aneSurfaces.q.planeStrideElements)
+        if !crossCacheHit {
+            try encodeANEToToken(s3, aneMajor: aneSurfaces.contextK.metalBuffer, tokenMajor: crossKToken,
+                                 rows: Self.contextTokens, channels: Self.dim,
+                                 planeStrideElements: aneSurfaces.contextK.planeStrideElements)
+            try encodeANEToToken(s3, aneMajor: aneSurfaces.contextV.metalBuffer, tokenMajor: crossVToken,
+                                 rows: Self.contextTokens, channels: Self.dim,
+                                 planeStrideElements: aneSurfaces.contextV.planeStrideElements)
+        }
+        let crossAttended = try encodeANEAttentionMath(
+            s3, qToken: crossQToken, kToken: crossKToken, vToken: crossVToken,
+            cross: true, blockIndex: blockIndex, rope: rope, weights: weights, slot: slot,
+            projectedKVAvailable: !crossCacheHit)
+        try encodeTokenToANE(
+            s3, tokenMajor: crossAttended, aneMajor: aneSurfaces.tokenInput.metalBuffer,
+            rows: Self.tokens, channels: Self.dim,
+            planeStrideElements: aneSurfaces.tokenInput.planeStrideElements)
+        let s3End = ProcessInfo.processInfo.systemUptime
+        try await commitStandaloneCommand(s3, encodeSeconds: s3End - s3Start)
+
+        try evaluateANEProjection(
+            models.crossO, input: aneSurfaces.tokenInput, output: aneSurfaces.tokenOutput,
+            label: "cross output", blockIndex: blockIndex)
+
+        // ---- S4 Metal: cross residual + MLP AdaLN/input ---------------------
+        let s4Start = ProcessInfo.processInfo.systemUptime
+        guard let s4 = context.commandQueue.makeCommandBuffer() else {
+            throw AnimapkError.validation("failed to create ANE hybrid MLP-input command buffer")
+        }
+        s4.label = "DiT block \(blockIndex) ANE MLP input"
+        try encodeANEAttentionOutput(
+            s4, aneOutput: aneSurfaces.tokenOutput, residual: residual,
+            modulation: crossInput.modulation, cross: true)
+        let crossSnapshot = try diagnosticBranchCompleted.map { _ in
+            try encodeSnapshot(s4, source: residual, key: "dit.diagnostic.afterCross.f32")
+        }
+        let (mlpModulation, mlpInput) = try encodeMLPInput(
+            s4, residual: residual, siluEmb: siluEmb,
+            adalnLora: adalnLora, weights: weights)
+        try encodeTokenToANE(
+            s4, tokenMajor: mlpInput, aneMajor: aneSurfaces.tokenInput.metalBuffer,
+            rows: Self.tokens, channels: Self.dim,
+            planeStrideElements: aneSurfaces.tokenInput.planeStrideElements)
+        let s4End = ProcessInfo.processInfo.systemUptime
+        try await commitStandaloneCommand(s4, encodeSeconds: s4End - s4Start)
+
+        try evaluateANEProjection(
+            models.mlpUp, input: aneSurfaces.tokenInput, output: aneSurfaces.hidden,
+            label: "MLP1", blockIndex: blockIndex)
+
+        // ---- S5 Metal: exact production GELU, directly on shared H11 buffer -
+        guard aneSurfaces.hidden.planeStrideElements == UInt(Self.tokens) else {
+            throw AnimapkError.validation("ANE hidden surface unexpectedly padded at spatial \(Self.tokens)")
+        }
+        let s5Start = ProcessInfo.processInfo.systemUptime
+        guard let s5 = context.commandQueue.makeCommandBuffer() else {
+            throw AnimapkError.validation("failed to create ANE hybrid GELU command buffer")
+        }
+        s5.label = "DiT block \(blockIndex) ANE GELU"
+        try encodeHalfComputeBoundary(s5, aneSurfaces.hidden.metalBuffer, count: Self.tokens * Self.hidden)
+        try encodeMLPActivation(s5, hiddenHalf: aneSurfaces.hidden.metalBuffer)
+        let s5End = ProcessInfo.processInfo.systemUptime
+        try await commitStandaloneCommand(s5, encodeSeconds: s5End - s5Start)
+
+        try evaluateANEProjection(
+            models.mlpDown, input: aneSurfaces.hidden, output: aneSurfaces.tokenOutput,
+            label: "MLP2", blockIndex: blockIndex)
+
+        // ---- S6 Metal: MLP boundary/gate/residual ---------------------------
+        let s6Start = ProcessInfo.processInfo.systemUptime
+        guard let s6 = context.commandQueue.makeCommandBuffer() else {
+            throw AnimapkError.validation("failed to create ANE hybrid final command buffer")
+        }
+        s6.label = "DiT block \(blockIndex) ANE MLP output"
+        let mlpBranch = buffer("dit.branch.f16", Self.tokens * Self.dim, Float16.self)
+        try encodeANEToToken(
+            s6, aneMajor: aneSurfaces.tokenOutput.metalBuffer, tokenMajor: mlpBranch,
+            rows: Self.tokens, channels: Self.dim,
+            planeStrideElements: aneSurfaces.tokenOutput.planeStrideElements)
+        try encodeHalfComputeBoundary(s6, mlpBranch, count: Self.tokens * Self.dim)
+        if NumericalMonitor.detailedProbesEnabled, let monitor {
+            try monitor.encodeProbe(s6, values: mlpBranch, count: Self.tokens * Self.dim, probe: .mlpBranch)
+        }
+        try encodeGateAdd(s6, residual: residual, branch: mlpBranch, modulation: mlpModulation,
+                          count: Self.tokens * Self.dim, probe: .mlpGateAdd)
+        try encodeActivationBoundary(s6, residual)
+        if NumericalMonitor.detailedProbesEnabled, let monitor {
+            try monitor.encodeProbeF32(s6, values: residual, count: Self.tokens * Self.dim, probe: .mlpResidual)
+        }
+        let mlpSnapshot = try diagnosticBranchCompleted.map { _ in
+            try encodeSnapshot(s6, source: residual, key: "dit.diagnostic.afterMLP.f32")
+        }
+        let s6End = ProcessInfo.processInfo.systemUptime
+        try await commitStandaloneCommand(s6, encodeSeconds: s6End - s6Start)
+
+        streamer.complete(slot)
+        slotReleased = true
+        metrics?.endBlock()
+        context.refreshDiagnostics()
+        metrics?.recordMemory(
+            allocated: context.currentAllocatedSize,
+            available: UInt64(os_proc_available_memory()))
+        if let diagnosticBranchCompleted {
+            try diagnosticBranchCompleted("self", selfSnapshot!)
+            try diagnosticBranchCompleted("cross", crossSnapshot!)
+            try diagnosticBranchCompleted("mlp", mlpSnapshot!)
+        }
+    }
+
+    private func evaluateANEProjection(
+        _ model: A12ANEProjectionModel,
+        input: A12ANESurface,
+        output: A12ANESurface,
+        label: String,
+        blockIndex: Int
+    ) throws {
+        var milliseconds = 0.0
+        do {
+            _ = try model.evaluateInput(input, output: output, milliseconds: &milliseconds)
+        } catch {
+            throw AnimapkError.validation(
+                "ANE \(label) failed for block \(blockIndex): \(error.localizedDescription)")
+        }
+        metrics?.recordANEEvaluation(seconds: milliseconds / 1_000.0)
+    }
+
+    private func evaluateANEQKV(
+        _ model: A12ANEQKVModel,
+        input: A12ANESurface,
+        q: A12ANESurface,
+        k: A12ANESurface,
+        v: A12ANESurface,
+        blockIndex: Int
+    ) throws {
+        var milliseconds = 0.0
+        do {
+            _ = try model.evaluateInput(
+                input, qOutput: q, kOutput: k, vOutput: v, milliseconds: &milliseconds)
+        } catch {
+            throw AnimapkError.validation(
+                "ANE fused self QKV failed for block \(blockIndex): \(error.localizedDescription)")
+        }
+        metrics?.recordANEEvaluation(seconds: milliseconds / 1_000.0)
+    }
+
+    private func encodeAttentionInput(
+        _ command: MTLCommandBuffer,
+        residual: MTLBuffer,
+        siluEmb: MTLBuffer,
+        adalnLora: MTLBuffer,
+        weights: BlockWeights,
+        cross: Bool
+    ) throws -> (modulation: MTLBuffer, projectionInput: MTLBuffer) {
+        let modulation = try encodeModulation(
+            command, siluEmb: siluEmb, adalnLora: adalnLora,
+            w1: cross ? weights.modCross1 : weights.modSelf1,
+            w2: cross ? weights.modCross2 : weights.modSelf2)
+        let projectionInput = buffer("dit.projectionInput.f16", Self.tokens * Self.dim, Float16.self)
+        if optimization.fusedNormModulation {
+            try encodeFusedNormModulate(
+                command, residual: residual, modulation: modulation,
+                output: projectionInput, rows: Self.tokens, columns: Self.dim,
+                probe: cross ? .crossProjectionInput : .selfProjectionInput)
+            metrics?.recordFusedTrafficSaved(
+                UInt64(Self.tokens * Self.dim * MemoryLayout<Float>.stride) * 2)
+        } else {
+            let norm = buffer("dit.norm.f32", Self.tokens * Self.dim, Float.self)
+            let modulated = buffer("dit.modulated.f32", Self.tokens * Self.dim, Float.self)
+            try encodeLayerNorm(command, input: residual, output: norm, rows: Self.tokens, columns: Self.dim)
+            try encodeModulate(command, normalized: norm, modulation: modulation,
+                               output: modulated, count: Self.tokens * Self.dim)
+            try encodeFloatToComputeHalf(
+                command, input: modulated, output: projectionInput,
+                count: Self.tokens * Self.dim,
+                probe: cross ? .crossProjectionInput : .selfProjectionInput)
+        }
+        return (modulation, projectionInput)
+    }
+
+    /// Consumes raw projection outputs (or cached post-transform cross K/V) and
+    /// reproduces the legacy numerical boundaries, learned RMSNorm/RoPE and
+    /// attention path exactly. The returned buffer is token-major fp16 and is
+    /// ready for the ANE output projection.
+    private func encodeANEAttentionMath(
+        _ command: MTLCommandBuffer,
+        qToken: MTLBuffer,
+        kToken: MTLBuffer,
+        vToken: MTLBuffer,
+        cross: Bool,
+        blockIndex: Int,
+        rope: MTLBuffer,
+        weights: BlockWeights,
+        slot: Int,
+        projectedKVAvailable: Bool
+    ) throws -> MTLBuffer {
+        let keyRows = cross ? Self.contextTokens : Self.tokens
+        let kTokenCount = keyRows * Self.dim
+        let cacheEnabled = cross && optimization.crossKVCache
+        let cacheHit = cacheEnabled && (crossKVCache?.isReady(blockIndex) ?? false)
+
+        if cacheHit, let cache = crossKVCache {
+            guard let encoder = command.makeBlitCommandEncoder() else {
+                throw AnimapkError.validation("failed to create ANE cross-K/V cache blit encoder")
+            }
+            encoder.copy(from: cache.buffer, sourceOffset: cache.kOffset(block: blockIndex),
+                         to: kToken, destinationOffset: 0,
+                         size: kTokenCount * MemoryLayout<Float16>.stride)
+            encoder.copy(from: cache.buffer, sourceOffset: cache.vOffset(block: blockIndex),
+                         to: vToken, destinationOffset: 0,
+                         size: kTokenCount * MemoryLayout<Float16>.stride)
+            encoder.endEncoding()
+            metrics?.recordCrossKVHit()
+        } else {
+            guard projectedKVAvailable else {
+                throw AnimapkError.validation("ANE cross K/V projection missing on cache miss")
+            }
+            try encodeHalfComputeBoundary(command, kToken, count: kTokenCount)
+            try encodeHalfComputeBoundary(command, vToken, count: kTokenCount)
+            if NumericalMonitor.detailedProbesEnabled, let monitor {
+                try monitor.encodeProbe(command, values: kToken, count: kTokenCount,
+                                        probe: cross ? .crossKToken : .selfKToken)
+                try monitor.encodeProbe(command, values: vToken, count: kTokenCount,
+                                        probe: cross ? .crossVToken : .selfVToken)
+            }
+            if cross {
+                try encodeRMSHeads(command, input: kToken, weightOffset: weights.crossKNorm,
+                                   output: kToken, rows: Self.contextTokens * Self.heads, slot: slot)
+            } else {
+                try encodeRMSRoPE(command, input: kToken, weightOffset: weights.selfKNorm,
+                                  rope: rope, output: kToken, slot: slot)
+            }
+            try encodeHalfComputeBoundary(command, kToken, count: kTokenCount)
+            if cacheEnabled, let cache = crossKVCache {
+                guard let encoder = command.makeBlitCommandEncoder() else {
+                    throw AnimapkError.validation("failed to create ANE cross-K/V cache store encoder")
+                }
+                encoder.copy(from: kToken, sourceOffset: 0, to: cache.buffer,
+                             destinationOffset: cache.kOffset(block: blockIndex),
+                             size: kTokenCount * MemoryLayout<Float16>.stride)
+                encoder.copy(from: vToken, sourceOffset: 0, to: cache.buffer,
+                             destinationOffset: cache.vOffset(block: blockIndex),
+                             size: kTokenCount * MemoryLayout<Float16>.stride)
+                encoder.endEncoding()
+                cache.markReady(blockIndex)
+                metrics?.recordCrossKVMiss()
+            }
+        }
+
+        try encodeHalfComputeBoundary(command, qToken, count: Self.tokens * Self.dim)
+        if NumericalMonitor.detailedProbesEnabled, let monitor {
+            try monitor.encodeProbe(command, values: qToken, count: Self.tokens * Self.dim,
+                                    probe: cross ? .crossQToken : .selfQToken)
+        }
+        if cross {
+            try encodeRMSHeads(command, input: qToken, weightOffset: weights.crossQNorm,
+                               output: qToken, rows: Self.tokens * Self.heads, slot: slot)
+        } else {
+            try encodeRMSRoPE(command, input: qToken, weightOffset: weights.selfQNorm,
+                              rope: rope, output: qToken, slot: slot)
+        }
+        try encodeHalfComputeBoundary(command, qToken, count: Self.tokens * Self.dim)
+
+        let strided = try resolvedStridedAttention()
+        if strided {
+            let attended = buffer("dit.attended.token.f16", Self.tokens * Self.dim, Float16.self)
+            try attention.encode(
+                commandBuffer: command, query: qToken, key: kToken, value: vToken,
+                output: attended, heads: Self.heads, queryCount: Self.tokens,
+                keyCount: keyRows, headDim: Self.headDim,
+                probe: cross ? .crossScores : .selfScores,
+                layout: .tokenMajor(tokenStride: Self.dim))
+            try encodeHalfComputeBoundary(command, attended, count: Self.tokens * Self.dim)
+            if NumericalMonitor.detailedProbesEnabled, let monitor {
+                try monitor.encodeProbe(command, values: attended, count: Self.tokens * Self.dim,
+                                        probe: cross ? .crossAttended : .selfAttended)
+            }
+            return attended
+        }
+
+        let qHead = buffer("dit.q.head.f16", Self.tokens * Self.dim, Float16.self)
+        let kHead = buffer("dit.k.head.f16", kTokenCount, Float16.self)
+        let vHead = buffer("dit.v.head.f16", kTokenCount, Float16.self)
+        try encodeTranspose(command, input: qToken, output: qHead, tokens: Self.tokens, toHeadMajor: true)
+        try encodeTranspose(command, input: kToken, output: kHead, tokens: keyRows, toHeadMajor: true)
+        try encodeTranspose(command, input: vToken, output: vHead, tokens: keyRows, toHeadMajor: true)
+        let attendedHead = buffer("dit.attended.head.f16", Self.tokens * Self.dim, Float16.self)
+        try attention.encode(
+            commandBuffer: command, query: qHead, key: kHead, value: vHead,
+            output: attendedHead, heads: Self.heads, queryCount: Self.tokens,
+            keyCount: keyRows, headDim: Self.headDim,
+            probe: cross ? .crossScores : .selfScores)
+        try encodeHalfComputeBoundary(command, attendedHead, count: Self.tokens * Self.dim)
+        if NumericalMonitor.detailedProbesEnabled, let monitor {
+            try monitor.encodeProbe(command, values: attendedHead, count: Self.tokens * Self.dim,
+                                    probe: cross ? .crossAttended : .selfAttended)
+        }
+        let attended = buffer("dit.attended.token.f16", Self.tokens * Self.dim, Float16.self)
+        try encodeTranspose(command, input: attendedHead, output: attended,
+                            tokens: Self.tokens, toHeadMajor: false)
+        return attended
+    }
+
+    private func encodeANEAttentionOutput(
+        _ command: MTLCommandBuffer,
+        aneOutput: A12ANESurface,
+        residual: MTLBuffer,
+        modulation: MTLBuffer,
+        cross: Bool
+    ) throws {
+        let branch = buffer("dit.branch.f16", Self.tokens * Self.dim, Float16.self)
+        try encodeANEToToken(
+            command, aneMajor: aneOutput.metalBuffer, tokenMajor: branch,
+            rows: Self.tokens, channels: Self.dim,
+            planeStrideElements: aneOutput.planeStrideElements)
+        try encodeHalfComputeBoundary(command, branch, count: Self.tokens * Self.dim)
+        if NumericalMonitor.detailedProbesEnabled, let monitor {
+            try monitor.encodeProbe(command, values: branch, count: Self.tokens * Self.dim,
+                                    probe: cross ? .crossBranch : .selfBranch)
+        }
+        try encodeGateAdd(command, residual: residual, branch: branch, modulation: modulation,
+                          count: Self.tokens * Self.dim,
+                          probe: cross ? .crossGateAdd : .selfGateAdd)
+        try encodeActivationBoundary(command, residual)
+        if NumericalMonitor.detailedProbesEnabled, let monitor {
+            try monitor.encodeProbeF32(command, values: residual, count: Self.tokens * Self.dim,
+                                       probe: cross ? .crossResidual : .selfResidual)
+        }
+    }
+
+    private func resolvedStridedAttention() throws -> Bool {
+        switch optimization.attentionBackend {
+        case .legacyHeadMajorMPS:
+            return false
+        case .stridedTokenMajorMPS:
+            return optimization.stridedTokenMajorAttention
+        case .streamingMPS, .metalFlash:
+            guard optimization.stridedTokenMajorAttention else {
+                throw AnimapkError.validation(
+                    "P7 attention backend \(optimization.attentionBackend.rawValue) requires the strided token-major toggle to be ON")
+            }
+            return true
+        }
+    }
+
+    private func encodeMLPInput(
+        _ command: MTLCommandBuffer,
+        residual: MTLBuffer,
+        siluEmb: MTLBuffer,
+        adalnLora: MTLBuffer,
+        weights: BlockWeights
+    ) throws -> (modulation: MTLBuffer, projectionInput: MTLBuffer) {
+        let modulation = try encodeModulation(
+            command, siluEmb: siluEmb, adalnLora: adalnLora,
+            w1: weights.modMLP1, w2: weights.modMLP2)
+        let projectionInput = buffer("dit.projectionInput.f16", Self.tokens * Self.dim, Float16.self)
+        if optimization.fusedNormModulation {
+            try encodeFusedNormModulate(
+                command, residual: residual, modulation: modulation,
+                output: projectionInput, rows: Self.tokens, columns: Self.dim,
+                probe: .mlpProjectionInput)
+            metrics?.recordFusedTrafficSaved(
+                UInt64(Self.tokens * Self.dim * MemoryLayout<Float>.stride) * 2)
+        } else {
+            let norm = buffer("dit.norm.f32", Self.tokens * Self.dim, Float.self)
+            let modulated = buffer("dit.modulated.f32", Self.tokens * Self.dim, Float.self)
+            try encodeLayerNorm(command, input: residual, output: norm,
+                                rows: Self.tokens, columns: Self.dim)
+            try encodeModulate(command, normalized: norm, modulation: modulation,
+                               output: modulated, count: Self.tokens * Self.dim)
+            try encodeFloatToComputeHalf(
+                command, input: modulated, output: projectionInput,
+                count: Self.tokens * Self.dim, probe: .mlpProjectionInput)
+        }
+        return (modulation, projectionInput)
+    }
+
+    /// Exact copy of the existing post-MLP1 activation behavior, factored so
+    /// the ANE path cannot silently change GELU or numerical-monitor semantics.
+    private func encodeMLPActivation(
+        _ command: MTLCommandBuffer, hiddenHalf: MTLBuffer
+    ) throws {
+        if optimization.fusedMLPActivation {
+            try encodeFusedGELUHalf(
+                command, values: hiddenHalf,
+                count: Self.tokens * Self.hidden, probe: .mlpHiddenToHalf)
+            metrics?.recordFusedTrafficSaved(
+                UInt64(Self.tokens * Self.hidden * MemoryLayout<Float>.stride))
+        } else {
+            let hiddenFloat = buffer("dit.hidden.f32", Self.tokens * Self.hidden, Float.self)
+            try encodeConvert(command, kernel: "half_to_float", input: hiddenHalf,
+                              output: hiddenFloat, count: Self.tokens * Self.hidden)
+            metrics?.recordConversionBytes(
+                UInt64(Self.tokens * Self.hidden * MemoryLayout<Float>.stride))
+            try encodeUnary(command, kernel: "gelu", input: hiddenFloat,
+                            output: hiddenFloat, count: Self.tokens * Self.hidden)
+            try encodeComputeBoundary(command, hiddenFloat, count: Self.tokens * Self.hidden)
+            if let monitor {
+                try encodeProbeConvert(
+                    command, input: hiddenFloat, output: hiddenHalf,
+                    count: Self.tokens * Self.hidden,
+                    monitor: monitor, probe: .mlpHiddenToHalf)
+            } else {
+                try encodeConvert(command, kernel: "float_to_half", input: hiddenFloat,
+                                  output: hiddenHalf, count: Self.tokens * Self.hidden)
+            }
+            metrics?.recordConversionBytes(
+                UInt64(Self.tokens * Self.hidden * MemoryLayout<Float16>.stride))
+        }
+    }
+
+    private func encodeTokenToANE(
+        _ command: MTLCommandBuffer,
+        tokenMajor: MTLBuffer,
+        aneMajor: MTLBuffer,
+        rows: Int,
+        channels: Int,
+        planeStrideElements: UInt
+    ) throws {
+        try encodeANELayoutBridge(
+            command, kernel: "dit_token_to_ane_f16", source: tokenMajor,
+            destination: aneMajor, rows: rows, channels: channels,
+            planeStrideElements: planeStrideElements)
+    }
+
+    private func encodeANEToToken(
+        _ command: MTLCommandBuffer,
+        aneMajor: MTLBuffer,
+        tokenMajor: MTLBuffer,
+        rows: Int,
+        channels: Int,
+        planeStrideElements: UInt
+    ) throws {
+        try encodeANELayoutBridge(
+            command, kernel: "dit_ane_to_token_f16", source: aneMajor,
+            destination: tokenMajor, rows: rows, channels: channels,
+            planeStrideElements: planeStrideElements)
+    }
+
+    private func encodeANELayoutBridge(
+        _ command: MTLCommandBuffer,
+        kernel: String,
+        source: MTLBuffer,
+        destination: MTLBuffer,
+        rows: Int,
+        channels: Int,
+        planeStrideElements: UInt
+    ) throws {
+        let pipeline = try context.pipeline(named: kernel)
+        guard let encoder = command.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create \(kernel) encoder")
+        }
+        var rows32 = UInt32(rows)
+        var channels32 = UInt32(channels)
+        var stride32 = UInt32(planeStrideElements)
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(source, offset: 0, index: 0)
+        encoder.setBuffer(destination, offset: 0, index: 1)
+        encoder.setBytes(&rows32, length: 4, index: 2)
+        encoder.setBytes(&channels32, length: 4, index: 3)
+        encoder.setBytes(&stride32, length: 4, index: 4)
+        let tw = max(1, min(pipeline.threadExecutionWidth, channels))
+        let th = max(1, min(pipeline.maxTotalThreadsPerThreadgroup / tw, 8))
+        encoder.dispatchThreads(
+            MTLSize(width: channels, height: rows, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: tw, height: th, depth: 1))
+        encoder.endEncoding()
+        metrics?.recordConversionBytes(
+            UInt64(rows * channels * MemoryLayout<Float16>.stride))
+    }
+
+    private func commitStandaloneCommand(
+        _ command: MTLCommandBuffer,
+        encodeSeconds: Double
+    ) async throws {
+        let gate = CommandBufferGate()
+        command.addCompletedHandler { completed in
+            if let error = completed.error { gate.resume(throwing: error) }
+            else { gate.resume() }
+        }
+        let waitStart = ProcessInfo.processInfo.systemUptime
+        command.commit()
+        try await gate.wait()
+        recordCompletedCommand(
+            command, encodeSeconds: encodeSeconds,
+            hostWindowSeconds: ProcessInfo.processInfo.systemUptime - waitStart)
+    }
+
+    private func recordCompletedCommand(
+        _ command: MTLCommandBuffer,
+        encodeSeconds: Double,
+        hostWindowSeconds: Double
+    ) {
+        let gpuSeconds = (command.gpuStartTime > 0 && command.gpuEndTime >= command.gpuStartTime)
+            ? command.gpuEndTime - command.gpuStartTime : 0
+        metrics?.recordGPUCommand(seconds: gpuSeconds)
+        metrics?.recordEncode(seconds: encodeSeconds)
+        metrics?.recordHostWait(seconds: max(0, hostWindowSeconds - gpuSeconds))
+    }
+
     /// Load a block's weights into a slot without executing it (ping-pong
     /// prologue). The loop's in-flight guard still applies.
     func prefetch(blockIndex: Int, slot: Int) throws {
@@ -263,7 +974,9 @@ final class DiTBlockExecutor {
         let copyStart = ProcessInfo.processInfo.systemUptime
         let result = try streamer.load(
             range, from: file, slot: slot,
-            mode: optimization.noCopyWeightSource ? .noCopy : .copied)
+            mode: optimization.linearBackend == .aneHybridW8
+                ? .copied
+                : (optimization.noCopyWeightSource ? .noCopy : .copied))
         if result.mode == .noCopy {
             // P6: prologue memcpy eliminated — record the no-copy bytes.
             metrics?.recordMmapNoCopyBytes(result.noCopyBytes)

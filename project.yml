@@ -25,6 +25,8 @@ targets:
       # Tokenizer data as flat unique-named files (no subfolder collisions). The exact
       # Qwen2Tokenizer pre-tokenization regex is baked into qwen_tokenizer.json.
       - path: AnimaXS/Resources/Tokenizers
+      # A12/H11 Espresso seed model used by the opt-in ANE W8 hybrid backend.
+      - path: AnimaXS/Resources/ANE/Conv2048W8Template.bundle
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.invisiblestrangler.AnimaXS
@@ -34,6 +36,8 @@ targets:
         # than XcodeGen 'info:' generation so a clean clone always has the file.
         INFOPLIST_FILE: AnimaXS/Info.plist
         GENERATE_INFOPLIST_FILE: NO
+        # Objective-C bridge dynamically resolves the A12/H11 private ANE runtime.
+        SWIFT_OBJC_BRIDGING_HEADER: AnimaXS/AnimaXS-Bridging-Header.h
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
     dependencies:
