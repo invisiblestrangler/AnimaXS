@@ -1,0 +1,53 @@
+name: Apply PR 19 Projection Fix
+
+on:
+  push:
+    branches: [feat/ane-native-w8-pack]
+
+permissions:
+  contents: write
+
+jobs:
+  apply-fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: feat/ane-native-w8-pack
+      - name: Apply exact projection bridge fix
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('AnimaXS/Runtime/ANE/ANEW8MLPBackend.swift')
+          s = p.read_text()
+          old = '''                _ = try A12ANEPrepareProjectionModel(
+                    native.q, native.biasF32, native.scaleF32,
+                    UInt(spec.columns), UInt(spec.rows), UInt(spec.spatial),
+                    "dit_b\\(block)_\\(spec.tag)", key)
+                misses += 1
+          '''
+          new = '''                var prepareError: NSError?
+                guard A12ANEPrepareProjectionModel(
+                    native.q, native.biasF32, native.scaleF32,
+                    UInt(spec.columns), UInt(spec.rows), UInt(spec.spatial),
+                    "dit_b\\(block)_\\(spec.tag)", key, &prepareError) else {
+                    throw prepareError ?? AnimapkError.validation(
+                        "failed to prepare ANE projection \\(spec.tag) for block \\(block)")
+                }
+                misses += 1
+          '''
+          if s.count(old) != 1:
+              raise SystemExit(f'expected exactly one projection call site, got {s.count(old)}')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          swiftc -parse AnimaXS/Runtime/ANE/ANEW8MLPBackend.swift
+          git diff --check
+          git diff --exit-code --quiet && { echo 'No source change produced'; exit 1; } || true
+          git diff -- AnimaXS/Runtime/ANE/ANEW8MLPBackend.swift
+      - name: Commit exact source fix
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add AnimaXS/Runtime/ANE/ANEW8MLPBackend.swift
+          git commit -m 'Fix ANE projection NSError bridge call'
+          git push origin HEAD:feat/ane-native-w8-pack
