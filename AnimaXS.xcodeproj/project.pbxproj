@@ -168,7 +168,7 @@
 		3F6A1853CF522E32A3743ACB /* MetalContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalContext.swift; sourceTree = "<group>"; };
 		4347B31599A3D35830186731 /* GenerationEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationEngine.swift; sourceTree = "<group>"; };
 		43FB54A2EC11428E9AFC19A4 /* Crc32.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Crc32.swift; sourceTree = "<group>"; };
-		4434CD2A8D6583879C2F67BC /* Conv2048W8Template.bundle */ = {isa = PBXFileReference; lastKnownFileType = wrapper.plug-in; path = Conv2048W8Template.bundle; sourceTree = "<group>"; };
+		4434CD2A8D6583879C2F67BC /* Conv2048W8Template.bundle */ = {isa = PBXFileReference; lastKnownFileType = wrapper.cfbundle; path = Conv2048W8Template.bundle; sourceTree = "<group>"; };
 		451C73A98E67AF4B94675559 /* ANEW8MLPBackend.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ANEW8MLPBackend.swift; sourceTree = "<group>"; };
 		4C7A6A2DAA97C767D88AE25B /* AnimaKernels.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = AnimaKernels.metal; sourceTree = "<group>"; };
 		4C8E968875980A2C9ACC94E5 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
