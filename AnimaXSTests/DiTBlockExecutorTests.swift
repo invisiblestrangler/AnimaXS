@@ -376,9 +376,9 @@ final class DiTBlockExecutorTests: XCTestCase {
         XCTAssertEqual(ANEW8DiTSchedulerPolicy.prefetchDepth, 3)
         XCTAssertEqual(ANEW8DiTSchedulerPolicy.retireDepth, 1)
         XCTAssertEqual(ANEW8DiTSchedulerPolicy.pinnedBlocks(for: .full8), 4)
-        XCTAssertEqual(ANEW8DiTSchedulerPolicy.pinnedBlocks(for: .kvWarm6), 8)
+        XCTAssertEqual(ANEW8DiTSchedulerPolicy.pinnedBlocks(for: .kvWarm6), 6)
         XCTAssertEqual(ANEW8DiTSchedulerPolicy.theoreticalPeakPrograms(for: .full8), 64)
-        XCTAssertEqual(ANEW8DiTSchedulerPolicy.theoreticalPeakPrograms(for: .kvWarm6), 72)
+        XCTAssertEqual(ANEW8DiTSchedulerPolicy.theoreticalPeakPrograms(for: .kvWarm6), 60)
         XCTAssertLessThanOrEqual(
             ANEW8DiTSchedulerPolicy.theoreticalPeakPrograms(for: .full8),
             ANEW8DiTSchedulerPolicy.measuredSafetyCeilingPrograms)
