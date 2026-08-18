@@ -52,7 +52,6 @@ jobs:
                   AnimaXS/Runtime/Diagnostics/GenerationMetrics.swift \
                   AnimaXS/App/DiagnosticsView.swift \
                   AnimaXSTests/DiTBlockExecutorTests.swift
-          git add -u .github/ane_prod_materialize.py .github/workflows/materialize-ane-prod.yml
           git commit -m 'perf: materialize bounded ANE production scheduler'
           git push origin HEAD:${{ github.event.pull_request.head.ref }}
 
