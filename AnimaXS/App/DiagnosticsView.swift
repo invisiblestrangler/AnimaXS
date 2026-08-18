@@ -911,7 +911,10 @@ private enum ANEResidencyProbe {
         var total: UInt64 = 0
         for spec in ANEW8NativePack.projectionSpecs {
             let tensor = try ANEW8NativePack.tensor(file: file, block: block, suffix: spec.suffix)
-            total += tensor.dataSize + tensor.scaleSize + tensor.zeroSize
+            guard let scaleSize = tensor.scaleSize, let zeroSize = tensor.zeroSize else {
+                throw AnimapkError.validation("ANE probe expected W8 scale/zero payload sizes for block \(block) \(spec.suffix)")
+            }
+            total += tensor.dataSize + scaleSize + zeroSize
         }
         return total
     }
