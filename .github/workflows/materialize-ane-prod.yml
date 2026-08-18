@@ -1,0 +1,64 @@
+name: Materialize ANE production scheduler
+
+on:
+  pull_request:
+    types: [opened, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  materialize:
+    if: github.event.pull_request.head.ref == 'impl/ane-production-scheduler'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - name: Apply measured production scheduler
+        id: patch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set +e
+          set -o pipefail
+          python3 .github/ane_prod_materialize.py 2>&1 | tee /tmp/ane-prod-materialize.log
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            {
+              echo '### ANE production scheduler materializer failed'
+              echo
+              echo '```text'
+              tail -n 100 /tmp/ane-prod-materialize.log
+              echo '```'
+            } > /tmp/ane-prod-comment.md
+            gh pr comment "$PR_NUMBER" --body-file /tmp/ane-prod-comment.md
+            exit "$status"
+          fi
+
+      - name: Remove temporary materializer and commit production patch
+        run: |
+          git rm .github/ane_prod_materialize.py .github/workflows/materialize-ane-prod.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add AnimaXS/Runtime/ANE/ANEW8MLPBackend.swift \
+                  AnimaXS/Runtime/Metal/DiTBlockExecutor.swift \
+                  AnimaXS/Runtime/Sampler/DiffusionSampler.swift \
+                  AnimaXS/Runtime/Diagnostics/GenerationMetrics.swift \
+                  AnimaXS/App/DiagnosticsView.swift \
+                  AnimaXSTests/DiTBlockExecutorTests.swift
+          git add -u .github/ane_prod_materialize.py .github/workflows/materialize-ane-prod.yml
+          git commit -m 'perf: materialize bounded ANE production scheduler'
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
+
+      - name: Report success
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr comment "$PR_NUMBER" --body 'ANE production scheduler materialized successfully: bounded 4+3→8+3 residency, retire1, automatic exact P5 for ANE, and six-program KV-warm blocks. Temporary materializer files self-deleted from the implementation branch.'
