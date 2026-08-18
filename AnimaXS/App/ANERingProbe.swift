@@ -2,36 +2,34 @@ import Foundation
 import Dispatch
 import Metal
 import UIKit
-import CoreML
 #if canImport(Darwin)
 import Darwin
 #endif
 
-/// V5 Michelin experiment for the A12/H11 native W8 backend.
+/// V6 device-only recipe search for the A12/H11 native W8 backend.
 ///
-/// V4 proved three things we now treat as facts for this probe:
-/// - one shared loader removes nearly all host-side pack/cache overhead;
-/// - warm block load is still much slower than ANE evaluation;
-/// - synchronous block destruction/unload is substantial and can overlap the
-///   background loader. V5 measures that unload directly and compares small
-///   rings that exploit it without approaching the old high-residency cliff.
+/// V5 established that a depth-3 stream can hide post-destroy loader waits and
+/// that 2 pinned + 3 streaming (40 resident programs) beat the 0+2/0+3 rings.
+/// V6 removes V5's fixed-order bias, measures bounded asynchronous retirement,
+/// and models the exact P5 cross-K/V-warm state where crossK/crossV are no
+/// longer needed after the first diffusion step.
 ///
-/// Scheduler recipes:
-///   A) 0 pinned + 2 streaming = 16 programs max
-///   B) 0 pinned + 3 streaming = 24 programs max
-///   C) 2 pinned + 3 streaming = 40 programs max
-///
-/// The second, independent track inspects a CI-generated Core ML multifunction
-/// asset through public MLModelAsset APIs and the private _ANEModel procedure
-/// metadata. Failure there does not abort the scheduler results.
+/// No production generation path is changed by this probe.
 enum ANERingProbe {
     private static let blockCount = ModelConstants.ditBlocks
-    private static let programsPerBlock = 8
-    private static let measuredPasses = 3
+    private static let depth = 3
+    private static let programCeiling = 80
 
-    private struct PressureMark {
-        let issues: Int
+    private enum Profile: String, Sendable {
+        case full8
+        case kvWarm6
+
+        var programs: Int { self == .full8 ? 8 : 6 }
+        var includesCrossKV: Bool { self == .full8 }
+        var label: String { self == .full8 ? "full8" : "kvWarm6" }
     }
+
+    private struct PressureMark { let issues: Int }
 
     private final class PressureRecorder: @unchecked Sendable {
         private let lock = NSLock()
@@ -44,7 +42,7 @@ enum ANERingProbe {
         init() {
             source = DispatchSource.makeMemoryPressureSource(
                 eventMask: [.normal, .warning, .critical],
-                queue: DispatchQueue(label: "com.invisiblestrangler.AnimaXS.ane-v5-pressure"))
+                queue: DispatchQueue(label: "com.invisiblestrangler.AnimaXS.ane-v6-pressure"))
             source.setEventHandler { [weak self] in
                 guard let self else { return }
                 let data = self.source.data
@@ -123,55 +121,135 @@ enum ANERingProbe {
         }
     }
 
+    /// Tracks actual loaded ANE program count, not blockCount*8. This matters
+    /// for the KV-warm six-program profile.
     private final class ResidencyTracker: @unchecked Sendable {
         private let lock = NSLock()
-        private var blocks: Set<Int> = []
-        private var peak = 0
-        private let ceiling: Int
+        private var programsByBlock: [Int: Int] = [:]
+        private var peakProgramsValue = 0
+        private var peakBlocksValue = 0
 
-        init(ceiling: Int = 5) { self.ceiling = ceiling }
-
-        func add(_ block: Int) throws {
+        func add(block: Int, programs: Int) throws {
             lock.lock()
-            let inserted = blocks.insert(block).inserted
-            peak = max(peak, blocks.count)
-            let count = blocks.count
+            if programsByBlock[block] != nil {
+                lock.unlock()
+                throw AnimapkError.validation("V6 duplicate resident block \(block)")
+            }
+            programsByBlock[block] = programs
+            let total = programsByBlock.values.reduce(0, +)
+            peakProgramsValue = max(peakProgramsValue, total)
+            peakBlocksValue = max(peakBlocksValue, programsByBlock.count)
+            if total > programCeiling {
+                programsByBlock.removeValue(forKey: block)
+                lock.unlock()
+                throw AnimapkError.validation(
+                    "V6 residency exceeded \(programCeiling)-program ceiling: \(total)")
+            }
             lock.unlock()
-            guard inserted else {
-                throw AnimapkError.validation("V5 duplicate resident block \(block)")
-            }
-            guard count <= ceiling else {
-                throw AnimapkError.validation("V5 residency exceeded \(ceiling)-block ceiling: \(count)")
-            }
         }
 
         func remove(_ block: Int) {
-            lock.lock(); blocks.remove(block); lock.unlock()
+            lock.lock(); programsByBlock.removeValue(forKey: block); lock.unlock()
         }
 
         func resetPeak() {
-            lock.lock(); peak = blocks.count; lock.unlock()
+            lock.lock()
+            peakProgramsValue = programsByBlock.values.reduce(0, +)
+            peakBlocksValue = programsByBlock.count
+            lock.unlock()
         }
 
-        var currentCount: Int {
+        var currentPrograms: Int {
             lock.lock(); defer { lock.unlock() }
-            return blocks.count
+            return programsByBlock.values.reduce(0, +)
         }
 
-        var peakCount: Int {
+        var currentBlocks: Int {
             lock.lock(); defer { lock.unlock() }
-            return peak
+            return programsByBlock.count
+        }
+
+        var peakPrograms: Int {
+            lock.lock(); defer { lock.unlock() }
+            return peakProgramsValue
+        }
+
+        var peakBlocks: Int {
+            lock.lock(); defer { lock.unlock() }
+            return peakBlocksValue
         }
 
         var compact: String {
             lock.lock(); defer { lock.unlock() }
-            return "resident=\(blocks.count) blocks/\(blocks.count * programsPerBlock) programs peak=\(peak) blocks/\(peak * programsPerBlock) programs"
+            let programs = programsByBlock.values.reduce(0, +)
+            return "resident=\(programsByBlock.count) blocks/\(programs) programs peak=\(peakBlocksValue) blocks/\(peakProgramsValue) programs"
+        }
+    }
+
+    private final class ModelSet: @unchecked Sendable {
+        let selfQKV: A12ANEQKVModel
+        let selfO: A12ANEProjectionModel
+        let crossQ: A12ANEProjectionModel
+        let crossK: A12ANEProjectionModel?
+        let crossV: A12ANEProjectionModel?
+        let crossO: A12ANEProjectionModel
+        let mlpUp: A12ANEProjectionModel
+        let mlpDown: A12ANEProjectionModel
+        let profile: Profile
+
+        init(
+            selfQKV: A12ANEQKVModel,
+            selfO: A12ANEProjectionModel,
+            crossQ: A12ANEProjectionModel,
+            crossK: A12ANEProjectionModel?,
+            crossV: A12ANEProjectionModel?,
+            crossO: A12ANEProjectionModel,
+            mlpUp: A12ANEProjectionModel,
+            mlpDown: A12ANEProjectionModel,
+            profile: Profile
+        ) {
+            self.selfQKV = selfQKV
+            self.selfO = selfO
+            self.crossQ = crossQ
+            self.crossK = crossK
+            self.crossV = crossV
+            self.crossO = crossO
+            self.mlpUp = mlpUp
+            self.mlpDown = mlpDown
+            self.profile = profile
+        }
+
+        var programCount: Int { profile.programs }
+
+        var loadMilliseconds: Double {
+            selfQKV.loadMilliseconds + selfO.loadMilliseconds + crossQ.loadMilliseconds
+                + (crossK?.loadMilliseconds ?? 0) + (crossV?.loadMilliseconds ?? 0)
+                + crossO.loadMilliseconds + mlpUp.loadMilliseconds + mlpDown.loadMilliseconds
+        }
+
+        func invalidateTimed() -> (callSum: Double, wall: Double) {
+            let wallStart = ProcessInfo.processInfo.systemUptime
+            var sum = 0.0
+            func destroy(_ body: () -> Void) {
+                let start = ProcessInfo.processInfo.systemUptime
+                body()
+                sum += elapsedMS(since: start)
+            }
+            destroy { selfQKV.invalidate() }
+            destroy { selfO.invalidate() }
+            destroy { crossQ.invalidate() }
+            if let crossK { destroy { crossK.invalidate() } }
+            if let crossV { destroy { crossV.invalidate() } }
+            destroy { crossO.invalidate() }
+            destroy { mlpUp.invalidate() }
+            destroy { mlpDown.invalidate() }
+            return (sum, elapsedMS(since: wallStart))
         }
     }
 
     private final class LoadedBlock: @unchecked Sendable {
         let block: Int
-        let models: ANEW8DiTModels
+        let models: ModelSet
         let loadANE: Double
         let loadWall: Double
         private let tracker: ResidencyTracker
@@ -179,10 +257,7 @@ enum ANERingProbe {
         private var destroyed = false
 
         init(
-            block: Int,
-            models: ANEW8DiTModels,
-            loadANE: Double,
-            loadWall: Double,
+            block: Int, models: ModelSet, loadANE: Double, loadWall: Double,
             tracker: ResidencyTracker
         ) throws {
             self.block = block
@@ -190,44 +265,19 @@ enum ANERingProbe {
             self.loadANE = loadANE
             self.loadWall = loadWall
             self.tracker = tracker
-            try tracker.add(block)
+            try tracker.add(block: block, programs: models.programCount)
         }
 
         var hostLoadWall: Double { max(0, loadWall - loadANE) }
 
-        /// Timed diagnostic destruction. The Obj-C bridge unloads each private
-        /// ANE model and destroys its retained _ANEModel object in the same call.
-        func destroyTimed() throws -> (ane: Double, wall: Double) {
+        func destroyTimed() -> (callSum: Double, wall: Double) {
             lock.lock()
             if destroyed { lock.unlock(); return (0, 0) }
             destroyed = true
             lock.unlock()
-
-            let started = ProcessInfo.processInfo.systemUptime
-            var ane = 0.0
-            func destroy(_ model: A12ANEProjectionModel) throws {
-                let value = model.diagnosticDestroyMilliseconds()
-                guard value >= 0 else {
-                    throw AnimapkError.validation("V5 timed projection destroy failed for block \(block)")
-                }
-                ane += value
-            }
-
-            let qkv = models.selfQKV.diagnosticDestroyMilliseconds()
-            guard qkv >= 0 else {
-                throw AnimapkError.validation("V5 timed QKV destroy failed for block \(block)")
-            }
-            ane += qkv
-            try destroy(models.selfO)
-            try destroy(models.crossQ)
-            try destroy(models.crossK)
-            try destroy(models.crossV)
-            try destroy(models.crossO)
-            try destroy(models.mlpUp)
-            try destroy(models.mlpDown)
-            let wall = elapsedMS(since: started)
+            let result = models.invalidateTimed()
             tracker.remove(block)
-            return (ane, wall)
+            return result
         }
 
         func destroyUntimed() {
@@ -238,8 +288,8 @@ enum ANERingProbe {
             models.selfQKV.invalidate()
             models.selfO.invalidate()
             models.crossQ.invalidate()
-            models.crossK.invalidate()
-            models.crossV.invalidate()
+            models.crossK?.invalidate()
+            models.crossV?.invalidate()
             models.crossO.invalidate()
             models.mlpUp.invalidate()
             models.mlpDown.invalidate()
@@ -249,11 +299,9 @@ enum ANERingProbe {
         deinit { destroyUntimed() }
     }
 
-    /// One loader for the entire V5 run. Native-pack validation and the 224-file
-    /// prepared-cache completeness check happen once, never in the hot ring.
     private final class SharedLoader: @unchecked Sendable {
         private let file: AnimapkFile
-        let tracker = ResidencyTracker(ceiling: 5)
+        let tracker = ResidencyTracker()
 
         init(file: AnimapkFile) throws {
             self.file = file
@@ -262,18 +310,20 @@ enum ANERingProbe {
                 throw AnimapkError.validation("ANE prepared-model cache is incomplete")
             }
             guard A12ANEIsAvailable() else {
-                throw AnimapkError.validation("A12 ANE runtime unavailable: \(A12ANERuntimeStatus())")
+                throw AnimapkError.validation(
+                    "A12 ANE runtime unavailable: \(A12ANERuntimeStatus())")
             }
         }
 
-        func load(block: Int) throws -> LoadedBlock {
+        func load(block: Int, profile: Profile) throws -> LoadedBlock {
             guard (0..<blockCount).contains(block) else {
-                throw AnimapkError.validation("V5 block index out of range: \(block)")
+                throw AnimapkError.validation("V6 block index out of range: \(block)")
             }
             let started = ProcessInfo.processInfo.systemUptime
 
             func digest(_ suffix: String) throws -> String {
-                let tensor = try ANEW8NativePack.tensor(file: file, block: block, suffix: suffix)
+                let tensor = try ANEW8NativePack.tensor(
+                    file: file, block: block, suffix: suffix)
                 guard let digest = tensor.blobSHA256 else {
                     throw AnimapkError.validation("ANE-native tensor hash missing")
                 }
@@ -282,14 +332,17 @@ enum ANERingProbe {
 
             func projection(_ suffix: String) throws -> A12ANEProjectionModel {
                 guard let spec = ANEW8NativePack.spec(suffix: suffix) else {
-                    throw AnimapkError.validation("unknown ANE projection suffix: \(suffix)")
+                    throw AnimapkError.validation(
+                        "unknown ANE projection suffix: \(suffix)")
                 }
                 let key = ANEW8NativePack.projectionCacheKey(
                     block: block, tag: spec.tag, hash: try digest(suffix))
                 return try A12ANEProjectionModel(
                     preparedInputChannels: UInt(spec.columns),
-                    outputChannels: UInt(spec.rows), spatial: UInt(spec.spatial),
-                    label: "v5_b\(block)_\(spec.tag)", cacheKey: key)
+                    outputChannels: UInt(spec.rows),
+                    spatial: UInt(spec.spatial),
+                    label: "v6_b\(block)_\(spec.tag)",
+                    cacheKey: key)
             }
 
             let qHash = try digest("self_attn.q_proj.weight")
@@ -300,17 +353,24 @@ enum ANERingProbe {
             let selfQKV = try A12ANEQKVModel(
                 preparedChannels: UInt(DiTBlockExecutor.dim),
                 spatial: UInt(DiTBlockExecutor.tokens),
-                label: "v5_b\(block)_self_qkv", cacheKey: qkvKey)
+                label: "v6_b\(block)_self_qkv",
+                cacheKey: qkvKey)
 
-            let models = ANEW8DiTModels(
+            let crossK = profile.includesCrossKV
+                ? try projection("cross_attn.k_proj.weight") : nil
+            let crossV = profile.includesCrossKV
+                ? try projection("cross_attn.v_proj.weight") : nil
+
+            let models = ModelSet(
                 selfQKV: selfQKV,
                 selfO: try projection("self_attn.output_proj.weight"),
                 crossQ: try projection("cross_attn.q_proj.weight"),
-                crossK: try projection("cross_attn.k_proj.weight"),
-                crossV: try projection("cross_attn.v_proj.weight"),
+                crossK: crossK,
+                crossV: crossV,
                 crossO: try projection("cross_attn.output_proj.weight"),
                 mlpUp: try projection("mlp.layer1.weight"),
-                mlpDown: try projection("mlp.layer2.weight"))
+                mlpDown: try projection("mlp.layer2.weight"),
+                profile: profile)
             let wall = elapsedMS(since: started)
             return try LoadedBlock(
                 block: block, models: models,
@@ -322,11 +382,9 @@ enum ANERingProbe {
     private final class LoadResultBox: @unchecked Sendable {
         private let lock = NSLock()
         private var result: Result<LoadedBlock, Error>?
-
         func set(_ value: Result<LoadedBlock, Error>) {
             lock.lock(); result = value; lock.unlock()
         }
-
         func take() -> Result<LoadedBlock, Error>? {
             lock.lock(); defer { lock.unlock() }
             let value = result
@@ -336,16 +394,17 @@ enum ANERingProbe {
     }
 
     private final class LoadFuture: @unchecked Sendable {
-        let position: Int
         let block: Int
         private let semaphore = DispatchSemaphore(value: 0)
         private let box = LoadResultBox()
 
-        init(position: Int, block: Int, loader: SharedLoader, queue: DispatchQueue) {
-            self.position = position
+        init(
+            block: Int, profile: Profile, loader: SharedLoader,
+            queue: DispatchQueue
+        ) {
             self.block = block
             queue.async {
-                do { self.box.set(.success(try loader.load(block: block))) }
+                do { self.box.set(.success(try loader.load(block: block, profile: profile))) }
                 catch { self.box.set(.failure(error)) }
                 self.semaphore.signal()
             }
@@ -354,9 +413,44 @@ enum ANERingProbe {
         func wait() throws -> LoadedBlock {
             semaphore.wait()
             guard let result = box.take() else {
-                throw AnimapkError.validation("V5 loader returned no result for block \(block)")
+                throw AnimapkError.validation(
+                    "V6 loader returned no result for block \(block)")
             }
             return try result.get()
+        }
+    }
+
+    private final class RetireResultBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: (callSum: Double, wall: Double)?
+        func set(_ newValue: (callSum: Double, wall: Double)) {
+            lock.lock(); value = newValue; lock.unlock()
+        }
+        func take() -> (callSum: Double, wall: Double)? {
+            lock.lock(); defer { lock.unlock() }
+            let result = value
+            value = nil
+            return result
+        }
+    }
+
+    private final class RetireFuture: @unchecked Sendable {
+        private let semaphore = DispatchSemaphore(value: 0)
+        private let box = RetireResultBox()
+
+        init(block: LoadedBlock, queue: DispatchQueue) {
+            queue.async {
+                self.box.set(block.destroyTimed())
+                self.semaphore.signal()
+            }
+        }
+
+        func wait() throws -> (callSum: Double, wall: Double) {
+            semaphore.wait()
+            guard let result = box.take() else {
+                throw AnimapkError.validation("V6 retire queue returned no result")
+            }
+            return result
         }
     }
 
@@ -367,44 +461,54 @@ enum ANERingProbe {
         var loadHost = 0.0
         var evalANE = 0.0
         var evalWall = 0.0
-        var unloadANE = 0.0
+        var unloadCallSum = 0.0
         var unloadWall = 0.0
-        var waitWall = 0.0
+        var nextWait = 0.0
+        var retireBackpressure = 0.0
+        var retireDrain = 0.0
         var maxLoad = 0.0
         var maxUnload = 0.0
-        var maxWait = 0.0
-        var maxResident = 0
+        var maxNextWait = 0.0
+        var maxRetireWait = 0.0
+        var peakPrograms = 0
+        var peakBlocks = 0
         var loads = 0
         var unloads = 0
 
         var avgLoad: Double { loads > 0 ? loadWall / Double(loads) : 0 }
         var avgUnload: Double { unloads > 0 ? unloadWall / Double(unloads) : 0 }
-        var avgEval: Double { evalWall / Double(blockCount) }
     }
 
     private struct VariantResult {
-        let name: String
-        let maxPrograms: Int
+        let profile: Profile
+        let pinned: Int
+        let asyncRetire: Bool
         let pinSetupWall: Double
-        let passes: [PassStats]
-        let newPressureIssues: Int
-        var steady: PassStats { passes[min(1, passes.count - 1)] }
+        let stats: PassStats
+        let newPressure: Int
+        let memory: MemorySnapshot
+
+        var tag: String {
+            "\(profile.label) \(pinned)+3\(asyncRetire ? "+retire1" : "")"
+        }
     }
 
     static func run() async -> String {
         var lines: [String] = [
-            "ANE Michelin probe v5",
-            "Tracks: scheduler/unload microscope + independent multifunction/procedure POC.",
-            "Schedulers: 0+2 (16 programs), 0+3 (24 programs), 2+3 (40 programs).",
-            "Accounting: stage wall includes eval + timed destroy/unload + post-destroy wait; background load is measured separately.",
-            "Each scheduler runs 3 full passes; pass #1 is the steady comparison."
+            "ANE Michelin probe v6",
+            "Goal: remove V5 order bias, test bounded async retirement, and model exact P5 KV-warm six-program slices.",
+            "Safety ceiling: <=80 simultaneously resident private ANE programs.",
+            "full8 = selfQKV,selfO,crossQ,crossK,crossV,crossO,mlpUp,mlpDown.",
+            "kvWarm6 = exact post-P5-hit dynamic set: selfQKV,selfO,crossQ,crossO,mlpUp,mlpDown.",
+            "Important: projection-only timings are architecture probes, not full DiT/generation latency."
         ]
         let pressure = PressureRecorder()
         defer { pressure.stop() }
 
         do {
             guard A12ANEIsAvailable() else {
-                throw AnimapkError.validation("ANE unavailable: \(A12ANERuntimeStatus())")
+                throw AnimapkError.validation(
+                    "ANE unavailable: \(A12ANERuntimeStatus())")
             }
             guard let context = MetalContext() else {
                 throw AnimapkError.validation("Metal unavailable")
@@ -418,422 +522,335 @@ enum ANERingProbe {
                 throw AnimapkError.validation("installed DiT pack missing")
             }
             let file = try AnimapkFile(url: ditURL)
-
             let loaderStart = ProcessInfo.processInfo.systemUptime
             let loader = try SharedLoader(file: file)
-            let loaderInit = elapsedMS(since: loaderStart)
             let surfaces = try ANEW8DiTSurfaces(device: context.device)
-
             lines.append("runtime: \(A12ANERuntimeStatus())")
             lines.append("client selectors: \(A12ANEClientCapabilitySummary())")
             lines.append("pack: \(ditURL.lastPathComponent) scheme=\(file.quantScheme ?? "n/a")")
-            lines.append("shared-loader init=\(ms(loaderInit))ms")
+            lines.append("shared-loader init=\(ms(elapsedMS(since: loaderStart)))ms")
             lines.append("baseline: \(MemorySnapshot.capture(context: context).compact) | \(pressure.compact)")
             lines.append("")
 
-            lines.append("PRECONDITION — one cold/touch traversal with direct unload timing")
-            let cold = try preconditionRuntime(
-                loader: loader, surfaces: surfaces, context: context,
-                pressure: pressure, lines: &lines)
-            lines.append(passSummary(name: "precondition", pass: 0, stats: cold))
+            // A complete first-touch is required so every prepared program in
+            // both profiles is in the same translated/warm runtime state.
+            lines.append("PRECONDITION — one full8 first-touch traversal")
+            let cold = try precondition(
+                loader: loader, surfaces: surfaces, pressure: pressure,
+                context: context, lines: &lines)
+            lines.append(summary("precondition", cold))
             lines.append("after precondition: \(MemorySnapshot.capture(context: context).compact) | \(pressure.compact)")
-            if pressure.criticalSeen {
-                throw AnimapkError.validation("critical pressure during V5 precondition")
+            guard !pressure.criticalSeen else {
+                throw AnimapkError.validation("critical pressure during V6 precondition")
             }
-            try? await Task.sleep(nanoseconds: 750_000_000)
-
-            lines.append("")
-            lines.append("EXPERIMENT A1 — corrected 0+2: eval || next-load, then unload || next-load, then wait")
-            let zeroTwo = try runUnpinned(
-                depth: 2, loader: loader, surfaces: surfaces,
-                context: context, pressure: pressure, lines: &lines)
-            appendVariantSummary(zeroTwo, context: context, pressure: pressure, lines: &lines)
             try? await Task.sleep(nanoseconds: 500_000_000)
 
+            // Mirrored ordering controls a monotonic warm/runtime trend:
+            // each pin depth appears once early and once equally late.
             lines.append("")
-            lines.append("EXPERIMENT A2 — 0+3: current + next + next2, serial loader two blocks ahead")
-            let zeroThree = try runUnpinned(
-                depth: 3, loader: loader, surfaces: surfaces,
-                context: context, pressure: pressure, lines: &lines)
-            appendVariantSummary(zeroThree, context: context, pressure: pressure, lines: &lines)
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            lines.append("EXPERIMENT A — full8 mirrored pin-depth sweep, depth3, synchronous retirement")
+            let fullOrder = [0, 2, 4, 6, 6, 4, 2, 0]
+            var fullResults: [VariantResult] = []
+            for (index, pinned) in fullOrder.enumerated() {
+                let result = try runScheduler(
+                    profile: .full8, pinned: pinned, asyncRetire: false,
+                    loader: loader, surfaces: surfaces, context: context,
+                    pressure: pressure)
+                fullResults.append(result)
+                lines.append("A\(index + 1) \(variantSummary(result))")
+                guard !pressure.criticalSeen else {
+                    throw AnimapkError.validation(
+                        "critical pressure in full8 pinned sweep at \(pinned)+3")
+                }
+                try? await Task.sleep(nanoseconds: 175_000_000)
+            }
+            appendMirroredScorecard(
+                title: "FULL8 ORDER-CONTROLLED SCORECARD",
+                results: fullResults, lines: &lines)
 
             lines.append("")
-            lines.append("EXPERIMENT A3 — 2+3: pin b00-b01, stream remaining 26 with depth 3")
-            let twoThree = try runTwoPinnedThreeStream(
-                loader: loader, surfaces: surfaces,
-                context: context, pressure: pressure, lines: &lines)
-            appendVariantSummary(twoThree, context: context, pressure: pressure, lines: &lines)
+            lines.append("EXPERIMENT B — full8 6+3 synchronous vs bounded retire1 (ABBA)")
+            let fullRetireOrder = [false, true, true, false]
+            var fullRetireResults: [VariantResult] = []
+            for (index, asyncRetire) in fullRetireOrder.enumerated() {
+                let result = try runScheduler(
+                    profile: .full8, pinned: 6, asyncRetire: asyncRetire,
+                    loader: loader, surfaces: surfaces, context: context,
+                    pressure: pressure)
+                fullRetireResults.append(result)
+                lines.append("B\(index + 1) \(variantSummary(result))")
+                guard !pressure.criticalSeen else {
+                    throw AnimapkError.validation(
+                        "critical pressure in full8 retirement experiment")
+                }
+                try? await Task.sleep(nanoseconds: 175_000_000)
+            }
+            appendRetireScorecard(
+                title: "FULL8 RETIRE SCORECARD",
+                results: fullRetireResults, lines: &lines)
 
-            let variants = [zeroTwo, zeroThree, twoThree]
-            let ranked = variants.sorted { $0.steady.wall < $1.steady.wall }
+            // Keep the real ~112 MiB P5 cache allocation alive while measuring
+            // six-program residency. We do not fake its contents here; V5/P5
+            // production code already owns correctness. This experiment models
+            // the private-ANE load/eval/unload cost after the cache is warm.
             lines.append("")
-            lines.append("MICHELIN SCHEDULER SCORECARD — steady pass #1")
-            for (rank, result) in ranked.enumerated() {
-                let s = result.steady
+            lines.append("EXPERIMENT C — allocate real CrossKVCache, then mirrored kvWarm6 sweep")
+            guard let kvMemoryModel = CrossKVCache(device: context.device) else {
+                throw AnimapkError.validation(
+                    "V6 could not allocate the production CrossKVCache memory model")
+            }
+            defer { withExtendedLifetime(kvMemoryModel) {} }
+            lines.append("KV memory model allocated: \(MemorySnapshot.capture(context: context).compact)")
+            let warmOrder = [4, 6, 8, 10, 10, 8, 6, 4]
+            var warmResults: [VariantResult] = []
+            for (index, pinned) in warmOrder.enumerated() {
+                let result = try runScheduler(
+                    profile: .kvWarm6, pinned: pinned, asyncRetire: false,
+                    loader: loader, surfaces: surfaces, context: context,
+                    pressure: pressure)
+                warmResults.append(result)
+                lines.append("C\(index + 1) \(variantSummary(result))")
+                guard !pressure.criticalSeen else {
+                    throw AnimapkError.validation(
+                        "critical pressure in kvWarm6 pinned sweep at \(pinned)+3")
+                }
+                try? await Task.sleep(nanoseconds: 175_000_000)
+            }
+            appendMirroredScorecard(
+                title: "KV-WARM6 ORDER-CONTROLLED SCORECARD",
+                results: warmResults, lines: &lines)
+
+            lines.append("")
+            lines.append("EXPERIMENT D — kvWarm6 8+3 synchronous vs bounded retire1 (ABBA, <=72 programs)")
+            let warmRetireOrder = [false, true, true, false]
+            var warmRetireResults: [VariantResult] = []
+            for (index, asyncRetire) in warmRetireOrder.enumerated() {
+                let result = try runScheduler(
+                    profile: .kvWarm6, pinned: 8, asyncRetire: asyncRetire,
+                    loader: loader, surfaces: surfaces, context: context,
+                    pressure: pressure)
+                warmRetireResults.append(result)
+                lines.append("D\(index + 1) \(variantSummary(result))")
+                guard !pressure.criticalSeen else {
+                    throw AnimapkError.validation(
+                        "critical pressure in kvWarm6 retirement experiment")
+                }
+                try? await Task.sleep(nanoseconds: 175_000_000)
+            }
+            appendRetireScorecard(
+                title: "KV-WARM6 RETIRE SCORECARD",
+                results: warmRetireResults, lines: &lines)
+
+            let bestFull = bestMirrored(results: fullResults)
+            let bestWarm = bestMirrored(results: warmResults)
+            lines.append("")
+            lines.append("V6 RECIPE ESTIMATE — projection traversal only")
+            if let bestFull, let bestWarm {
+                let first = median(bestFull.map(\.stats.wall))
+                let later = median(bestWarm.map(\.stats.wall))
+                let projection8 = first + 7.0 * later
                 lines.append(
-                    "#\(rank + 1) \(result.name): wall=\(ms(s.wall))ms (\(ms(s.wall / Double(blockCount)))ms/block) " +
-                    "load=\(ms(s.loadWall))ms unload=\(ms(s.unloadWall))ms eval=\(ms(s.evalWall))ms wait=\(ms(s.waitWall))ms " +
-                    "avgLoad=\(ms(s.avgLoad)) avgUnload=\(ms(s.avgUnload)) maxResident=\(s.maxResident) blocks/\(s.maxResident * programsPerBlock) programs newPressure=\(result.newPressureIssues)")
-            }
-            if let winner = ranked.first {
-                lines.append("SCHEDULER WINNER: \(winner.name) — projected 8-step projection traversal \(seconds(winner.steady.wall * 8))s.")
+                    "best full8 pin=\(bestFull[0].pinned): median=\(ms(first))ms/traversal")
+                lines.append(
+                    "best kvWarm6 pin=\(bestWarm[0].pinned): median=\(ms(later))ms/traversal")
+                lines.append(
+                    "first-step full8 + seven KV-warm6 traversals = \(seconds(projection8))s projection-only.")
+                lines.append(
+                    "Do NOT compare this directly with full generation time; Metal attention/AdaLN/GELU/final-layer work is outside this probe.")
             }
 
             lines.append("")
-            lines.append("EXPERIMENT B — multifunction / private ANE procedure POC")
-            await runMultiProcedurePOC(lines: &lines)
-
+            lines.append("MULTI-PROCEDURE STATUS")
+            lines.append(
+                "V5 public MLProgram had two functions, but the current private constructor is Espresso-specific and failed looking for model.espresso.net.")
+            lines.append(
+                "V6 intentionally does not repeat that invalid MLProgram->Espresso load. Next procedure work must target a true Espresso/ANEF multi-procedure container or a different private constructor.")
             lines.append("")
-            lines.append("DECISION GUIDE")
-            lines.append("- 0+3 wins with ~zero post-destroy wait and no pressure => prefer the 24-program ring; pinning is unnecessary.")
-            lines.append("- 2+3 materially wins with no new pressure => a 40-program conservative pinned-prefix fallback is justified.")
-            lines.append("- If unload is ~load-eval and 0+2 becomes competitive, two slots may be enough once unload is ordered correctly.")
-            lines.append("- Public functions=2 AND private procedures>=2 => immediately scale POC to one 8-procedure transformer block.")
-            lines.append("- Public functions=2 but private procedures<2/fail => public Core ML multifunction does not map directly to one private ANEF load; keep scheduler work and investigate Espresso/ANEF procedure packaging separately.")
-            lines.append("final: \(MemorySnapshot.capture(context: context).compact) | \(pressure.compact) | \(loader.tracker.compact)")
+            lines.append(
+                "final: \(MemorySnapshot.capture(context: context).compact) | \(pressure.compact) | \(loader.tracker.compact)")
         } catch {
             lines.append("ERROR: \(error.localizedDescription)")
             lines.append("pressure at error: \(pressure.compact)")
         }
-
         return lines.joined(separator: "\n")
     }
 
-    private static func preconditionRuntime(
+    private static func precondition(
         loader: SharedLoader,
         surfaces: ANEW8DiTSurfaces,
-        context: MetalContext,
         pressure: PressureRecorder,
+        context: MetalContext,
         lines: inout [String]
     ) throws -> PassStats {
-        guard loader.tracker.currentCount == 0 else {
-            throw AnimapkError.validation("V5 precondition started with residual residency")
+        guard loader.tracker.currentPrograms == 0 else {
+            throw AnimapkError.validation("V6 precondition started with residual residency")
         }
         loader.tracker.resetPeak()
         var stats = PassStats()
         let started = ProcessInfo.processInfo.systemUptime
-
         for block in 0..<blockCount {
-            let loaded = try loader.load(block: block)
+            let loaded = try loader.load(block: block, profile: .full8)
             recordLoad(loaded, into: &stats)
             let eval = try evaluateBlock(loaded.models, surfaces: surfaces)
             stats.evalANE += eval.ane
             stats.evalWall += eval.wall
-            let unload = try loaded.destroyTimed()
+            let unload = loaded.destroyTimed()
             recordUnload(unload, into: &stats)
-            stats.maxResident = max(stats.maxResident, loader.tracker.peakCount)
-
-            if block < 2 || block % 4 == 3 || block == blockCount - 1 {
+            stats.peakPrograms = max(stats.peakPrograms, loader.tracker.peakPrograms)
+            stats.peakBlocks = max(stats.peakBlocks, loader.tracker.peakBlocks)
+            if block < 2 || block % 7 == 6 || block == blockCount - 1 {
                 lines.append(
-                    "pre b\(two(block)) load=\(ms(loaded.loadWall))ms ANE=\(ms(loaded.loadANE)) host=\(ms(loaded.hostLoadWall)) " +
-                    "eval=\(ms(eval.wall))ms unload=\(ms(unload.wall))ms ANE=\(ms(unload.ane)) \(loader.tracker.compact) | \(MemorySnapshot.capture(context: context).compact)")
+                    "pre b\(two(block)) load=\(ms(loaded.loadWall)) eval=\(ms(eval.wall)) unload=\(ms(unload.wall)) \(loader.tracker.compact) | \(MemorySnapshot.capture(context: context).compact)")
             }
             if pressure.criticalSeen {
-                throw AnimapkError.validation("critical pressure while preconditioning b\(block)")
+                throw AnimapkError.validation(
+                    "critical pressure while preconditioning b\(block)")
             }
         }
         stats.wall = elapsedMS(since: started)
-        stats.maxResident = max(stats.maxResident, loader.tracker.peakCount)
         return stats
     }
 
-    /// Continuous unpinned ring. `depth=2` keeps current+next; `depth=3` keeps
-    /// current+next+next2. A single serial loader preserves the private-runtime
-    /// safety property: model loads themselves are never concurrent.
-    private static func runUnpinned(
-        depth: Int,
+    /// Generic bounded scheduler used for every V6 comparison. Pinned blocks
+    /// survive the measured pass; streamed blocks use one serial load queue.
+    /// With retire1, exactly one streamed block may be retiring asynchronously,
+    /// so peak program count is (pinned + depth + 1) * profile.programs.
+    private static func runScheduler(
+        profile: Profile,
+        pinned: Int,
+        asyncRetire: Bool,
         loader: SharedLoader,
         surfaces: ANEW8DiTSurfaces,
         context: MetalContext,
-        pressure: PressureRecorder,
-        lines: inout [String]
+        pressure: PressureRecorder
     ) throws -> VariantResult {
-        guard depth == 2 || depth == 3 else {
-            throw AnimapkError.validation("V5 unpinned depth must be 2 or 3")
+        guard (0..<blockCount).contains(pinned) else {
+            throw AnimapkError.validation("V6 invalid pinned count \(pinned)")
         }
-        guard loader.tracker.currentCount == 0 else {
-            throw AnimapkError.validation("0+\(depth) started with residual residency")
+        let requestedPeakBlocks = pinned + depth + (asyncRetire ? 1 : 0)
+        let requestedPeakPrograms = requestedPeakBlocks * profile.programs
+        guard requestedPeakPrograms <= programCeiling else {
+            throw AnimapkError.validation(
+                "V6 recipe \(profile.label) \(pinned)+3\(asyncRetire ? "+retire1" : "") requests \(requestedPeakPrograms) programs")
         }
-        loader.tracker.resetPeak()
-        let mark = pressure.mark()
-        let queue = DispatchQueue(
-            label: "com.invisiblestrangler.AnimaXS.ane-v5-zero-\(depth)", qos: .userInitiated)
-        var stats = Array(repeating: PassStats(), count: measuredPasses)
-        let total = measuredPasses * blockCount
-
-        let entryStart = ProcessInfo.processInfo.systemUptime
-        var current: LoadedBlock? = try loader.load(block: 0)
-        let entryWall = elapsedMS(since: entryStart)
-        lines.append("0+\(depth) entry b00 load=\(ms(entryWall))ms ANE=\(ms(current?.loadANE ?? 0))")
-
-        var futures: [Int: LoadFuture] = [:]
-        if total > 1 {
-            for position in 1..<min(depth, total) {
-                futures[position] = LoadFuture(
-                    position: position, block: position % blockCount,
-                    loader: loader, queue: queue)
-            }
-        }
-
-        for position in 0..<total {
-            let pass = position / blockCount
-            let block = position % blockCount
-            guard let active = current, active.block == block else {
-                throw AnimapkError.validation("0+\(depth) current mismatch at position \(position)")
-            }
-            let stageStart = ProcessInfo.processInfo.systemUptime
-            let eval = try evaluateBlock(active.models, surfaces: surfaces)
-            stats[pass].evalANE += eval.ane
-            stats[pass].evalWall += eval.wall
-
-            let unload = try active.destroyTimed()
-            recordUnload(unload, into: &stats[pass])
-
-            var next: LoadedBlock?
-            var wait = 0.0
-            let nextPosition = position + 1
-            if nextPosition < total {
-                guard let future = futures.removeValue(forKey: nextPosition) else {
-                    throw AnimapkError.validation("0+\(depth) missing future for position \(nextPosition)")
-                }
-                let waitStart = ProcessInfo.processInfo.systemUptime
-                next = try future.wait()
-                wait = elapsedMS(since: waitStart)
-                let targetPass = nextPosition / blockCount
-                if let next { recordLoad(next, into: &stats[targetPass]) }
-
-                let newPosition = position + depth
-                if newPosition < total {
-                    futures[newPosition] = LoadFuture(
-                        position: newPosition, block: newPosition % blockCount,
-                        loader: loader, queue: queue)
-                }
-            }
-
-            stats[pass].waitWall += wait
-            stats[pass].maxWait = max(stats[pass].maxWait, wait)
-            stats[pass].wall += elapsedMS(since: stageStart)
-            stats[pass].maxResident = max(stats[pass].maxResident, loader.tracker.peakCount)
-
-            if pass == 1 {
-                lines.append(
-                    "0+\(depth) p1 b\(two(block)) eval=\(ms(eval.wall)) unload=\(ms(unload.wall)) unloadCallSum=\(ms(unload.ane)) " +
-                    "wait=\(ms(wait)) stage=\(ms(elapsedMS(since: stageStart))) \(loader.tracker.compact)")
-            }
-            current = next
-            if pressure.criticalSeen {
-                throw AnimapkError.validation("critical pressure in 0+\(depth), pass \(pass), b\(block)")
-            }
-        }
-
-        current?.destroyUntimed()
-        for future in futures.values {
-            let loaded = try future.wait()
-            loaded.destroyUntimed()
-        }
-        guard loader.tracker.currentCount == 0 else {
-            throw AnimapkError.validation("0+\(depth) leaked \(loader.tracker.currentCount) blocks")
-        }
-        for index in stats.indices {
-            stats[index].maxResident = max(stats[index].maxResident, min(loader.tracker.peakCount, depth))
-        }
-        return VariantResult(
-            name: "0+\(depth)", maxPrograms: depth * programsPerBlock,
-            pinSetupWall: 0, passes: stats,
-            newPressureIssues: pressure.newIssues(since: mark))
-    }
-
-    private static func runTwoPinnedThreeStream(
-        loader: SharedLoader,
-        surfaces: ANEW8DiTSurfaces,
-        context: MetalContext,
-        pressure: PressureRecorder,
-        lines: inout [String]
-    ) throws -> VariantResult {
-        guard loader.tracker.currentCount == 0 else {
-            throw AnimapkError.validation("2+3 started with residual residency")
+        guard loader.tracker.currentPrograms == 0 else {
+            throw AnimapkError.validation(
+                "V6 scheduler started with residual residency: \(loader.tracker.compact)")
         }
         loader.tracker.resetPeak()
         let mark = pressure.mark()
 
-        var pinned: [LoadedBlock] = []
+        var pinnedBlocks: [LoadedBlock] = []
         let pinStart = ProcessInfo.processInfo.systemUptime
-        for block in 0..<2 {
-            let loaded = try loader.load(block: block)
-            pinned.append(loaded)
-            lines.append("2+3 pin b\(two(block)) load=\(ms(loaded.loadWall))ms ANE=\(ms(loaded.loadANE))")
+        for block in 0..<pinned {
+            pinnedBlocks.append(try loader.load(block: block, profile: profile))
         }
         let pinSetupWall = elapsedMS(since: pinStart)
-        let queue = DispatchQueue(
-            label: "com.invisiblestrangler.AnimaXS.ane-v5-two-three", qos: .userInitiated)
-        var passStats: [PassStats] = []
 
-        for pass in 0..<measuredPasses {
-            var stats = PassStats()
-            let passStart = ProcessInfo.processInfo.systemUptime
-            var futures: [Int: LoadFuture] = [:]
+        let loadQueue = DispatchQueue(
+            label: "com.invisiblestrangler.AnimaXS.v6-load-\(profile.rawValue)-\(pinned)-\(asyncRetire)",
+            qos: .userInitiated)
+        let retireQueue = DispatchQueue(
+            label: "com.invisiblestrangler.AnimaXS.v6-retire-\(profile.rawValue)-\(pinned)",
+            qos: .userInitiated)
 
-            futures[2] = LoadFuture(position: 2, block: 2, loader: loader, queue: queue)
-            futures[3] = LoadFuture(position: 3, block: 3, loader: loader, queue: queue)
-            futures[4] = LoadFuture(position: 4, block: 4, loader: loader, queue: queue)
-
-            for block in 0..<2 {
-                let eval = try evaluateBlock(pinned[block].models, surfaces: surfaces)
-                stats.evalANE += eval.ane
-                stats.evalWall += eval.wall
-                stats.maxResident = max(stats.maxResident, loader.tracker.peakCount)
-                if pass == 1 {
-                    lines.append("2+3 p1 pinned b\(two(block)) eval=\(ms(eval.wall))ms \(loader.tracker.compact)")
-                }
+        var stats = PassStats()
+        var futures: [Int: LoadFuture] = [:]
+        if pinned < blockCount {
+            for block in pinned..<min(blockCount, pinned + depth) {
+                futures[block] = LoadFuture(
+                    block: block, profile: profile, loader: loader, queue: loadQueue)
             }
-
-            var current: LoadedBlock?
-            for block in 2..<blockCount {
-                if current == nil {
-                    guard let future = futures.removeValue(forKey: block) else {
-                        throw AnimapkError.validation("2+3 missing future for b\(block)")
-                    }
-                    let waitStart = ProcessInfo.processInfo.systemUptime
-                    current = try future.wait()
-                    let wait = elapsedMS(since: waitStart)
-                    stats.waitWall += wait
-                    stats.maxWait = max(stats.maxWait, wait)
-                    if let current { recordLoad(current, into: &stats) }
-                }
-                guard let active = current, active.block == block else {
-                    throw AnimapkError.validation("2+3 current mismatch at b\(block)")
-                }
-
-                let stageStart = ProcessInfo.processInfo.systemUptime
-                let eval = try evaluateBlock(active.models, surfaces: surfaces)
-                stats.evalANE += eval.ane
-                stats.evalWall += eval.wall
-                let unload = try active.destroyTimed()
-                recordUnload(unload, into: &stats)
-
-                var next: LoadedBlock?
-                var wait = 0.0
-                let nextBlock = block + 1
-                if nextBlock < blockCount {
-                    guard let future = futures.removeValue(forKey: nextBlock) else {
-                        throw AnimapkError.validation("2+3 missing future for next b\(nextBlock)")
-                    }
-                    let waitStart = ProcessInfo.processInfo.systemUptime
-                    next = try future.wait()
-                    wait = elapsedMS(since: waitStart)
-                    if let next { recordLoad(next, into: &stats) }
-
-                    let newBlock = block + 3
-                    if newBlock < blockCount {
-                        futures[newBlock] = LoadFuture(
-                            position: newBlock, block: newBlock,
-                            loader: loader, queue: queue)
-                    }
-                }
-
-                stats.waitWall += wait
-                stats.maxWait = max(stats.maxWait, wait)
-                stats.maxResident = max(stats.maxResident, loader.tracker.peakCount)
-                if pass == 1 {
-                    lines.append(
-                        "2+3 p1 stream b\(two(block)) eval=\(ms(eval.wall)) unload=\(ms(unload.wall)) unloadCallSum=\(ms(unload.ane)) " +
-                        "wait=\(ms(wait)) stage=\(ms(elapsedMS(since: stageStart))) \(loader.tracker.compact)")
-                }
-                current = next
-                if pressure.criticalSeen {
-                    throw AnimapkError.validation("critical pressure in 2+3 pass \(pass), b\(block)")
-                }
-            }
-
-            current?.destroyUntimed()
-            for future in futures.values {
-                let loaded = try future.wait()
-                loaded.destroyUntimed()
-            }
-            stats.wall = elapsedMS(since: passStart)
-            stats.maxResident = max(stats.maxResident, loader.tracker.peakCount)
-            passStats.append(stats)
         }
 
-        for block in pinned { block.destroyUntimed() }
-        pinned.removeAll()
-        guard loader.tracker.currentCount == 0 else {
-            throw AnimapkError.validation("2+3 leaked \(loader.tracker.currentCount) blocks")
+        let passStart = ProcessInfo.processInfo.systemUptime
+
+        // Pinned evaluation overlaps the prologue loader.
+        for loaded in pinnedBlocks {
+            let eval = try evaluateBlock(loaded.models, surfaces: surfaces)
+            stats.evalANE += eval.ane
+            stats.evalWall += eval.wall
         }
+
+        var retiring: RetireFuture?
+        for block in pinned..<blockCount {
+            guard let future = futures.removeValue(forKey: block) else {
+                throw AnimapkError.validation(
+                    "V6 missing load future for streamed block \(block)")
+            }
+            let waitStart = ProcessInfo.processInfo.systemUptime
+            let active = try future.wait()
+            let wait = elapsedMS(since: waitStart)
+            stats.nextWait += wait
+            stats.maxNextWait = max(stats.maxNextWait, wait)
+            recordLoad(active, into: &stats)
+
+            let eval = try evaluateBlock(active.models, surfaces: surfaces)
+            stats.evalANE += eval.ane
+            stats.evalWall += eval.wall
+
+            if asyncRetire {
+                if let previous = retiring {
+                    let retireWaitStart = ProcessInfo.processInfo.systemUptime
+                    let retired = try previous.wait()
+                    let retireWait = elapsedMS(since: retireWaitStart)
+                    stats.retireBackpressure += retireWait
+                    stats.maxRetireWait = max(stats.maxRetireWait, retireWait)
+                    recordUnload(retired, into: &stats)
+                }
+                retiring = RetireFuture(block: active, queue: retireQueue)
+            } else {
+                recordUnload(active.destroyTimed(), into: &stats)
+            }
+
+            let newBlock = block + depth
+            if newBlock < blockCount {
+                futures[newBlock] = LoadFuture(
+                    block: newBlock, profile: profile,
+                    loader: loader, queue: loadQueue)
+            }
+
+            stats.peakPrograms = max(stats.peakPrograms, loader.tracker.peakPrograms)
+            stats.peakBlocks = max(stats.peakBlocks, loader.tracker.peakBlocks)
+            if pressure.criticalSeen {
+                throw AnimapkError.validation(
+                    "critical pressure in \(profile.label) \(pinned)+3")
+            }
+        }
+
+        if let retiring {
+            let drainStart = ProcessInfo.processInfo.systemUptime
+            let retired = try retiring.wait()
+            stats.retireDrain += elapsedMS(since: drainStart)
+            recordUnload(retired, into: &stats)
+        }
+
+        stats.wall = elapsedMS(since: passStart)
+        stats.peakPrograms = max(stats.peakPrograms, loader.tracker.peakPrograms)
+        stats.peakBlocks = max(stats.peakBlocks, loader.tracker.peakBlocks)
+
+        let expectedPinnedPrograms = pinned * profile.programs
+        guard loader.tracker.currentPrograms == expectedPinnedPrograms else {
+            throw AnimapkError.validation(
+                "V6 streamed pass leaked residency: expected \(expectedPinnedPrograms), got \(loader.tracker.compact)")
+        }
+
+        for block in pinnedBlocks { block.destroyUntimed() }
+        pinnedBlocks.removeAll()
+        guard loader.tracker.currentPrograms == 0 else {
+            throw AnimapkError.validation(
+                "V6 scheduler cleanup leaked \(loader.tracker.compact)")
+        }
+
         return VariantResult(
-            name: "2+3", maxPrograms: 40,
-            pinSetupWall: pinSetupWall, passes: passStats,
-            newPressureIssues: pressure.newIssues(since: mark))
-    }
-
-    private static func runMultiProcedurePOC(lines: inout [String]) async {
-        guard let templateURL = Bundle.main.url(
-            forResource: "Conv2048W8Template", withExtension: "bundle") else {
-            lines.append("multifunction: SKIP — Conv2048W8Template.bundle missing")
-            return
-        }
-        let assetURL = templateURL.appendingPathComponent("V5TwoProcedure.mlmodelc", isDirectory: true)
-        guard FileManager.default.fileExists(atPath: assetURL.path) else {
-            lines.append("multifunction: SKIP — CI-generated V5TwoProcedure.mlmodelc missing from bundle")
-            return
-        }
-
-        do {
-            let asset = try MLModelAsset(url: assetURL)
-            let names = try await asset.functionNames
-            lines.append("public MLModelAsset functions=\(names.count) names=\(names.sorted())")
-        } catch {
-            lines.append("public MLModelAsset ERROR: \(error.localizedDescription)")
-        }
-
-        lines.append(A12ANEMultiProcedureProbe(assetURL, 64, 64))
-    }
-
-    private static func appendVariantSummary(
-        _ result: VariantResult,
-        context: MetalContext,
-        pressure: PressureRecorder,
-        lines: inout [String]
-    ) {
-        if result.pinSetupWall > 0 {
-            lines.append("\(result.name) one-time pin setup wall=\(ms(result.pinSetupWall))ms")
-        }
-        for (pass, stats) in result.passes.enumerated() {
-            lines.append(passSummary(name: result.name, pass: pass, stats: stats))
-        }
-        let s = result.steady
-        lines.append(
-            "\(result.name) STEADY: wall=\(ms(s.wall))ms avg=\(ms(s.wall / Double(blockCount)))ms/block " +
-            "load=\(ms(s.loadWall)) unload=\(ms(s.unloadWall)) eval=\(ms(s.evalWall)) wait=\(ms(s.waitWall)) " +
-            "maxResident=\(s.maxResident) blocks/\(s.maxResident * programsPerBlock) programs newPressure=\(result.newPressureIssues) | " +
-            "\(MemorySnapshot.capture(context: context).compact) | \(pressure.compact)")
-    }
-
-    private static func passSummary(name: String, pass: Int, stats: PassStats) -> String {
-        "\(name) pass#\(pass): wall=\(ms(stats.wall))ms loads=\(stats.loads) loadANE=\(ms(stats.loadANE)) loadWall=\(ms(stats.loadWall)) host=\(ms(stats.loadHost)) " +
-        "evalANE=\(ms(stats.evalANE)) evalWall=\(ms(stats.evalWall)) unloads=\(stats.unloads) unloadCallSum=\(ms(stats.unloadANE)) unloadWall=\(ms(stats.unloadWall)) " +
-        "wait=\(ms(stats.waitWall)) avgLoad=\(ms(stats.avgLoad)) avgUnload=\(ms(stats.avgUnload)) maxLoad=\(ms(stats.maxLoad)) maxUnload=\(ms(stats.maxUnload)) maxWait=\(ms(stats.maxWait)) maxResident=\(stats.maxResident)"
-    }
-
-    private static func recordLoad(_ loaded: LoadedBlock, into stats: inout PassStats) {
-        stats.loadANE += loaded.loadANE
-        stats.loadWall += loaded.loadWall
-        stats.loadHost += loaded.hostLoadWall
-        stats.loads += 1
-        stats.maxLoad = max(stats.maxLoad, loaded.loadWall)
-    }
-
-    private static func recordUnload(_ unload: (ane: Double, wall: Double), into stats: inout PassStats) {
-        stats.unloadANE += unload.ane
-        stats.unloadWall += unload.wall
-        stats.unloads += 1
-        stats.maxUnload = max(stats.maxUnload, unload.wall)
+            profile: profile, pinned: pinned, asyncRetire: asyncRetire,
+            pinSetupWall: pinSetupWall, stats: stats,
+            newPressure: pressure.newIssues(since: mark),
+            memory: MemorySnapshot.capture(context: context))
     }
 
     private static func evaluateBlock(
-        _ models: ANEW8DiTModels,
-        surfaces: ANEW8DiTSurfaces
+        _ models: ModelSet, surfaces: ANEW8DiTSurfaces
     ) throws -> (ane: Double, wall: Double) {
         let started = ProcessInfo.processInfo.systemUptime
         var totalANE = 0.0
@@ -849,28 +866,126 @@ enum ANERingProbe {
             _ input: A12ANESurface,
             _ output: A12ANESurface
         ) throws {
-            var ms = 0.0
-            _ = try model.evaluateInput(input, output: output, milliseconds: &ms)
-            totalANE += ms
+            var milliseconds = 0.0
+            _ = try model.evaluateInput(
+                input, output: output, milliseconds: &milliseconds)
+            totalANE += milliseconds
         }
 
         try projection(models.selfO, surfaces.tokenInput, surfaces.tokenOutput)
         try projection(models.crossQ, surfaces.tokenInput, surfaces.q)
-        try projection(models.crossK, surfaces.contextInput, surfaces.contextK)
-        try projection(models.crossV, surfaces.contextInput, surfaces.contextV)
+        if let crossK = models.crossK {
+            try projection(crossK, surfaces.contextInput, surfaces.contextK)
+        }
+        if let crossV = models.crossV {
+            try projection(crossV, surfaces.contextInput, surfaces.contextV)
+        }
         try projection(models.crossO, surfaces.tokenInput, surfaces.tokenOutput)
         try projection(models.mlpUp, surfaces.tokenInput, surfaces.hidden)
         try projection(models.mlpDown, surfaces.hidden, surfaces.tokenOutput)
         return (totalANE, elapsedMS(since: started))
     }
 
+    private static func recordLoad(_ loaded: LoadedBlock, into stats: inout PassStats) {
+        stats.loadANE += loaded.loadANE
+        stats.loadWall += loaded.loadWall
+        stats.loadHost += loaded.hostLoadWall
+        stats.loads += 1
+        stats.maxLoad = max(stats.maxLoad, loaded.loadWall)
+    }
+
+    private static func recordUnload(
+        _ unload: (callSum: Double, wall: Double), into stats: inout PassStats
+    ) {
+        stats.unloadCallSum += unload.callSum
+        stats.unloadWall += unload.wall
+        stats.unloads += 1
+        stats.maxUnload = max(stats.maxUnload, unload.wall)
+    }
+
+    private static func variantSummary(_ result: VariantResult) -> String {
+        let s = result.stats
+        return "\(result.tag): wall=\(ms(s.wall))ms avg=\(ms(s.wall / Double(blockCount)))ms/block "
+            + "pinSetup=\(ms(result.pinSetupWall)) load=\(ms(s.loadWall)) unload=\(ms(s.unloadWall)) "
+            + "eval=\(ms(s.evalWall)) nextWait=\(ms(s.nextWait)) retireWait=\(ms(s.retireBackpressure)) "
+            + "retireDrain=\(ms(s.retireDrain)) avgLoad=\(ms(s.avgLoad)) avgUnload=\(ms(s.avgUnload)) "
+            + "peak=\(s.peakBlocks) blocks/\(s.peakPrograms) programs pressure+\(result.newPressure) | \(result.memory.compact)"
+    }
+
+    private static func summary(_ name: String, _ s: PassStats) -> String {
+        "\(name): wall=\(ms(s.wall))ms loads=\(s.loads) loadANE=\(ms(s.loadANE)) loadWall=\(ms(s.loadWall)) "
+            + "evalANE=\(ms(s.evalANE)) evalWall=\(ms(s.evalWall)) unloads=\(s.unloads) "
+            + "unloadCallSum=\(ms(s.unloadCallSum)) unloadWall=\(ms(s.unloadWall)) "
+            + "avgLoad=\(ms(s.avgLoad)) avgUnload=\(ms(s.avgUnload)) peak=\(s.peakBlocks) blocks/\(s.peakPrograms) programs"
+    }
+
+    private static func appendMirroredScorecard(
+        title: String, results: [VariantResult], lines: inout [String]
+    ) {
+        lines.append(title)
+        let pins = Array(Set(results.map(\.pinned))).sorted()
+        var ranked: [(Int, Double, Double, Int)] = []
+        for pinned in pins {
+            let group = results.filter { $0.pinned == pinned }
+            let wall = median(group.map(\.stats.wall))
+            let pin = median(group.map(\.pinSetupWall))
+            let pressure = group.map(\.newPressure).max() ?? 0
+            ranked.append((pinned, wall, pin, pressure))
+        }
+        ranked.sort { $0.1 < $1.1 }
+        for (rank, item) in ranked.enumerated() {
+            lines.append(
+                "#\(rank + 1) pin=\(item.0): medianWall=\(ms(item.1))ms (\(ms(item.1 / Double(blockCount)))ms/block) medianPinSetup=\(ms(item.2))ms maxPressure+\(item.3)")
+        }
+    }
+
+    private static func appendRetireScorecard(
+        title: String, results: [VariantResult], lines: inout [String]
+    ) {
+        lines.append(title)
+        for mode in [false, true] {
+            let group = results.filter { $0.asyncRetire == mode }
+            guard !group.isEmpty else { continue }
+            lines.append(
+                "\(mode ? "retire1" : "sync"): medianWall=\(ms(median(group.map(\.stats.wall))))ms "
+                + "medianRetireBackpressure=\(ms(median(group.map(\.stats.retireBackpressure))))ms "
+                + "medianNextWait=\(ms(median(group.map(\.stats.nextWait))))ms "
+                + "peakPrograms=\(group.map(\.stats.peakPrograms).max() ?? 0) maxPressure+\(group.map(\.newPressure).max() ?? 0)")
+        }
+    }
+
+    private static func bestMirrored(results: [VariantResult]) -> [VariantResult]? {
+        let pins = Array(Set(results.map(\.pinned)))
+        let groups = pins.map { pin in results.filter { $0.pinned == pin } }
+        return groups.min {
+            median($0.map(\.stats.wall)) < median($1.map(\.stats.wall))
+        }
+    }
+
+    private static func median(_ values: [Double]) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let mid = sorted.count / 2
+        if sorted.count % 2 == 1 { return sorted[mid] }
+        return (sorted[mid - 1] + sorted[mid]) / 2.0
+    }
+
     private static func elapsedMS(since start: TimeInterval) -> Double {
         (ProcessInfo.processInfo.systemUptime - start) * 1_000
     }
 
-    private static func ms(_ value: Double) -> String { String(format: "%.1f", value) }
-    private static func seconds(_ value: Double) -> String { String(format: "%.2f", value / 1_000) }
-    private static func two(_ value: Int) -> String { String(format: "%02d", value) }
+    private static func ms(_ value: Double) -> String {
+        String(format: "%.1f", value)
+    }
+
+    private static func seconds(_ value: Double) -> String {
+        String(format: "%.2f", value / 1_000.0)
+    }
+
+    private static func two(_ value: Int) -> String {
+        String(format: "%02d", value)
+    }
+
     private static func mb(_ bytes: UInt64) -> String {
         String(format: "%.0fMB", Double(bytes) / 1_048_576.0)
     }
@@ -882,7 +997,8 @@ enum ANERingProbe {
             MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
         let result: kern_return_t = withUnsafeMutablePointer(to: &info) { pointer in
             pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { rebound in
-                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), rebound, &count)
+                task_info(
+                    mach_task_self_, task_flavor_t(TASK_VM_INFO), rebound, &count)
             }
         }
         guard result == KERN_SUCCESS else { return nil }
@@ -890,65 +1006,5 @@ enum ANERingProbe {
         #else
         return nil
         #endif
-    }
-}
-
-// MARK: - V5 existing-bridge diagnostic shims
-
-private extension A12ANEProjectionModel {
-    func diagnosticDestroyMilliseconds() -> Double {
-        let started = ProcessInfo.processInfo.systemUptime
-        invalidate()
-        return (ProcessInfo.processInfo.systemUptime - started) * 1_000
-    }
-}
-
-private extension A12ANEQKVModel {
-    func diagnosticDestroyMilliseconds() -> Double {
-        let started = ProcessInfo.processInfo.systemUptime
-        invalidate()
-        return (ProcessInfo.processInfo.systemUptime - started) * 1_000
-    }
-}
-
-private func A12ANEMultiProcedureProbe(
-    _ compiledModelURL: URL,
-    _ channels: UInt,
-    _ spatial: UInt
-) -> String {
-    let fileManager = FileManager.default
-    let cacheKey = "v5-two-procedure-poc"
-    do {
-        guard let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first else {
-            return "private multifunction ERROR: caches directory unavailable"
-        }
-        let base = caches.appendingPathComponent("AnimaXS-ANE", isDirectory: true)
-        try fileManager.createDirectory(at: base, withIntermediateDirectories: true)
-        let destination = base.appendingPathComponent("\(cacheKey).mlmodelc", isDirectory: true)
-        if fileManager.fileExists(atPath: destination.path) {
-            try fileManager.removeItem(at: destination)
-        }
-        try fileManager.copyItem(at: compiledModelURL, to: destination)
-
-        let loadStarted = ProcessInfo.processInfo.systemUptime
-        let model = try A12ANEProjectionModel(
-            preparedInputChannels: channels,
-            outputChannels: channels,
-            spatial: spatial,
-            label: "v5_two_procedure",
-            cacheKey: cacheKey)
-        let loadWall = (ProcessInfo.processInfo.systemUptime - loadStarted) * 1_000
-        let count = model.procedureCount
-        let summary = model.procedureSummary
-        let loadANE = model.loadMilliseconds
-        let unloadStarted = ProcessInfo.processInfo.systemUptime
-        model.invalidate()
-        let unloadWall = (ProcessInfo.processInfo.systemUptime - unloadStarted) * 1_000
-        try? fileManager.removeItem(at: destination)
-        return String(
-            format: "private multifunction: procedures=%lu summary=%@ loadANE=%.1fms loadWall=%.1fms unloadWall=%.1fms",
-            count, summary, loadANE, loadWall, unloadWall)
-    } catch {
-        return "private multifunction ERROR: \(error.localizedDescription)"
     }
 }
