@@ -471,7 +471,7 @@ struct DiagnosticsView: View {
     @ViewBuilder
     private var aneResidencyProbeSection: some View {
         Section("ANE residency / load probe") {
-            Text("Device-only research probe for the ANE-native W8 backend. It progressively loads the same 8 ANE programs per block used by production, evaluates them once, records app/Metal memory plus system pressure events, releases everything, then reloads one complete block repeatedly. It never runs automatically and does not modify model weights.")
+            Text("Device-only ANE experiment suite v2. Separates program-count vs logical-byte residency pressure, measures same-object vs reconstructed reload, tests load/evaluate overlap, and stops at the first pathological-load signal instead of intentionally driving into the known helper-failure zone. It never runs automatically or modifies model weights.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Button(isRunning && currentTest == "ANE residency/load probe"
@@ -686,6 +686,8 @@ struct DiagnosticsView: View {
 /// research probe does not alter project/source membership or production
 /// generation behavior.
 private enum ANEResidencyProbe {
+    private static let mib = 1_048_576.0
+
     private struct MemorySnapshot {
         let available: UInt64
         let footprint: UInt64?
@@ -713,6 +715,7 @@ private enum ANEResidencyProbe {
         private var observer: NSObjectProtocol?
         private var dispatchEvents: [String] = []
         private var uiWarningCount = 0
+        private var issueSignals = 0
         private var didSeeCritical = false
         private var stopped = false
 
@@ -730,6 +733,7 @@ private enum ANEResidencyProbe {
                 let stamp = String(format: "%.3f", ProcessInfo.processInfo.systemUptime)
                 self.lock.lock()
                 self.dispatchEvents.append("\(stamp):\(labels.joined(separator: "+"))")
+                if event.contains(.warning) || event.contains(.critical) { self.issueSignals += 1 }
                 if event.contains(.critical) { self.didSeeCritical = true }
                 self.lock.unlock()
             }
@@ -740,9 +744,15 @@ private enum ANEResidencyProbe {
                 guard let self else { return }
                 self.lock.lock()
                 self.uiWarningCount += 1
+                self.issueSignals += 1
                 self.lock.unlock()
             }
             source.resume()
+        }
+
+        var issueCount: Int {
+            lock.lock(); defer { lock.unlock() }
+            return issueSignals
         }
 
         var criticalSeen: Bool {
@@ -753,7 +763,7 @@ private enum ANEResidencyProbe {
         var compact: String {
             lock.lock(); defer { lock.unlock() }
             let events = dispatchEvents.isEmpty ? "none" : dispatchEvents.joined(separator: ",")
-            return "UIKitWarnings=\(uiWarningCount) dispatch=\(events)"
+            return "UIKitWarnings=\(uiWarningCount) issueSignals=\(issueSignals) dispatch=\(events)"
         }
 
         func stop() {
@@ -768,10 +778,64 @@ private enum ANEResidencyProbe {
         }
     }
 
+    private enum ProgramKind {
+        case qkv(cacheKey: String)
+        case projection(
+            cacheKey: String, suffix: String, tag: String,
+            inputChannels: Int, outputChannels: Int, spatial: Int)
+    }
+
+    private struct ProgramSpec {
+        let block: Int
+        let label: String
+        let logicalBytes: UInt64
+        let kind: ProgramKind
+    }
+
+    private enum LoadedProgram {
+        case qkv(A12ANEQKVModel)
+        case projection(A12ANEProjectionModel)
+
+        var loadMilliseconds: Double {
+            switch self {
+            case .qkv(let model): return model.loadMilliseconds
+            case .projection(let model): return model.loadMilliseconds
+            }
+        }
+    }
+
+    private struct SequenceOutcome {
+        let programs: Int
+        let logicalBytes: UInt64
+        let onsetDetected: Bool
+        let baselineMedianMS: Double
+        let finalLoadMS: Double
+    }
+
+    private final class ModelsBox: @unchecked Sendable {
+        let models: ANEW8DiTModels
+        init(_ models: ANEW8DiTModels) { self.models = models }
+    }
+
+    private final class OverlapResultBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: Result<(aneMS: Double, wallMS: Double), Error>?
+
+        func set(_ result: Result<(aneMS: Double, wallMS: Double), Error>) {
+            lock.lock(); stored = result; lock.unlock()
+        }
+
+        func get() -> Result<(aneMS: Double, wallMS: Double), Error>? {
+            lock.lock(); defer { lock.unlock() }
+            return stored
+        }
+    }
+
     static func run() async -> String {
         var lines: [String] = [
-            "ANE residency/load probe v1",
-            "Policy: continue through ordinary memory warnings; stop progressive loading on dispatch critical pressure."
+            "ANE residency/load probe v2",
+            "Safety: high-pressure probes stop on the first pathological single-load or pressure signal; they do not intentionally march through the old helper-failure zone.",
+            "Questions: count-vs-bytes? same-object reload? reconstructed warm reload? unload reclamation? load/eval overlap?"
         ]
         let pressure = PressureRecorder()
         defer { pressure.stop() }
@@ -797,76 +861,96 @@ private enum ANEResidencyProbe {
                 throw AnimapkError.validation("ANE prepared-model cache is incomplete")
             }
 
+            let surfaces = try ANEW8DiTSurfaces(device: context.device)
+            let specs = try makeProgramSpecs(file: file)
+
             lines.append("runtime: \(A12ANERuntimeStatus())")
             lines.append("client selectors: \(A12ANEClientCapabilitySummary())")
-            lines.append("pack: \(ditURL.lastPathComponent) scheme=\(file.quantScheme ?? "n/a")")
+            lines.append("pack: \(ditURL.lastPathComponent) scheme=\(file.quantScheme ?? "n/a") programs=\(specs.count)")
             lines.append("baseline: \(MemorySnapshot.capture(context: context).compact)")
             lines.append("")
-            lines.append("Progressive production residency (8 programs/block, one evaluation/program)")
 
-            var cache: ANEW8DiTModelCache? = try ANEW8DiTModelCache(file: file)
-            let surfaces = try ANEW8DiTSurfaces(device: context.device)
-            var logicalBytes: UInt64 = 0
-            var loadedBlocks = 0
+            lines.append("EXPERIMENT 1 — same-object reload vs reconstructed warm reload")
+            let reloadBaseline = try reloadMicrobenchmark(
+                file: file, surfaces: surfaces, context: context, pressure: pressure, lines: &lines)
+            lines.append("")
 
-            for block in 0..<ModelConstants.ditBlocks {
-                guard let cache else { break }
-                let wallStart = ProcessInfo.processInfo.systemUptime
-                let result = try cache.models(for: block)
-                let loadWallMS = (ProcessInfo.processInfo.systemUptime - wallStart) * 1_000
-                let evalMS = try evaluateAll(result.models, surfaces: surfaces)
-                loadedBlocks = block + 1
-                logicalBytes += try logicalNativeBytes(file: file, block: block)
-                let snapshot = MemorySnapshot.capture(context: context)
-                lines.append(String(
-                    format: "b%02d programs=%3d logical=%7.0fMB loadANE=%7.1fms loadWall=%7.1fms eval=%6.1fms %@ | %@",
-                    block, loadedBlocks * 8,
-                    Double(logicalBytes) / 1_048_576,
-                    result.newlyLoadedMilliseconds, loadWallMS, evalMS,
-                    snapshot.compact, pressure.compact))
+            lines.append("EXPERIMENT 2 — load/evaluate overlap (safe 16-program working set)")
+            try overlapExperiment(
+                file: file, surfaces: surfaces, context: context, pressure: pressure, lines: &lines)
+            lines.append("")
+            try? await Task.sleep(nanoseconds: 750_000_000)
 
-                if block == 0 {
-                    lines.append("block0 selfO procedure metadata: \(result.models.selfO.procedureSummary)")
-                }
-                if pressure.criticalSeen {
-                    lines.append("STOP: dispatch critical memory pressure observed after block \(block).")
-                    break
-                }
+            let preCountSentinel = try freshProjectionSentinel(file: file)
+            lines.append(String(
+                format: "pre-count recovery sentinel fresh selfO load=%6.1fms (reload-micro fresh median=%6.1fms) %@ | %@",
+                preCountSentinel, reloadBaseline, MemorySnapshot.capture(context: context).compact, pressure.compact))
+            if preCountSentinel > max(300.0, reloadBaseline * 4.0) || pressure.criticalSeen {
+                lines.append("STOP: runtime did not recover cleanly enough for high-residency experiments.")
+                return lines.joined(separator: "\n")
             }
+            try? await Task.sleep(nanoseconds: 500_000_000)
 
             lines.append("")
-            lines.append("Release/recovery")
-            cache = nil
-            lines.append("release+0ms: \(MemorySnapshot.capture(context: context).compact) | \(pressure.compact)")
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            lines.append("release+250ms: \(MemorySnapshot.capture(context: context).compact) | \(pressure.compact)")
-            try? await Task.sleep(nanoseconds: 750_000_000)
-            lines.append("release+1000ms: \(MemorySnapshot.capture(context: context).compact) | \(pressure.compact)")
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            lines.append("release+3000ms: \(MemorySnapshot.capture(context: context).compact) | \(pressure.compact)")
+            lines.append("EXPERIMENT 3A — count-heavy residency")
+            lines.append("Order: smallest prepared programs first. Caps: 104 programs OR 600MB logical. Stop immediately on first pathological single load / new pressure signal.")
+            let countOutcome = try residencySequence(
+                specs: specs.sorted {
+                    if $0.logicalBytes == $1.logicalBytes { return $0.label < $1.label }
+                    return $0.logicalBytes < $1.logicalBytes
+                },
+                maxPrograms: 104,
+                maxLogicalBytes: 600 * 1_048_576,
+                surfaces: surfaces, context: context, pressure: pressure,
+                lines: &lines)
+            lines.append(String(
+                format: "count-heavy result: programs=%d logical=%.0fMB onset=%@ baselineSingleLoad=%.1fms finalLoad=%.1fms",
+                countOutcome.programs, Double(countOutcome.logicalBytes) / mib,
+                countOutcome.onsetDetected ? "YES" : "no",
+                countOutcome.baselineMedianMS, countOutcome.finalLoadMS))
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
 
-            if !pressure.criticalSeen {
-                lines.append("")
-                lines.append("Warm full-block reload (new cache object each cycle)")
-                for cycle in 1...3 {
-                    var cycleCache: ANEW8DiTModelCache? = try ANEW8DiTModelCache(file: file)
-                    var cycleResult: (models: ANEW8DiTModels, newlyLoadedMilliseconds: Double)? = try cycleCache!.models(for: 0)
-                    let wallStart = ProcessInfo.processInfo.systemUptime
-                    let loadANE = cycleResult!.newlyLoadedMilliseconds
-                    let evalMS = try evaluateAll(cycleResult!.models, surfaces: surfaces)
-                    let wallMS = (ProcessInfo.processInfo.systemUptime - wallStart) * 1_000
-                    lines.append(String(
-                        format: "cycle%d loadANE=%7.1fms postLoadEvalWall=%7.1fms eval=%6.1fms %@ | %@",
-                        cycle, loadANE, wallMS, evalMS,
-                        MemorySnapshot.capture(context: context).compact, pressure.compact))
-                    cycleResult = nil
-                    cycleCache = nil
-                    try? await Task.sleep(nanoseconds: 500_000_000)
-                }
-            } else {
-                lines.append("Warm reload skipped because critical pressure was observed.")
+            let postCountSentinel = try freshProjectionSentinel(file: file)
+            lines.append(String(
+                format: "post-count recovery sentinel fresh selfO load=%6.1fms %@ | %@",
+                postCountSentinel, MemorySnapshot.capture(context: context).compact, pressure.compact))
+            if postCountSentinel > max(300.0, reloadBaseline * 4.0) || pressure.criticalSeen {
+                lines.append("STOP: count-heavy probe did not reclaim cleanly; byte-heavy probe skipped to protect ANE helper.")
+                return lines.joined(separator: "\n")
             }
+            try? await Task.sleep(nanoseconds: 750_000_000)
 
+            lines.append("")
+            lines.append("EXPERIMENT 3B — byte-heavy residency")
+            lines.append("Order: largest prepared programs first. Caps: 48 programs OR 740MB logical. Stop immediately on first pathological single load / new pressure signal.")
+            let byteOutcome = try residencySequence(
+                specs: specs.sorted {
+                    if $0.logicalBytes == $1.logicalBytes { return $0.label < $1.label }
+                    return $0.logicalBytes > $1.logicalBytes
+                },
+                maxPrograms: 48,
+                maxLogicalBytes: 740 * 1_048_576,
+                surfaces: surfaces, context: context, pressure: pressure,
+                lines: &lines)
+            lines.append(String(
+                format: "byte-heavy result: programs=%d logical=%.0fMB onset=%@ baselineSingleLoad=%.1fms finalLoad=%.1fms",
+                byteOutcome.programs, Double(byteOutcome.logicalBytes) / mib,
+                byteOutcome.onsetDetected ? "YES" : "no",
+                byteOutcome.baselineMedianMS, byteOutcome.finalLoadMS))
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+
+            let finalSentinel = try freshProjectionSentinel(file: file)
+            lines.append(String(
+                format: "final recovery sentinel fresh selfO load=%6.1fms %@ | %@",
+                finalSentinel, MemorySnapshot.capture(context: context).compact, pressure.compact))
+            lines.append("")
+            lines.append("INTERPRETATION GUIDE")
+            lines.append("- 3A onset at high count but well below ~662MB => count/descriptor/VA-entry pressure is favored.")
+            lines.append("- 3B onset near old logical-byte boundary with far fewer programs => byte/mapping pressure is favored.")
+            lines.append("- Both => combined resource/fragmentation/scratch pressure; multi-procedure fusion still deserves a POC.")
+            lines.append("- Neither => old 8-program/block shape/order or delayed reclamation matters; use the exact onset records + sentinels.")
+            lines.append("- Experiment 1 near-equal same-object/reconstructed reload => cost lives mainly inside _ANEClient loadModel, not filesystem/modelAtURL reconstruction.")
+            lines.append("- Experiment 2 overlapWall materially below sequentialWall => pinned + streaming can hide some loader latency; otherwise assume serialization.")
             lines.append("")
             lines.append("final pressure: \(pressure.compact)")
         } catch {
@@ -874,6 +958,365 @@ private enum ANEResidencyProbe {
             lines.append("pressure at error: \(pressure.compact)")
         }
         return lines.joined(separator: "\n")
+    }
+
+    private static func reloadMicrobenchmark(
+        file: AnimapkFile, surfaces: ANEW8DiTSurfaces, context: MetalContext,
+        pressure: PressureRecorder, lines: inout [String]
+    ) throws -> Double {
+        let spec = try projectionSpec(
+            file: file, block: 0, suffix: "self_attn.output_proj.weight")
+        var model: A12ANEProjectionModel? = try makeProjection(spec)
+        guard let first = model else {
+            throw AnimapkError.validation("reload microbenchmark failed to construct first selfO")
+        }
+        var firstEval = 0.0
+        _ = try first.evaluateInput(
+            surfaces.tokenInput, output: surfaces.tokenOutput, milliseconds: &firstEval)
+        lines.append(String(
+            format: "fresh#0 loadANE=%6.1fms eval=%5.1fms %@ | %@",
+            first.loadMilliseconds, firstEval,
+            MemorySnapshot.capture(context: context).compact, pressure.compact))
+
+        var sameObjectLoads: [Double] = []
+        for cycle in 1...3 {
+            guard first.diagnosticUnloadKeepingModel() else { throw AnimapkError.validation("same-object diagnostic unload failed") }
+            let wallStart = ProcessInfo.processInfo.systemUptime
+            let reloadMS = first.diagnosticReloadMilliseconds()
+            guard reloadMS >= 0 else {
+                throw AnimapkError.validation("same-object diagnostic reload failed")
+            }
+            let wallMS = (ProcessInfo.processInfo.systemUptime - wallStart) * 1_000
+            sameObjectLoads.append(reloadMS)
+            lines.append(String(
+                format: "same-object#%d loadANE=%6.1fms loadWall=%6.1fms",
+                cycle, reloadMS, wallMS))
+        }
+        first.invalidate()
+        model = nil
+
+        var reconstructedLoads: [Double] = []
+        for cycle in 1...3 {
+            let wallStart = ProcessInfo.processInfo.systemUptime
+            var rebuilt: A12ANEProjectionModel? = try makeProjection(spec)
+            let wallMS = (ProcessInfo.processInfo.systemUptime - wallStart) * 1_000
+            guard let value = rebuilt else {
+                throw AnimapkError.validation("reconstructed reload returned nil")
+            }
+            reconstructedLoads.append(value.loadMilliseconds)
+            lines.append(String(
+                format: "reconstructed#%d loadANE=%6.1fms loadWall=%6.1fms",
+                cycle, value.loadMilliseconds, wallMS))
+            value.invalidate()
+            rebuilt = nil
+        }
+
+        let sameMedian = median(sameObjectLoads)
+        let reconstructedMedian = median(reconstructedLoads)
+        lines.append(String(
+            format: "reload medians: same-object=%.1fms reconstructed=%.1fms delta=%.1fms",
+            sameMedian, reconstructedMedian, reconstructedMedian - sameMedian))
+        return reconstructedMedian
+    }
+
+    private static func overlapExperiment(
+        file: AnimapkFile, surfaces: ANEW8DiTSurfaces, context: MetalContext,
+        pressure: PressureRecorder, lines: inout [String]
+    ) throws {
+        var cacheA: ANEW8DiTModelCache? = try ANEW8DiTModelCache(file: file)
+        var cacheB: ANEW8DiTModelCache? = try ANEW8DiTModelCache(file: file)
+        guard let cacheA, let cacheB else {
+            throw AnimapkError.validation("overlap experiment cache construction failed")
+        }
+        let a = try cacheA.models(for: 0).models
+        let b = try cacheB.models(for: 1).models
+        let boxB = ModelsBox(b)
+        try unloadKeepingModels(b)
+
+        let evalRepeats = 4
+        let evalStart = ProcessInfo.processInfo.systemUptime
+        var evalANE = 0.0
+        for _ in 0..<evalRepeats { evalANE += try evaluateAll(a, surfaces: surfaces) }
+        let evalWall = (ProcessInfo.processInfo.systemUptime - evalStart) * 1_000
+
+        let seqLoadStart = ProcessInfo.processInfo.systemUptime
+        let seqLoadANE = try reloadModels(b)
+        let seqLoadWall = (ProcessInfo.processInfo.systemUptime - seqLoadStart) * 1_000
+        let sequentialWall = evalWall + seqLoadWall
+        try unloadKeepingModels(b)
+
+        let resultBox = OverlapResultBox()
+        let semaphore = DispatchSemaphore(value: 0)
+        let overlapStart = ProcessInfo.processInfo.systemUptime
+        DispatchQueue(label: "com.invisiblestrangler.AnimaXS.ane-overlap-loader", qos: .userInitiated).async {
+            do {
+                let start = ProcessInfo.processInfo.systemUptime
+                let ane = try reloadModels(boxB.models)
+                let wall = (ProcessInfo.processInfo.systemUptime - start) * 1_000
+                resultBox.set(.success((aneMS: ane, wallMS: wall)))
+            } catch {
+                resultBox.set(.failure(error))
+            }
+            semaphore.signal()
+        }
+
+        var overlapEvalANE = 0.0
+        for _ in 0..<evalRepeats { overlapEvalANE += try evaluateAll(a, surfaces: surfaces) }
+        semaphore.wait()
+        let overlapWall = (ProcessInfo.processInfo.systemUptime - overlapStart) * 1_000
+        guard let result = resultBox.get() else {
+            throw AnimapkError.validation("overlap loader produced no result")
+        }
+        let overlapLoad = try result.get()
+
+        lines.append(String(
+            format: "sequential: eval4 ANE=%.1fms wall=%.1fms + reload8 ANE=%.1fms wall=%.1fms => %.1fms",
+            evalANE, evalWall, seqLoadANE, seqLoadWall, sequentialWall))
+        lines.append(String(
+            format: "overlap: eval4 ANE=%.1fms || reload8 ANE=%.1fms wall=%.1fms => overlapWall=%.1fms gain=%.1fms (%.1f%%)",
+            overlapEvalANE, overlapLoad.aneMS, overlapLoad.wallMS, overlapWall,
+            sequentialWall - overlapWall,
+            sequentialWall > 0 ? (sequentialWall - overlapWall) / sequentialWall * 100 : 0))
+        lines.append("\(MemorySnapshot.capture(context: context).compact) | \(pressure.compact)")
+
+        try unloadKeepingModels(b)
+        _ = cacheB
+        _ = cacheA
+    }
+
+    private static func residencySequence(
+        specs: [ProgramSpec], maxPrograms: Int, maxLogicalBytes: UInt64,
+        surfaces: ANEW8DiTSurfaces, context: MetalContext,
+        pressure: PressureRecorder, lines: inout [String]
+    ) throws -> SequenceOutcome {
+        var loaded: [LoadedProgram] = []
+        loaded.reserveCapacity(maxPrograms)
+        var logicalBytes: UInt64 = 0
+        var baselineSamples: [Double] = []
+        var onset = false
+        var lastLoadMS = 0.0
+        let startIssues = pressure.issueCount
+
+        for spec in specs {
+            if loaded.count >= maxPrograms { break }
+            if logicalBytes + spec.logicalBytes > maxLogicalBytes { break }
+
+            let wallStart = ProcessInfo.processInfo.systemUptime
+            let program = try loadProgram(spec)
+            let wallMS = (ProcessInfo.processInfo.systemUptime - wallStart) * 1_000
+            lastLoadMS = program.loadMilliseconds
+            let evalMS = try evaluate(program, spec: spec, surfaces: surfaces)
+            loaded.append(program)
+            logicalBytes += spec.logicalBytes
+
+            if baselineSamples.count < 8 { baselineSamples.append(lastLoadMS) }
+            let baseline = median(baselineSamples)
+            let slowThreshold = max(250.0, baseline * 6.0)
+            let pressureChanged = pressure.issueCount > startIssues
+            let pathological = baselineSamples.count >= 8 && lastLoadMS > slowThreshold
+
+            if loaded.count <= 8 || loaded.count % 8 == 0 || pathological || pressureChanged {
+                lines.append(String(
+                    format: "#%03d logical=%6.0fMB last=%@ loadANE=%7.1fms loadWall=%7.1fms eval=%6.1fms threshold=%6.1fms %@ | %@",
+                    loaded.count, Double(logicalBytes) / mib, spec.label,
+                    lastLoadMS, wallMS, evalMS, slowThreshold,
+                    MemorySnapshot.capture(context: context).compact, pressure.compact))
+            }
+
+            if pathological || pressureChanged {
+                onset = true
+                lines.append(
+                    "STOP-ONSET: \(pathological ? "pathological load" : "new pressure signal") at programs=\(loaded.count) logical=\(String(format: "%.0f", Double(logicalBytes) / mib))MB.")
+                break
+            }
+        }
+
+        let baseline = median(baselineSamples)
+        let outcome = SequenceOutcome(
+            programs: loaded.count, logicalBytes: logicalBytes,
+            onsetDetected: onset, baselineMedianMS: baseline, finalLoadMS: lastLoadMS)
+        loaded.removeAll()
+        return outcome
+    }
+
+    private static func makeProgramSpecs(file: AnimapkFile) throws -> [ProgramSpec] {
+        var out: [ProgramSpec] = []
+        out.reserveCapacity(ANEW8NativePack.expectedPreparedModelCount)
+
+        for block in 0..<ModelConstants.ditBlocks {
+            func tensor(_ suffix: String) throws -> AnimapkTensor {
+                try ANEW8NativePack.tensor(file: file, block: block, suffix: suffix)
+            }
+            func digest(_ suffix: String) throws -> String {
+                guard let value = try tensor(suffix).blobSHA256 else {
+                    throw AnimapkError.validation("ANE probe tensor hash missing")
+                }
+                return value
+            }
+
+            let q = try tensor("self_attn.q_proj.weight")
+            let k = try tensor("self_attn.k_proj.weight")
+            let v = try tensor("self_attn.v_proj.weight")
+            let qkvBytes = try payloadBytes(q) + payloadBytes(k) + payloadBytes(v)
+            let qkvKey = ANEW8NativePack.qkvCacheKey(
+                block: block,
+                q: try digest("self_attn.q_proj.weight"),
+                k: try digest("self_attn.k_proj.weight"),
+                v: try digest("self_attn.v_proj.weight"))
+            out.append(ProgramSpec(
+                block: block, label: "b\(block).selfQKV", logicalBytes: qkvBytes,
+                kind: .qkv(cacheKey: qkvKey)))
+
+            for spec in ANEW8NativePack.projectionSpecs where
+                spec.suffix != "self_attn.q_proj.weight" &&
+                spec.suffix != "self_attn.k_proj.weight" &&
+                spec.suffix != "self_attn.v_proj.weight" {
+                let t = try tensor(spec.suffix)
+                let key = ANEW8NativePack.projectionCacheKey(
+                    block: block, tag: spec.tag, hash: try digest(spec.suffix))
+                out.append(ProgramSpec(
+                    block: block, label: "b\(block).\(spec.tag)",
+                    logicalBytes: try payloadBytes(t),
+                    kind: .projection(
+                        cacheKey: key, suffix: spec.suffix, tag: spec.tag,
+                        inputChannels: spec.columns, outputChannels: spec.rows,
+                        spatial: spec.spatial)))
+            }
+        }
+
+        guard out.count == ANEW8NativePack.expectedPreparedModelCount else {
+            throw AnimapkError.validation(
+                "ANE probe program inventory \(out.count) != \(ANEW8NativePack.expectedPreparedModelCount)")
+        }
+        return out
+    }
+
+    private static func projectionSpec(
+        file: AnimapkFile, block: Int, suffix: String
+    ) throws -> ProgramSpec {
+        guard let spec = ANEW8NativePack.spec(suffix: suffix) else {
+            throw AnimapkError.validation("unknown projection suffix \(suffix)")
+        }
+        let tensor = try ANEW8NativePack.tensor(file: file, block: block, suffix: suffix)
+        guard let digest = tensor.blobSHA256 else {
+            throw AnimapkError.validation("projection digest missing")
+        }
+        return ProgramSpec(
+            block: block, label: "b\(block).\(spec.tag)",
+            logicalBytes: try payloadBytes(tensor),
+            kind: .projection(
+                cacheKey: ANEW8NativePack.projectionCacheKey(
+                    block: block, tag: spec.tag, hash: digest),
+                suffix: suffix, tag: spec.tag,
+                inputChannels: spec.columns, outputChannels: spec.rows,
+                spatial: spec.spatial))
+    }
+
+    private static func makeProjection(_ spec: ProgramSpec) throws -> A12ANEProjectionModel {
+        guard case let .projection(
+            cacheKey, _, tag, inputChannels, outputChannels, spatial) = spec.kind else {
+            throw AnimapkError.validation("expected projection program spec")
+        }
+        return try A12ANEProjectionModel(
+            preparedInputChannels: UInt(inputChannels),
+            outputChannels: UInt(outputChannels),
+            spatial: UInt(spatial),
+            label: "probe_\(spec.block)_\(tag)",
+            cacheKey: cacheKey)
+    }
+
+    private static func loadProgram(_ spec: ProgramSpec) throws -> LoadedProgram {
+        switch spec.kind {
+        case .qkv(let cacheKey):
+            return .qkv(try A12ANEQKVModel(
+                preparedChannels: UInt(DiTBlockExecutor.dim),
+                spatial: UInt(DiTBlockExecutor.tokens),
+                label: "probe_\(spec.block)_self_qkv",
+                cacheKey: cacheKey))
+        case .projection:
+            return .projection(try makeProjection(spec))
+        }
+    }
+
+    private static func evaluate(
+        _ program: LoadedProgram, spec: ProgramSpec, surfaces: ANEW8DiTSurfaces
+    ) throws -> Double {
+        var ms = 0.0
+        switch (program, spec.kind) {
+        case (.qkv(let model), .qkv):
+            _ = try model.evaluateInput(
+                surfaces.tokenInput,
+                qOutput: surfaces.q, kOutput: surfaces.k, vOutput: surfaces.v,
+                milliseconds: &ms)
+        case (.projection(let model), .projection(_, let suffix, _, _, _, _)):
+            switch suffix {
+            case "cross_attn.k_proj.weight":
+                _ = try model.evaluateInput(
+                    surfaces.contextInput, output: surfaces.contextK, milliseconds: &ms)
+            case "cross_attn.v_proj.weight":
+                _ = try model.evaluateInput(
+                    surfaces.contextInput, output: surfaces.contextV, milliseconds: &ms)
+            case "mlp.layer1.weight":
+                _ = try model.evaluateInput(
+                    surfaces.tokenInput, output: surfaces.hidden, milliseconds: &ms)
+            case "mlp.layer2.weight":
+                _ = try model.evaluateInput(
+                    surfaces.hidden, output: surfaces.tokenOutput, milliseconds: &ms)
+            case "cross_attn.q_proj.weight":
+                _ = try model.evaluateInput(
+                    surfaces.tokenInput, output: surfaces.q, milliseconds: &ms)
+            default:
+                _ = try model.evaluateInput(
+                    surfaces.tokenInput, output: surfaces.tokenOutput, milliseconds: &ms)
+            }
+        default:
+            throw AnimapkError.validation("ANE probe program/spec kind mismatch")
+        }
+        return ms
+    }
+
+    private static func freshProjectionSentinel(file: AnimapkFile) throws -> Double {
+        let spec = try projectionSpec(
+            file: file, block: 0, suffix: "self_attn.output_proj.weight")
+        var model: A12ANEProjectionModel? = try makeProjection(spec)
+        guard let value = model?.loadMilliseconds else {
+            throw AnimapkError.validation("fresh projection sentinel returned nil")
+        }
+        model?.invalidate()
+        model = nil
+        return value
+    }
+
+    private static func unloadKeepingModels(_ models: ANEW8DiTModels) throws {
+        let ok = models.selfQKV.diagnosticUnloadKeepingModel()
+            && models.selfO.diagnosticUnloadKeepingModel()
+            && models.crossQ.diagnosticUnloadKeepingModel()
+            && models.crossK.diagnosticUnloadKeepingModel()
+            && models.crossV.diagnosticUnloadKeepingModel()
+            && models.crossO.diagnosticUnloadKeepingModel()
+            && models.mlpUp.diagnosticUnloadKeepingModel()
+            && models.mlpDown.diagnosticUnloadKeepingModel()
+        if !ok { throw AnimapkError.validation("diagnostic block unload failed") }
+    }
+
+    private static func reloadModels(_ models: ANEW8DiTModels) throws -> Double {
+        var total = 0.0
+        func reload(_ model: A12ANEProjectionModel) throws {
+            let ms = model.diagnosticReloadMilliseconds()
+            guard ms >= 0 else { throw AnimapkError.validation("diagnostic projection reload failed") }
+            total += ms
+        }
+        let qkvMS = models.selfQKV.diagnosticReloadMilliseconds()
+        guard qkvMS >= 0 else { throw AnimapkError.validation("diagnostic QKV reload failed") }
+        total += qkvMS
+        try reload(models.selfO)
+        try reload(models.crossQ)
+        try reload(models.crossK)
+        try reload(models.crossV)
+        try reload(models.crossO)
+        try reload(models.mlpUp)
+        try reload(models.mlpDown)
+        return total
     }
 
     private static func evaluateAll(
@@ -907,20 +1350,23 @@ private enum ANEResidencyProbe {
         return totalMS
     }
 
-    private static func logicalNativeBytes(file: AnimapkFile, block: Int) throws -> UInt64 {
-        var total: UInt64 = 0
-        for spec in ANEW8NativePack.projectionSpecs {
-            let tensor = try ANEW8NativePack.tensor(file: file, block: block, suffix: spec.suffix)
-            guard let scaleSize = tensor.scaleSize, let zeroSize = tensor.zeroSize else {
-                throw AnimapkError.validation("ANE probe expected W8 scale/zero payload sizes for block \(block) \(spec.suffix)")
-            }
-            total += tensor.dataSize + scaleSize + zeroSize
+    private static func payloadBytes(_ tensor: AnimapkTensor) throws -> UInt64 {
+        guard let scale = tensor.scaleSize, let zero = tensor.zeroSize else {
+            throw AnimapkError.validation("ANE probe expected W8 scale/zero payload sizes")
         }
-        return total
+        return tensor.dataSize + scale + zero
+    }
+
+    private static func median(_ values: [Double]) -> Double {
+        guard !values.isEmpty else { return 0 }
+        let sorted = values.sorted()
+        let mid = sorted.count / 2
+        if sorted.count % 2 == 0 { return (sorted[mid - 1] + sorted[mid]) / 2 }
+        return sorted[mid]
     }
 
     private static func mb(_ bytes: UInt64) -> String {
-        String(format: "%.0fMB", Double(bytes) / 1_048_576)
+        String(format: "%.0fMB", Double(bytes) / mib)
     }
 
     private static func processPhysicalFootprint() -> UInt64? {

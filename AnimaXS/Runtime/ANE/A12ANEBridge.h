@@ -74,6 +74,11 @@ FOUNDATION_EXPORT BOOL A12ANEPrepareQKVModel(
                 output:(A12ANESurface *)output
            milliseconds:(nullable double *)milliseconds
                   error:(NSError **)error;
+/// Diagnostic-only: unload ANE residency while retaining the same _ANEModel object.
+- (BOOL)diagnosticUnloadKeepingModel;
+/// Diagnostic-only: reload the retained _ANEModel without reconstructing it from disk.
+/// Returns -1 on private-runtime failure.
+- (double)diagnosticReloadMilliseconds;
 - (void)invalidate;
 @end
 
@@ -114,6 +119,11 @@ FOUNDATION_EXPORT BOOL A12ANEPrepareQKVModel(
                vOutput:(A12ANESurface *)vOutput
           milliseconds:(nullable double *)milliseconds
                  error:(NSError **)error;
+/// Diagnostic-only: unload ANE residency while retaining the same _ANEModel object.
+- (BOOL)diagnosticUnloadKeepingModel;
+/// Diagnostic-only: reload the retained _ANEModel without reconstructing it from disk.
+/// Returns -1 on private-runtime failure.
+- (double)diagnosticReloadMilliseconds;
 - (void)invalidate;
 @end
 
