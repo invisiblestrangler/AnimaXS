@@ -1,0 +1,73 @@
+name: Materialize ANE streaming ring v3
+
+on:
+  push:
+    branches: [probe/ane-streaming-ring-v3]
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: macos-15
+    env:
+      XCODEGEN_VERSION: 2.46.0
+      XCODEGEN_ZIP_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: probe/ane-streaming-ring-v3
+          fetch-depth: 0
+
+      - name: Route Diagnostics button to v3 ring probe
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('AnimaXS/App/DiagnosticsView.swift')
+          text = path.read_text()
+
+          old_desc = 'Device-only ANE experiment suite v2. Separates program-count vs logical-byte residency pressure, measures same-object vs reconstructed reload, tests load/evaluate overlap, and stops at the first pathological-load signal instead of intentionally driving into the known helper-failure zone. It never runs automatically or modifies model weights.'
+          new_desc = 'Device-only ANE streaming-ring probe v3. Tests the production candidate with zero pinned blocks and only two block slices resident at once (8 current + 8 prefetched programs), including a full 28-block warm rotation and sustained load/evaluate overlap. It never runs automatically or modifies model weights.'
+          if text.count(old_desc) != 1:
+              raise SystemExit(f'expected exactly one v2 description, found {text.count(old_desc)}')
+          text = text.replace(old_desc, new_desc)
+
+          old_call = 'await ANEResidencyProbe.run()'
+          new_call = 'await ANERingProbe.run()'
+          if text.count(old_call) != 1:
+              raise SystemExit(f'expected exactly one v2 probe call, found {text.count(old_call)}')
+          text = text.replace(old_call, new_call)
+
+          text = text.replace('Run ANE residency/load probe', 'Run ANE streaming-ring probe')
+          text = text.replace('Running ANE probe…', 'Running ANE ring probe…')
+          path.write_text(text)
+          PY
+
+      - name: Install pinned XcodeGen
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+            --output "$RUNNER_TEMP/xcodegen.zip"
+          echo "${XCODEGEN_ZIP_SHA256}  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
+          ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/xcodegen/bin:$PATH"
+          xcodegen version
+
+      - name: Regenerate project and self-delete materializer
+        run: |
+          export PATH="$RUNNER_TEMP/xcodegen/bin:$PATH"
+          xcodegen generate
+          git rm .github/workflows/materialize-ane-ring-v3.yml
+          git status --short
+
+      - name: Commit materialized probe
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add AnimaXS/App/DiagnosticsView.swift AnimaXS.xcodeproj AnimaXS/App/ANERingProbe.swift
+          git add -u .github/workflows/materialize-ane-ring-v3.yml
+          git commit -m 'diag: materialize ANE streaming ring probe v3'
+          git push origin HEAD:probe/ane-streaming-ring-v3
