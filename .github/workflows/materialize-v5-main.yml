@@ -1,8 +1,8 @@
 name: Materialize ANE V5 multifunction asset
 
 on:
-  push:
-    branches: [main]
+  pull_request:
+    types: [opened]
 
 permissions:
   contents: write
@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   materialize:
+    if: github.event.pull_request.head.ref == 'chore/trigger-v5-materializer-2'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
