@@ -618,7 +618,7 @@ enum ANERingProbe {
 
             if pass == 1 {
                 lines.append(
-                    "0+\(depth) p1 b\(two(block)) eval=\(ms(eval.wall)) unload=\(ms(unload.wall)) unloadANE=\(ms(unload.ane)) " +
+                    "0+\(depth) p1 b\(two(block)) eval=\(ms(eval.wall)) unload=\(ms(unload.wall)) unloadCallSum=\(ms(unload.ane)) " +
                     "wait=\(ms(wait)) stage=\(ms(elapsedMS(since: stageStart))) \(loader.tracker.compact)")
             }
             current = next
@@ -737,7 +737,7 @@ enum ANERingProbe {
                 stats.maxResident = max(stats.maxResident, loader.tracker.peakCount)
                 if pass == 1 {
                     lines.append(
-                        "2+3 p1 stream b\(two(block)) eval=\(ms(eval.wall)) unload=\(ms(unload.wall)) unloadANE=\(ms(unload.ane)) " +
+                        "2+3 p1 stream b\(two(block)) eval=\(ms(eval.wall)) unload=\(ms(unload.wall)) unloadCallSum=\(ms(unload.ane)) " +
                         "wait=\(ms(wait)) stage=\(ms(elapsedMS(since: stageStart))) \(loader.tracker.compact)")
                 }
                 current = next
@@ -812,7 +812,7 @@ enum ANERingProbe {
 
     private static func passSummary(name: String, pass: Int, stats: PassStats) -> String {
         "\(name) pass#\(pass): wall=\(ms(stats.wall))ms loads=\(stats.loads) loadANE=\(ms(stats.loadANE)) loadWall=\(ms(stats.loadWall)) host=\(ms(stats.loadHost)) " +
-        "evalANE=\(ms(stats.evalANE)) evalWall=\(ms(stats.evalWall)) unloads=\(stats.unloads) unloadANE=\(ms(stats.unloadANE)) unloadWall=\(ms(stats.unloadWall)) " +
+        "evalANE=\(ms(stats.evalANE)) evalWall=\(ms(stats.evalWall)) unloads=\(stats.unloads) unloadCallSum=\(ms(stats.unloadANE)) unloadWall=\(ms(stats.unloadWall)) " +
         "wait=\(ms(stats.waitWall)) avgLoad=\(ms(stats.avgLoad)) avgUnload=\(ms(stats.avgUnload)) maxLoad=\(ms(stats.maxLoad)) maxUnload=\(ms(stats.maxUnload)) maxWait=\(ms(stats.maxWait)) maxResident=\(stats.maxResident)"
     }
 
@@ -890,5 +890,65 @@ enum ANERingProbe {
         #else
         return nil
         #endif
+    }
+}
+
+// MARK: - V5 existing-bridge diagnostic shims
+
+private extension A12ANEProjectionModel {
+    func diagnosticDestroyMilliseconds() -> Double {
+        let started = ProcessInfo.processInfo.systemUptime
+        invalidate()
+        return (ProcessInfo.processInfo.systemUptime - started) * 1_000
+    }
+}
+
+private extension A12ANEQKVModel {
+    func diagnosticDestroyMilliseconds() -> Double {
+        let started = ProcessInfo.processInfo.systemUptime
+        invalidate()
+        return (ProcessInfo.processInfo.systemUptime - started) * 1_000
+    }
+}
+
+private func A12ANEMultiProcedureProbe(
+    _ compiledModelURL: URL,
+    _ channels: UInt,
+    _ spatial: UInt
+) -> String {
+    let fileManager = FileManager.default
+    let cacheKey = "v5-two-procedure-poc"
+    do {
+        guard let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            return "private multifunction ERROR: caches directory unavailable"
+        }
+        let base = caches.appendingPathComponent("AnimaXS-ANE", isDirectory: true)
+        try fileManager.createDirectory(at: base, withIntermediateDirectories: true)
+        let destination = base.appendingPathComponent("\(cacheKey).mlmodelc", isDirectory: true)
+        if fileManager.fileExists(atPath: destination.path) {
+            try fileManager.removeItem(at: destination)
+        }
+        try fileManager.copyItem(at: compiledModelURL, to: destination)
+
+        let loadStarted = ProcessInfo.processInfo.systemUptime
+        let model = try A12ANEProjectionModel(
+            preparedInputChannels: channels,
+            outputChannels: channels,
+            spatial: spatial,
+            label: "v5_two_procedure",
+            cacheKey: cacheKey)
+        let loadWall = (ProcessInfo.processInfo.systemUptime - loadStarted) * 1_000
+        let count = model.procedureCount
+        let summary = model.procedureSummary
+        let loadANE = model.loadMilliseconds
+        let unloadStarted = ProcessInfo.processInfo.systemUptime
+        model.invalidate()
+        let unloadWall = (ProcessInfo.processInfo.systemUptime - unloadStarted) * 1_000
+        try? fileManager.removeItem(at: destination)
+        return String(
+            format: "private multifunction: procedures=%lu summary=%@ loadANE=%.1fms loadWall=%.1fms unloadWall=%.1fms",
+            count, summary, loadANE, loadWall, unloadWall)
+    } catch {
+        return "private multifunction ERROR: \(error.localizedDescription)"
     }
 }

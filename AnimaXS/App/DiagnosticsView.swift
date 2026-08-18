@@ -471,11 +471,11 @@ struct DiagnosticsView: View {
     @ViewBuilder
     private var aneResidencyProbeSection: some View {
         Section("ANE residency / load probe") {
-            Text("Device-only ANE streaming-ring probe v3. Tests the production candidate with zero pinned blocks and only two block slices resident at once (8 current + 8 prefetched programs), including a full 28-block warm rotation and sustained load/evaluate overlap. It never runs automatically or modifies model weights.")
+            Text("Device-only ANE Michelin probe v5. Measures synchronous destroy/unload, compares corrected 0+2 vs 0+3 vs 2+3 streaming, and independently probes whether a two-function Core ML asset appears as multiple private ANE procedures. It never runs automatically or modifies model weights.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Button(isRunning && currentTest == "ANE residency/load probe"
-                   ? "Running ANE ring probe…" : "Run ANE streaming-ring probe") {
+                   ? "Running ANE Michelin probe…" : "Run ANE Michelin probe v5") {
                 Task { await runANEProbe() }
             }
             .disabled(isRunning || isGenerating)
