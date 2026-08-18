@@ -377,15 +377,16 @@ enum ANEW8DiTModelProfile: String, Sendable {
 }
 
 /// Device-measured A12 scheduler policy. These are production constants, not
-/// user-facing tuning knobs: V6 measured depth-3 prefetch, bounded retire1,
-/// 4 pinned full8 blocks for the first/KV-miss traversal and 8 pinned six-
-/// program blocks once exact P5 K/V is warm. The theoretical peaks stay below
-/// the earlier 80-program clean envelope: 64 full8, 72 kvWarm6.
+/// user-facing tuning knobs: V6 measured depth-3 prefetch and bounded retire1.
+/// Production keeps 4 pinned full8 blocks for the first/KV-miss traversal and
+/// conservatively 6 pinned six-program blocks once exact P5 K/V is warm after
+/// a real generation hit memory pressure at the previous 8-pin setting. The
+/// theoretical peaks are 64 full8 and 60 kvWarm6 programs.
 enum ANEW8DiTSchedulerPolicy {
     static let prefetchDepth = 3
     static let retireDepth = 1
     static let fullPinnedBlocks = 4
-    static let warmPinnedBlocks = 8
+    static let warmPinnedBlocks = 6
     static let measuredSafetyCeilingPrograms = 80
 
     static func pinnedBlocks(for profile: ANEW8DiTModelProfile) -> Int {
@@ -612,8 +613,8 @@ private final class ANEW8RetireFuture: @unchecked Sendable {
 /// Generation-lifetime bounded private-ANE scheduler. It recognizes each
 /// ordered 0...27 DiT traversal itself, so `DitForward` does not need an ANE-
 /// specific loop. First/KV-miss traversals use full8 4+3+retire1. Once the
-/// generation-local P5 cache is warm, blocks use six dynamic programs with an
-/// 8+3+retire1 policy. The pinned prefix survives across diffusion steps.
+/// generation-local P5 cache is warm, blocks use six dynamic programs with a
+/// conservative 6+3+retire1 policy. The pinned prefix survives across steps.
 final class ANEW8DiTModelCache: @unchecked Sendable {
     private let loader: ANEW8DiTModelLoader
     private let loadQueue = DispatchQueue(
@@ -775,7 +776,7 @@ final class ANEW8DiTModelCache: @unchecked Sendable {
         }
 
         // A cache-allocation failure keeps every traversal in full8. If the
-        // profile is warm, expand the retained prefix from 4 -> 8 using six-
+        // profile is warm, expand the retained prefix from 4 -> 6 using six-
         // program loads. Any incompatible stale pin is rebuilt defensively.
         for block in 0..<targetPinned {
             if let existing = pinned[block] {
@@ -792,7 +793,7 @@ final class ANEW8DiTModelCache: @unchecked Sendable {
         }
 
         // If a future policy ever reduces the pinned prefix, retire surplus
-        // pins now. Current measured transition only grows 4 -> 8.
+        // pins now. Current production transition grows 4 -> 6.
         let surplus = pinned.keys.filter { $0 >= targetPinned }
         for block in surplus {
             pinned.removeValue(forKey: block)?.invalidateAll()
