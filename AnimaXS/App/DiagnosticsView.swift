@@ -471,11 +471,11 @@ struct DiagnosticsView: View {
     @ViewBuilder
     private var aneResidencyProbeSection: some View {
         Section("ANE residency / load probe") {
-            Text("Device-only ANE experiment suite v2. Separates program-count vs logical-byte residency pressure, measures same-object vs reconstructed reload, tests load/evaluate overlap, and stops at the first pathological-load signal instead of intentionally driving into the known helper-failure zone. It never runs automatically or modifies model weights.")
+            Text("Device-only ANE streaming-ring probe v3. Tests the production candidate with zero pinned blocks and only two block slices resident at once (8 current + 8 prefetched programs), including a full 28-block warm rotation and sustained load/evaluate overlap. It never runs automatically or modifies model weights.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Button(isRunning && currentTest == "ANE residency/load probe"
-                   ? "Running ANE probe…" : "Run ANE residency/load probe") {
+                   ? "Running ANE ring probe…" : "Run ANE streaming-ring probe") {
                 Task { await runANEProbe() }
             }
             .disabled(isRunning || isGenerating)
@@ -585,7 +585,7 @@ struct DiagnosticsView: View {
         marker.beginSession()
         marker.markStarted("ANE residency/load probe")
         let result = await Task.detached(priority: .userInitiated) {
-            await ANEResidencyProbe.run()
+            await ANERingProbe.run()
         }.value
         aneProbeText = result
         marker.markCompleted("ANE residency/load probe")

@@ -37,6 +37,7 @@
 		36CD88A5B125EC98797E0F65 /* case1_cond_context.f32 in Resources */ = {isa = PBXBuildFile; fileRef = FA91D9A84879D3562284E548 /* case1_cond_context.f32 */; };
 		36DCBB069B8AE8C6D90A5115 /* LinearExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00F7AC0D57A13E91CB5F434 /* LinearExecutorTests.swift */; };
 		39E8DABEEFA3A6A90A676118 /* VAENumerics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81791F763E08B204F5010697 /* VAENumerics.swift */; };
+		3B7B9F0EA5FD15758B545CC4 /* ANERingProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 53EB575530122961AD9BBDBA /* ANERingProbe.swift */; };
 		473AE0F68178293C9A58882C /* AttentionExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = F3F286C454EBE7A92C592214 /* AttentionExecutor.swift */; };
 		47ABE68F485121B325537344 /* DiTInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EBD5ADCDE21EF89090D0058 /* DiTInput.swift */; };
 		49F5054A68EAECB93D9D643A /* case1_dit_context.f32 in Resources */ = {isa = PBXBuildFile; fileRef = 8576A01525AFE9CF6314191E /* case1_dit_context.f32 */; };
@@ -179,6 +180,7 @@
 		4E9210A1BDCCB8F59CE8B971 /* VAEDecoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VAEDecoder.swift; sourceTree = "<group>"; };
 		507AD044478BA9533EE6512E /* VAEDecoderLocatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VAEDecoderLocatorTests.swift; sourceTree = "<group>"; };
 		52E7305B1912F5357ACCAEE5 /* Modulation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Modulation.swift; sourceTree = "<group>"; };
+		53EB575530122961AD9BBDBA /* ANERingProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ANERingProbe.swift; sourceTree = "<group>"; };
 		5679855EA2DD29C171356B8B /* case1_decoded_rgb8.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; path = case1_decoded_rgb8.bin; sourceTree = "<group>"; };
 		607907C1088D17DCE300B330 /* GenerationCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationCoordinatorTests.swift; sourceTree = "<group>"; };
 		6223C8A55E7E942B28480E48 /* Wan21LatentFormatTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wan21LatentFormatTests.swift; sourceTree = "<group>"; };
@@ -311,6 +313,7 @@
 		6524648BBA022DD295EB8F51 /* App */ = {
 			isa = PBXGroup;
 			children = (
+				53EB575530122961AD9BBDBA /* ANERingProbe.swift */,
 				0D9CD1A114D528F42F21C527 /* AnimaXSApp.swift */,
 				4C8E968875980A2C9ACC94E5 /* ContentView.swift */,
 				BAA4F55FCC168791651401D2 /* DiagnosticsView.swift */,
@@ -721,6 +724,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A81536E00900A77262672E65 /* A12ANEBridge.m in Sources */,
+				3B7B9F0EA5FD15758B545CC4 /* ANERingProbe.swift in Sources */,
 				4B59C78B9770A5CC294C79BE /* ANEW8MLPBackend.swift in Sources */,
 				1303514D8DBE7F84010B07A7 /* AnimaKernels.metal in Sources */,
 				7CD76E6444C119FE1BDBC89F /* AnimaXSApp.swift in Sources */,
