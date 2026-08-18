@@ -40,7 +40,8 @@ jobs:
           import os
           import numpy as np
           import coremltools as ct
-          from coremltools.converters.mil import Builder as mb, types
+          from coremltools.converters.mil import Builder as mb
+          from coremltools.converters.mil.mil import types
 
           root = os.environ['RUNNER_TEMP'] + '/ane-v5-multifunction'
 
