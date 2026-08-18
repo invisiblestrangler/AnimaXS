@@ -207,7 +207,7 @@ static NSURL *A12PreparedModelURL(NSString *cacheKey, NSError **error) {
     NSString *safe = A12SanitizeCacheKey(cacheKey);
     NSURL *destination = [base URLByAppendingPathComponent:[safe stringByAppendingString:@".mlmodelc"] isDirectory:YES];
     if ([[NSFileManager defaultManager] fileExistsAtPath:destination.path]) return destination;
-    NSURL *temporary = [base URLByAppendingPathComponent:[NSString stringWithFormat:@".%@-%@.tmp", safe, NSUUID.UUID.UUIDString] isDirectory:YES];
+    NSURL *temporary = [base URLByAppendingPathComponent:[NSString stringWithFormat:@".%@.tmp", NSUUID.UUID.UUIDString] isDirectory:YES];
     if (![[NSFileManager defaultManager] copyItemAtURL:template toURL:temporary error:error]) return nil;
     return temporary; // caller patches then atomically moves it into destination
 }
