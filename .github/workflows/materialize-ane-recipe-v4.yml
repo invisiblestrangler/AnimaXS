@@ -1,3 +1,4 @@
+# V4 materializer: second commit ensures the workflow is registered before the trigger push.
 name: Materialize ANE recipe bakeoff v4
 
 on:
@@ -28,7 +29,6 @@ jobs:
           backend = Path('AnimaXS/Runtime/ANE/ANEW8MLPBackend.swift')
           text = backend.read_text()
 
-          # Add one explicit invalidation surface to the block model bundle.
           needle = '''        loadMilliseconds = selfQKV.loadMilliseconds + selfO.loadMilliseconds
             + crossQ.loadMilliseconds + crossK.loadMilliseconds
             + crossV.loadMilliseconds + crossO.loadMilliseconds
@@ -144,9 +144,6 @@ final class ANEW8DiTModelCache: @unchecked Sendable {
             mlpUp: try projection("mlp.layer1.weight"),
             mlpDown: try projection("mlp.layer2.weight"))
 
-        // The V4 ring never requests the same non-resident block concurrently,
-        // but keep this race-safe so future callers cannot accidentally retain
-        // duplicate ANE instances for one block.
         lock.lock()
         if let existing = modelsByBlock[block] {
             lock.unlock()
@@ -170,7 +167,7 @@ final class ANEW8DiTModelCache: @unchecked Sendable {
         let victims = modelsByBlock
             .filter { !keep.contains($0.key) }
             .map { $0.value }
-        for key in modelsByBlock.keys where !keep.contains(key) {
+        for key in Array(modelsByBlock.keys) where !keep.contains(key) {
             modelsByBlock.removeValue(forKey: key)
         }
         lock.unlock()
@@ -192,8 +189,6 @@ final class ANEW8DiTModelCache: @unchecked Sendable {
           text = text[:start] + cache_class + text[end:]
           backend.write_text(text)
 
-          # Fix the historical V3 per-block printf argument order so retained
-          # diagnostic code no longer prints garbage block IDs/evalWall fields.
           v3 = Path('AnimaXS/App/ANERingProbe.swift')
           v3text = v3.read_text()
           bad = '''                    pass, block, nextBlock, evalWall, nextLoadWall, stageWall, stall,
