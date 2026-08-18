@@ -1,0 +1,251 @@
+name: Materialize ANE recipe bakeoff v4
+
+on:
+  push:
+    branches: [probe/ane-recipe-v4]
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: macos-15
+    env:
+      XCODEGEN_VERSION: 2.46.0
+      XCODEGEN_ZIP_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: probe/ane-recipe-v4
+          fetch-depth: 0
+
+      - name: Add shared-cache eviction + route Diagnostics to V4
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          backend = Path('AnimaXS/Runtime/ANE/ANEW8MLPBackend.swift')
+          text = backend.read_text()
+
+          # Add one explicit invalidation surface to the block model bundle.
+          needle = '''        loadMilliseconds = selfQKV.loadMilliseconds + selfO.loadMilliseconds
+            + crossQ.loadMilliseconds + crossK.loadMilliseconds
+            + crossV.loadMilliseconds + crossO.loadMilliseconds
+            + mlpUp.loadMilliseconds + mlpDown.loadMilliseconds
+    }
+}
+
+/// Generation-lifetime loaded-model cache.'''
+          replacement = '''        loadMilliseconds = selfQKV.loadMilliseconds + selfO.loadMilliseconds
+            + crossQ.loadMilliseconds + crossK.loadMilliseconds
+            + crossV.loadMilliseconds + crossO.loadMilliseconds
+            + mlpUp.loadMilliseconds + mlpDown.loadMilliseconds
+    }
+
+    /// Explicitly drops ANE residency for every program in this transformer block.
+    /// Wrapper invalidation is idempotent, so deinit remains safe afterwards.
+    func invalidate() {
+        selfQKV.invalidate()
+        selfO.invalidate()
+        crossQ.invalidate()
+        crossK.invalidate()
+        crossV.invalidate()
+        crossO.invalidate()
+        mlpUp.invalidate()
+        mlpDown.invalidate()
+    }
+}
+
+/// Generation-lifetime loaded-model cache.'''
+          if text.count(needle) != 1:
+              raise SystemExit(f'expected one ANEW8DiTModels insertion point, found {text.count(needle)}')
+          text = text.replace(needle, replacement)
+
+          start_marker = '''/// Generation-lifetime loaded-model cache. Prepared Espresso files must already
+/// exist; first use performs only `_ANEModel` construction + `_ANEClient` load.
+'''
+          end_marker = '''/// Reused shared IOSurfaces for one block execution.'''
+          start = text.find(start_marker)
+          end = text.find(end_marker, start)
+          if start < 0 or end < 0:
+              raise SystemExit('failed to locate ANEW8DiTModelCache class range')
+
+          cache_class = r'''/// Generation-lifetime loaded-model cache. Prepared Espresso files must already
+/// exist; first use performs only `_ANEModel` construction + `_ANEClient` load.
+///
+/// V4 adds explicit block eviction so production can keep one validated cache
+/// object for the generation/app lifetime while rotating only ANE-resident block
+/// models. Dictionary access is locked because the prefetch loader can populate
+/// the next block while the current block evaluates on another thread.
+final class ANEW8DiTModelCache: @unchecked Sendable {
+    private let file: AnimapkFile
+    private let lock = NSLock()
+    private var modelsByBlock: [Int: ANEW8DiTModels] = [:]
+
+    init(file: AnimapkFile) throws {
+        self.file = file
+        try ANEW8NativePack.validate(file: file)
+        guard ANEW8ModelPreparer.isPrepared(file: file) else {
+            throw AnimapkError.validation(
+                "ANE-native model cache is not prepared; prepare the pack before diffusion")
+        }
+        guard A12ANEIsAvailable() else {
+            throw AnimapkError.validation("A12 ANE runtime unavailable: \(A12ANERuntimeStatus())")
+        }
+    }
+
+    func models(for block: Int) throws -> (models: ANEW8DiTModels, newlyLoadedMilliseconds: Double) {
+        lock.lock()
+        if let cached = modelsByBlock[block] {
+            lock.unlock()
+            return (cached, 0)
+        }
+        lock.unlock()
+
+        guard (0..<ModelConstants.ditBlocks).contains(block) else {
+            throw AnimapkError.validation("ANE block index out of range: \(block)")
+        }
+        func digest(_ suffix: String) throws -> String {
+            let tensor = try ANEW8NativePack.tensor(file: file, block: block, suffix: suffix)
+            guard let digest = tensor.blobSHA256 else {
+                throw AnimapkError.validation("ANE-native tensor hash missing")
+            }
+            return digest
+        }
+        func projection(_ suffix: String) throws -> A12ANEProjectionModel {
+            guard let spec = ANEW8NativePack.spec(suffix: suffix) else {
+                throw AnimapkError.validation("unknown ANE projection suffix: \(suffix)")
+            }
+            let key = ANEW8NativePack.projectionCacheKey(
+                block: block, tag: spec.tag, hash: try digest(suffix))
+            return try A12ANEProjectionModel(
+                preparedInputChannels: UInt(spec.columns),
+                outputChannels: UInt(spec.rows), spatial: UInt(spec.spatial),
+                label: "dit_b\(block)_\(spec.tag)", cacheKey: key)
+        }
+
+        let qHash = try digest("self_attn.q_proj.weight")
+        let kHash = try digest("self_attn.k_proj.weight")
+        let vHash = try digest("self_attn.v_proj.weight")
+        let qkvKey = ANEW8NativePack.qkvCacheKey(block: block, q: qHash, k: kHash, v: vHash)
+        let selfQKV = try A12ANEQKVModel(
+            preparedChannels: UInt(DiTBlockExecutor.dim),
+            spatial: UInt(DiTBlockExecutor.tokens),
+            label: "dit_b\(block)_self_qkv", cacheKey: qkvKey)
+
+        let loaded = ANEW8DiTModels(
+            selfQKV: selfQKV,
+            selfO: try projection("self_attn.output_proj.weight"),
+            crossQ: try projection("cross_attn.q_proj.weight"),
+            crossK: try projection("cross_attn.k_proj.weight"),
+            crossV: try projection("cross_attn.v_proj.weight"),
+            crossO: try projection("cross_attn.output_proj.weight"),
+            mlpUp: try projection("mlp.layer1.weight"),
+            mlpDown: try projection("mlp.layer2.weight"))
+
+        // The V4 ring never requests the same non-resident block concurrently,
+        // but keep this race-safe so future callers cannot accidentally retain
+        // duplicate ANE instances for one block.
+        lock.lock()
+        if let existing = modelsByBlock[block] {
+            lock.unlock()
+            loaded.invalidate()
+            return (existing, 0)
+        }
+        modelsByBlock[block] = loaded
+        lock.unlock()
+        return (loaded, loaded.loadMilliseconds)
+    }
+
+    func evict(block: Int) {
+        lock.lock()
+        let removed = modelsByBlock.removeValue(forKey: block)
+        lock.unlock()
+        removed?.invalidate()
+    }
+
+    func evictAll(except keep: Set<Int> = []) {
+        lock.lock()
+        let victims = modelsByBlock
+            .filter { !keep.contains($0.key) }
+            .map { $0.value }
+        for key in modelsByBlock.keys where !keep.contains(key) {
+            modelsByBlock.removeValue(forKey: key)
+        }
+        lock.unlock()
+        for model in victims { model.invalidate() }
+    }
+
+    var residentBlockCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return modelsByBlock.count
+    }
+
+    var residentBlocks: [Int] {
+        lock.lock(); defer { lock.unlock() }
+        return modelsByBlock.keys.sorted()
+    }
+}
+
+'''
+          text = text[:start] + cache_class + text[end:]
+          backend.write_text(text)
+
+          # Fix the historical V3 per-block printf argument order so retained
+          # diagnostic code no longer prints garbage block IDs/evalWall fields.
+          v3 = Path('AnimaXS/App/ANERingProbe.swift')
+          v3text = v3.read_text()
+          bad = '''                    pass, block, nextBlock, evalWall, nextLoadWall, stageWall, stall,
+                    MemorySnapshot.capture(context: context).compact, pressure.compact))'''
+          good = '''                    pass, block, evalWall, nextBlock, nextLoadWall, stageWall, stall,
+                    MemorySnapshot.capture(context: context).compact, pressure.compact))'''
+          if v3text.count(bad) != 1:
+              raise SystemExit(f'expected one V3 formatting bug, found {v3text.count(bad)}')
+          v3.write_text(v3text.replace(bad, good))
+
+          diag = Path('AnimaXS/App/DiagnosticsView.swift')
+          d = diag.read_text()
+          old_desc = 'Device-only ANE streaming-ring probe v3. Tests the production candidate with zero pinned blocks and only two block slices resident at once (8 current + 8 prefetched programs), including a full 28-block warm rotation and sustained load/evaluate overlap. It never runs automatically or modifies model weights.'
+          new_desc = 'Device-only ANE recipe bakeoff v4. Uses one shared validated model cache with explicit block eviction, then compares 0+2, 4-pinned+2-streaming, and 6-pinned+2-streaming recipes under the same warmed runtime. Maximum tested residency is 64 programs. It never runs automatically or modifies model weights.'
+          if d.count(old_desc) != 1:
+              raise SystemExit(f'expected one V3 Diagnostics description, found {d.count(old_desc)}')
+          d = d.replace(old_desc, new_desc)
+
+          old_call = 'await ANERingProbe.run()'
+          new_call = 'await ANERecipeProbeV4.run()'
+          if d.count(old_call) != 1:
+              raise SystemExit(f'expected one V3 probe call, found {d.count(old_call)}')
+          d = d.replace(old_call, new_call)
+          d = d.replace('Run ANE streaming-ring probe', 'Run ANE recipe bakeoff v4')
+          d = d.replace('Running ANE ring probe…', 'Running ANE recipe bakeoff…')
+          diag.write_text(d)
+          PY
+
+      - name: Install pinned XcodeGen
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+            --output "$RUNNER_TEMP/xcodegen.zip"
+          echo "${XCODEGEN_ZIP_SHA256}  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
+          ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/xcodegen/bin:$PATH"
+          xcodegen version
+
+      - name: Regenerate project and self-delete materializer
+        run: |
+          export PATH="$RUNNER_TEMP/xcodegen/bin:$PATH"
+          xcodegen generate
+          git rm .github/workflows/materialize-ane-recipe-v4.yml
+          git rm -f _ane_recipe_v4_trigger.txt
+          git status --short
+
+      - name: Commit materialized V4
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add AnimaXS/App/ANERecipeProbeV4.swift AnimaXS/App/ANERingProbe.swift AnimaXS/App/DiagnosticsView.swift AnimaXS/Runtime/ANE/ANEW8MLPBackend.swift AnimaXS.xcodeproj
+          git add -u .github/workflows/materialize-ane-recipe-v4.yml _ane_recipe_v4_trigger.txt || true
+          git commit -m 'diag: materialize ANE recipe bakeoff v4'
+          git push origin HEAD:probe/ane-recipe-v4
