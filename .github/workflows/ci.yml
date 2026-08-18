@@ -4,71 +4,41 @@ on:
   pull_request:
 
 permissions:
-  actions: read
-  contents: read
-  issues: write
-  pull-requests: write
+  contents: write
 
 jobs:
-  report-previous-failure:
+  materialize-probe-compile-fix:
     runs-on: ubuntu-latest
     steps:
-      - name: Extract failed Xcode diagnostics and comment on PR
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.ref }}
+      - name: Apply exact compiler fix and restore normal CI
         env:
-          GH_TOKEN: ${{ github.token }}
-          FAILED_RUN_ID: "32113068320"
-          FAILED_RUN_NUMBER: "419"
-          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
-          gh api "/repos/${GITHUB_REPOSITORY}/actions/runs/${FAILED_RUN_ID}/logs" > failed-logs.zip
-          mkdir -p failed-logs
-          unzip -q failed-logs.zip -d failed-logs
 
           python3 - <<'PY'
-          import os
-          import re
           from pathlib import Path
-
-          root = Path("failed-logs")
-          interesting = []
-          seen = set()
-          patterns = (
-              " error:", "fatal error:", "Command SwiftCompile failed",
-              "SwiftCompile normal", "CompileSwift normal", "BUILD FAILED"
-          )
-
-          for path in sorted(root.rglob("*.txt")):
-              try:
-                  lines = path.read_text(errors="replace").splitlines()
-              except Exception:
-                  continue
-              for line in lines:
-                  if not any(p in line for p in patterns):
-                      continue
-                  # GitHub job logs prefix timestamps; remove them for readability.
-                  clean = re.sub(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s*", "", line).strip()
-                  if clean and clean not in seen:
-                      seen.add(clean)
-                      interesting.append(clean)
-
-          # Prefer actual compiler diagnostics; retain surrounding failure markers only if needed.
-          diagnostics = [x for x in interesting if " error:" in x or "fatal error:" in x]
-          if not diagnostics:
-              diagnostics = interesting
-          diagnostics = diagnostics[:120]
-
-          body = [
-              "## CI compiler diagnostics (bot-extracted)",
-              "",
-              f"Extracted from already-failed CI run #{os.environ['FAILED_RUN_NUMBER']} (`{os.environ['FAILED_RUN_ID']}`), so no new macOS build was spent just to retrieve these errors.",
-              "",
-              "```text",
-          ]
-          body.extend(diagnostics or ["No compiler error lines were found in the downloaded job logs."])
-          body.extend(["```", ""])
-          Path("comment.md").write_text("\n".join(body))
+          path = Path("AnimaXS/App/DiagnosticsView.swift")
+          text = path.read_text()
+          old = """            total += tensor.dataSize + tensor.scaleSize + tensor.zeroSize\n"""
+          new = """            guard let scaleSize = tensor.scaleSize, let zeroSize = tensor.zeroSize else {\n                throw AnimapkError.validation(\"ANE probe expected W8 scale/zero payload sizes for block \\(block) \\(spec.suffix)\")\n            }\n            total += tensor.dataSize + scaleSize + zeroSize\n"""
+          if text.count(old) != 1:
+              raise SystemExit(f"expected exact logicalNativeBytes line once, found {text.count(old)}")
+          path.write_text(text.replace(old, new))
           PY
 
-          jq -Rs '{body: .}' comment.md \
-            | gh api --method POST "/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" --input -
+          # The temporary diagnostic workflow must not survive the materialized commit.
+          git show origin/main:.github/workflows/ci.yml > .github/workflows/ci.yml
+
+          git diff --check
+          git diff -- AnimaXS/App/DiagnosticsView.swift .github/workflows/ci.yml
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add AnimaXS/App/DiagnosticsView.swift .github/workflows/ci.yml
+          git commit -m "fix: unwrap ANE probe W8 payload sizes [bot-materialized]"
+          git push origin "HEAD:${HEAD_BRANCH}"
