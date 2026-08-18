@@ -303,14 +303,27 @@ final class DiTBlockExecutor {
         }
         metrics?.beginBlock(blockIndex)
 
-        // Espresso files were materialized before diffusion. First use here
-        // only constructs/loads the already-prepared ANE programs; no weight
-        // quantization, hashing or model.espresso.weights write is allowed.
-        let modelResult = try aneModelCache.models(for: blockIndex)
+        // P5 readiness is the source of truth (not diffusion step number).
+        // On a hit the scheduler loads only the six dynamic ANE programs; on a
+        // miss it supplies full8 so crossK/crossV can populate the exact cache.
+        let crossCacheHit = crossKVCache?.isReady(blockIndex) ?? false
+        var schedulerCompleted = false
+        defer {
+            if !schedulerCompleted { aneModelCache.abortTraversal() }
+        }
+        let modelResult = try aneModelCache.scheduledModels(
+            for: blockIndex, kvWarm: crossCacheHit)
         if modelResult.newlyLoadedMilliseconds > 0 {
             metrics?.recordANEModelLoad(seconds: modelResult.newlyLoadedMilliseconds / 1_000.0)
         }
+        if modelResult.waitMilliseconds > 0 {
+            metrics?.recordHostWait(seconds: modelResult.waitMilliseconds / 1_000.0)
+        }
         let models = modelResult.models
+        if !crossCacheHit && !models.hasCrossKVModels {
+            throw AnimapkError.validation(
+                "ANE scheduler supplied a six-program block on cross-K/V cache miss")
+        }
 
         let range = try blockRange(blockIndex)
         if streamer.loadedLogicalIndexes[slot] != blockIndex {
@@ -439,7 +452,8 @@ final class DiTBlockExecutor {
             s2, tokenMajor: crossInput.projectionInput, aneMajor: aneSurfaces.tokenInput.metalBuffer,
             rows: Self.tokens, channels: Self.dim,
             planeStrideElements: aneSurfaces.tokenInput.planeStrideElements)
-        let crossCacheHit = optimization.crossKVCache && (crossKVCache?.isReady(blockIndex) ?? false)
+        // `crossCacheHit` was resolved before ANE model acquisition so the
+        // scheduler can omit crossK/crossV entirely on a real cache hit.
         if !crossCacheHit {
             try encodeTokenToANE(
                 s2, tokenMajor: crossContext, aneMajor: aneSurfaces.contextInput.metalBuffer,
@@ -570,16 +584,22 @@ final class DiTBlockExecutor {
 
         streamer.complete(slot)
         slotReleased = true
-        metrics?.endBlock()
-        context.refreshDiagnostics()
-        metrics?.recordMemory(
-            allocated: context.currentAllocatedSize,
-            available: UInt64(os_proc_available_memory()))
         if let diagnosticBranchCompleted {
             try diagnosticBranchCompleted("self", selfSnapshot!)
             try diagnosticBranchCompleted("cross", crossSnapshot!)
             try diagnosticBranchCompleted("mlp", mlpSnapshot!)
         }
+        // Only retire after every consumer of this block's ANE outputs has
+        // completed. Pinned cache-miss blocks can now shed crossK/crossV.
+        try aneModelCache.complete(
+            block: blockIndex,
+            crossKVReady: crossKVCache?.isReady(blockIndex) ?? false)
+        schedulerCompleted = true
+        metrics?.endBlock()
+        context.refreshDiagnostics()
+        metrics?.recordMemory(
+            allocated: context.currentAllocatedSize,
+            available: UInt64(os_proc_available_memory()))
     }
 
     private func evaluateANEProjection(
@@ -670,7 +690,7 @@ final class DiTBlockExecutor {
     ) throws -> MTLBuffer {
         let keyRows = cross ? Self.contextTokens : Self.tokens
         let kTokenCount = keyRows * Self.dim
-        let cacheEnabled = cross && optimization.crossKVCache
+        let cacheEnabled = cross && crossKVCache != nil
         let cacheHit = cacheEnabled && (crossKVCache?.isReady(blockIndex) ?? false)
 
         if cacheHit, let cache = crossKVCache {
@@ -1087,7 +1107,7 @@ final class DiTBlockExecutor {
         // the cached (post-transform) K/V into the scratch buffers, so the
         // downstream attention sees byte-identical inputs by construction. Q is
         // always projected fresh (it is dynamic per step).
-        let cacheEnabled = cross && optimization.crossKVCache
+        let cacheEnabled = cross && crossKVCache != nil
         let cacheHit = cacheEnabled && (crossKVCache?.isReady(blockIndex) ?? false)
         if cacheHit, let cache = crossKVCache {
             // Blit cached K/V into the scratch buffers (exact; the cache holds

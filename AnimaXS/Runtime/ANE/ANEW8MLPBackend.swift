@@ -368,7 +368,52 @@ enum ANEW8ModelPreparer {
     }
 }
 
-final class ANEW8DiTModels {
+enum ANEW8DiTModelProfile: String, Sendable {
+    case full8
+    case kvWarm6
+
+    var programCount: Int { self == .full8 ? 8 : 6 }
+    var includesCrossKV: Bool { self == .full8 }
+}
+
+/// Device-measured A12 scheduler policy. These are production constants, not
+/// user-facing tuning knobs: V6 measured depth-3 prefetch, bounded retire1,
+/// 4 pinned full8 blocks for the first/KV-miss traversal and 8 pinned six-
+/// program blocks once exact P5 K/V is warm. The theoretical peaks stay below
+/// the earlier 80-program clean envelope: 64 full8, 72 kvWarm6.
+enum ANEW8DiTSchedulerPolicy {
+    static let prefetchDepth = 3
+    static let retireDepth = 1
+    static let fullPinnedBlocks = 4
+    static let warmPinnedBlocks = 8
+    static let measuredSafetyCeilingPrograms = 80
+
+    static func pinnedBlocks(for profile: ANEW8DiTModelProfile) -> Int {
+        profile == .full8 ? fullPinnedBlocks : warmPinnedBlocks
+    }
+
+    static func theoreticalPeakPrograms(for profile: ANEW8DiTModelProfile) -> Int {
+        (pinnedBlocks(for: profile) + prefetchDepth + retireDepth) * profile.programCount
+    }
+}
+
+struct ANEW8ScheduledModels {
+    let models: ANEW8DiTModels
+    /// Sum of private `_ANEClient loadModel` time for models that entered the
+    /// scheduler while servicing this block. Background-prefetched work is
+    /// charged once, when its block first consumes it.
+    let newlyLoadedMilliseconds: Double
+    /// Foreground wall time spent waiting for scheduler setup / a load future.
+    /// Background load/unload work that was fully hidden is intentionally 0.
+    let waitMilliseconds: Double
+}
+
+/// One block's private-ANE projection set. `crossK`/`crossV` stay non-optional
+/// for source compatibility with old diagnostics, but a kvWarm6 set aliases
+/// them to `crossQ` and marks `hasCrossKVModels == false`; production guards
+/// that such a set is only used on an exact P5 cache hit. Aliased entries are
+/// never evaluated or invalidated separately.
+final class ANEW8DiTModels: @unchecked Sendable {
     let selfQKV: A12ANEQKVModel
     let selfO: A12ANEProjectionModel
     let crossQ: A12ANEProjectionModel
@@ -379,12 +424,21 @@ final class ANEW8DiTModels {
     let mlpDown: A12ANEProjectionModel
     let loadMilliseconds: Double
 
+    private let lock = NSLock()
+    private var ownsCrossKV: Bool
+    private var invalidated = false
+
+    var hasCrossKVModels: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return ownsCrossKV && !invalidated
+    }
+
     init(
         selfQKV: A12ANEQKVModel,
         selfO: A12ANEProjectionModel,
         crossQ: A12ANEProjectionModel,
-        crossK: A12ANEProjectionModel,
-        crossV: A12ANEProjectionModel,
+        crossK: A12ANEProjectionModel?,
+        crossV: A12ANEProjectionModel?,
         crossO: A12ANEProjectionModel,
         mlpUp: A12ANEProjectionModel,
         mlpDown: A12ANEProjectionModel
@@ -392,23 +446,59 @@ final class ANEW8DiTModels {
         self.selfQKV = selfQKV
         self.selfO = selfO
         self.crossQ = crossQ
-        self.crossK = crossK
-        self.crossV = crossV
+        self.crossK = crossK ?? crossQ
+        self.crossV = crossV ?? crossQ
         self.crossO = crossO
         self.mlpUp = mlpUp
         self.mlpDown = mlpDown
+        ownsCrossKV = crossK != nil && crossV != nil
         loadMilliseconds = selfQKV.loadMilliseconds + selfO.loadMilliseconds
-            + crossQ.loadMilliseconds + crossK.loadMilliseconds
-            + crossV.loadMilliseconds + crossO.loadMilliseconds
-            + mlpUp.loadMilliseconds + mlpDown.loadMilliseconds
+            + crossQ.loadMilliseconds
+            + (crossK?.loadMilliseconds ?? 0)
+            + (crossV?.loadMilliseconds ?? 0)
+            + crossO.loadMilliseconds + mlpUp.loadMilliseconds + mlpDown.loadMilliseconds
     }
+
+    /// After a block has populated its exact generation-local P5 K/V cache,
+    /// the two invariant projection programs are dead weight. Drop only those
+    /// two while retaining the six dynamic programs for the warm pinned prefix.
+    func dropCrossKV() {
+        lock.lock()
+        guard ownsCrossKV, !invalidated else { lock.unlock(); return }
+        ownsCrossKV = false
+        lock.unlock()
+        crossK.invalidate()
+        crossV.invalidate()
+    }
+
+    func invalidateAll() {
+        lock.lock()
+        guard !invalidated else { lock.unlock(); return }
+        invalidated = true
+        let invalidateCrossKV = ownsCrossKV
+        ownsCrossKV = false
+        lock.unlock()
+
+        selfQKV.invalidate()
+        selfO.invalidate()
+        crossQ.invalidate()
+        if invalidateCrossKV {
+            crossK.invalidate()
+            crossV.invalidate()
+        }
+        crossO.invalidate()
+        mlpUp.invalidate()
+        mlpDown.invalidate()
+    }
+
+    deinit { invalidateAll() }
 }
 
-/// Generation-lifetime loaded-model cache. Prepared Espresso files must already
-/// exist; first use performs only `_ANEModel` construction + `_ANEClient` load.
-final class ANEW8DiTModelCache {
+/// Stateless loader for already-prepared Espresso programs. Pack validation and
+/// prepared-cache completeness are paid exactly once at scheduler construction;
+/// every hot-path load below is only model construction + `_ANEClient loadModel`.
+private final class ANEW8DiTModelLoader: @unchecked Sendable {
     private let file: AnimapkFile
-    private var modelsByBlock: [Int: ANEW8DiTModels] = [:]
 
     init(file: AnimapkFile) throws {
         self.file = file
@@ -422,8 +512,7 @@ final class ANEW8DiTModelCache {
         }
     }
 
-    func models(for block: Int) throws -> (models: ANEW8DiTModels, newlyLoadedMilliseconds: Double) {
-        if let cached = modelsByBlock[block] { return (cached, 0) }
+    func load(block: Int, profile: ANEW8DiTModelProfile) throws -> ANEW8DiTModels {
         guard (0..<ModelConstants.ditBlocks).contains(block) else {
             throw AnimapkError.validation("ANE block index out of range: \(block)")
         }
@@ -454,18 +543,287 @@ final class ANEW8DiTModelCache {
             preparedChannels: UInt(DiTBlockExecutor.dim),
             spatial: UInt(DiTBlockExecutor.tokens),
             label: "dit_b\(block)_self_qkv", cacheKey: qkvKey)
-
-        let models = ANEW8DiTModels(
+        let crossQ = try projection("cross_attn.q_proj.weight")
+        let crossK = profile.includesCrossKV ? try projection("cross_attn.k_proj.weight") : nil
+        let crossV = profile.includesCrossKV ? try projection("cross_attn.v_proj.weight") : nil
+        return ANEW8DiTModels(
             selfQKV: selfQKV,
             selfO: try projection("self_attn.output_proj.weight"),
-            crossQ: try projection("cross_attn.q_proj.weight"),
-            crossK: try projection("cross_attn.k_proj.weight"),
-            crossV: try projection("cross_attn.v_proj.weight"),
+            crossQ: crossQ,
+            crossK: crossK,
+            crossV: crossV,
             crossO: try projection("cross_attn.output_proj.weight"),
             mlpUp: try projection("mlp.layer1.weight"),
             mlpDown: try projection("mlp.layer2.weight"))
-        modelsByBlock[block] = models
+    }
+}
+
+private final class ANEW8LoadResultBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Result<ANEW8DiTModels, Error>?
+    func set(_ result: Result<ANEW8DiTModels, Error>) {
+        lock.lock(); value = result; lock.unlock()
+    }
+    func take() -> Result<ANEW8DiTModels, Error>? {
+        lock.lock(); defer { lock.unlock() }
+        let result = value
+        value = nil
+        return result
+    }
+}
+
+private final class ANEW8LoadFuture: @unchecked Sendable {
+    let block: Int
+    private let semaphore = DispatchSemaphore(value: 0)
+    private let box = ANEW8LoadResultBox()
+
+    init(block: Int, profile: ANEW8DiTModelProfile,
+         loader: ANEW8DiTModelLoader, queue: DispatchQueue) {
+        self.block = block
+        queue.async {
+            do { self.box.set(.success(try loader.load(block: block, profile: profile))) }
+            catch { self.box.set(.failure(error)) }
+            self.semaphore.signal()
+        }
+    }
+
+    func wait() throws -> ANEW8DiTModels {
+        semaphore.wait()
+        guard let result = box.take() else {
+            throw AnimapkError.validation("ANE scheduler load future returned no result")
+        }
+        return try result.get()
+    }
+}
+
+private final class ANEW8RetireFuture: @unchecked Sendable {
+    private let semaphore = DispatchSemaphore(value: 0)
+
+    init(models: ANEW8DiTModels, queue: DispatchQueue) {
+        queue.async {
+            models.invalidateAll()
+            self.semaphore.signal()
+        }
+    }
+
+    func wait() { semaphore.wait() }
+}
+
+/// Generation-lifetime bounded private-ANE scheduler. It recognizes each
+/// ordered 0...27 DiT traversal itself, so `DitForward` does not need an ANE-
+/// specific loop. First/KV-miss traversals use full8 4+3+retire1. Once the
+/// generation-local P5 cache is warm, blocks use six dynamic programs with an
+/// 8+3+retire1 policy. The pinned prefix survives across diffusion steps.
+final class ANEW8DiTModelCache: @unchecked Sendable {
+    private let loader: ANEW8DiTModelLoader
+    private let loadQueue = DispatchQueue(
+        label: "com.invisiblestrangler.AnimaXS.ane-production-loader", qos: .userInitiated)
+    private let retireQueue = DispatchQueue(
+        label: "com.invisiblestrangler.AnimaXS.ane-production-retire", qos: .userInitiated)
+
+    private var pinned: [Int: ANEW8DiTModels] = [:]
+    private var futures: [Int: ANEW8LoadFuture] = [:]
+    private var activeStreamed: [Int: ANEW8DiTModels] = [:]
+    private var retiring: ANEW8RetireFuture?
+    private var traversalProfile: ANEW8DiTModelProfile?
+    private var expectedBlock = 0
+    private var pendingLoadMilliseconds = 0.0
+    private var pendingForegroundWaitMilliseconds = 0.0
+
+    /// Old diagnostic callers still use the historical unbounded API. Keep it
+    /// isolated from production scheduler state so V2/V3 research code compiles.
+    private var legacyModelsByBlock: [Int: ANEW8DiTModels] = [:]
+
+    init(file: AnimapkFile) throws {
+        loader = try ANEW8DiTModelLoader(file: file)
+        precondition(
+            ANEW8DiTSchedulerPolicy.theoreticalPeakPrograms(for: .full8)
+                <= ANEW8DiTSchedulerPolicy.measuredSafetyCeilingPrograms)
+        precondition(
+            ANEW8DiTSchedulerPolicy.theoreticalPeakPrograms(for: .kvWarm6)
+                <= ANEW8DiTSchedulerPolicy.measuredSafetyCeilingPrograms)
+    }
+
+    /// Production API. `kvWarm` must be the actual per-block P5 readiness, not
+    /// a diffusion-step number; resumed/partial runs therefore remain correct.
+    func scheduledModels(for block: Int, kvWarm: Bool) throws -> ANEW8ScheduledModels {
+        let profile: ANEW8DiTModelProfile = kvWarm ? .kvWarm6 : .full8
+        guard block == expectedBlock else {
+            throw AnimapkError.validation(
+                "ANE scheduler expected block \(expectedBlock), got \(block)")
+        }
+        if block == 0 {
+            try beginTraversal(profile: profile)
+        } else if traversalProfile != profile {
+            throw AnimapkError.validation(
+                "ANE scheduler profile changed inside traversal at block \(block)")
+        }
+
+        let models: ANEW8DiTModels
+        var waitMilliseconds = takePendingForegroundWait()
+        var loadedMilliseconds = takePendingLoadMilliseconds()
+        let pinnedCount = ANEW8DiTSchedulerPolicy.pinnedBlocks(for: profile)
+        if block < pinnedCount {
+            guard let value = pinned[block] else {
+                throw AnimapkError.validation("ANE scheduler missing pinned block \(block)")
+            }
+            models = value
+        } else {
+            guard let future = futures.removeValue(forKey: block) else {
+                throw AnimapkError.validation("ANE scheduler missing future for block \(block)")
+            }
+            let waitStart = ProcessInfo.processInfo.systemUptime
+            models = try future.wait()
+            waitMilliseconds += elapsedMS(since: waitStart)
+            loadedMilliseconds += models.loadMilliseconds
+            activeStreamed[block] = models
+        }
+        expectedBlock += 1
+        return ANEW8ScheduledModels(
+            models: models,
+            newlyLoadedMilliseconds: loadedMilliseconds,
+            waitMilliseconds: waitMilliseconds)
+    }
+
+    /// Called only after all ANE/Metal work for this block has completed.
+    /// Pinned cache-miss blocks immediately shed crossK/crossV once the exact
+    /// generation-local P5 entry exists. Streamed blocks use bounded retire1.
+    func complete(block: Int, crossKVReady: Bool) throws {
+        guard let profile = traversalProfile else {
+            throw AnimapkError.validation("ANE scheduler completion outside traversal")
+        }
+        let pinnedCount = ANEW8DiTSchedulerPolicy.pinnedBlocks(for: profile)
+        if block < pinnedCount {
+            if crossKVReady { pinned[block]?.dropCrossKV() }
+        } else {
+            guard let models = activeStreamed.removeValue(forKey: block) else {
+                throw AnimapkError.validation("ANE scheduler missing active streamed block \(block)")
+            }
+            if let previous = retiring { previous.wait() }
+            retiring = ANEW8RetireFuture(models: models, queue: retireQueue)
+
+            let newBlock = block + ANEW8DiTSchedulerPolicy.prefetchDepth
+            if newBlock < ModelConstants.ditBlocks {
+                futures[newBlock] = ANEW8LoadFuture(
+                    block: newBlock, profile: profile, loader: loader, queue: loadQueue)
+            }
+        }
+
+        if block == ModelConstants.ditBlocks - 1 {
+            if let finalRetire = retiring { finalRetire.wait() }
+            retiring = nil
+            guard futures.isEmpty, activeStreamed.isEmpty else {
+                throw AnimapkError.validation("ANE scheduler leaked streamed state at traversal end")
+            }
+            traversalProfile = nil
+            expectedBlock = 0
+        }
+    }
+
+    /// Failure/cancellation cleanup. This is intentionally stronger than the
+    /// happy-path traversal end: all pinned state is released because the
+    /// generation is no longer useful and must not leave private residency.
+    func abortTraversal() {
+        if let retiring { retiring.wait() }
+        retiring = nil
+        for (_, future) in futures {
+            if let models = try? future.wait() { models.invalidateAll() }
+        }
+        futures.removeAll()
+        for (_, models) in activeStreamed { models.invalidateAll() }
+        activeStreamed.removeAll()
+        for (_, models) in pinned { models.invalidateAll() }
+        pinned.removeAll()
+        traversalProfile = nil
+        expectedBlock = 0
+        pendingLoadMilliseconds = 0
+        pendingForegroundWaitMilliseconds = 0
+    }
+
+    /// Historical diagnostic API: unbounded, no scheduler. Production must use
+    /// `scheduledModels(for:kvWarm:)` so residency stays bounded.
+    func models(for block: Int) throws -> (models: ANEW8DiTModels, newlyLoadedMilliseconds: Double) {
+        if let cached = legacyModelsByBlock[block] { return (cached, 0) }
+        let models = try loader.load(block: block, profile: .full8)
+        legacyModelsByBlock[block] = models
         return (models, models.loadMilliseconds)
+    }
+
+    deinit {
+        abortTraversal()
+        for (_, models) in legacyModelsByBlock { models.invalidateAll() }
+        legacyModelsByBlock.removeAll()
+    }
+
+    private func beginTraversal(profile: ANEW8DiTModelProfile) throws {
+        guard traversalProfile == nil, futures.isEmpty, activeStreamed.isEmpty else {
+            throw AnimapkError.validation("ANE scheduler began traversal with residual streamed state")
+        }
+        traversalProfile = profile
+        expectedBlock = 0
+
+        let setupStart = ProcessInfo.processInfo.systemUptime
+        var setupLoadMilliseconds = 0.0
+        let targetPinned = ANEW8DiTSchedulerPolicy.pinnedBlocks(for: profile)
+
+        // Exact P5 transition: preserve the six useful programs in the first
+        // four pins instead of throwing them away and reloading them.
+        if profile == .kvWarm6 {
+            for block in 0..<min(ANEW8DiTSchedulerPolicy.fullPinnedBlocks, targetPinned) {
+                pinned[block]?.dropCrossKV()
+            }
+        }
+
+        // A cache-allocation failure keeps every traversal in full8. If the
+        // profile is warm, expand the retained prefix from 4 -> 8 using six-
+        // program loads. Any incompatible stale pin is rebuilt defensively.
+        for block in 0..<targetPinned {
+            if let existing = pinned[block] {
+                if profile == .full8 && !existing.hasCrossKVModels {
+                    existing.invalidateAll()
+                    pinned.removeValue(forKey: block)
+                } else {
+                    continue
+                }
+            }
+            let models = try loader.load(block: block, profile: profile)
+            pinned[block] = models
+            setupLoadMilliseconds += models.loadMilliseconds
+        }
+
+        // If a future policy ever reduces the pinned prefix, retire surplus
+        // pins now. Current measured transition only grows 4 -> 8.
+        let surplus = pinned.keys.filter { $0 >= targetPinned }
+        for block in surplus {
+            pinned.removeValue(forKey: block)?.invalidateAll()
+        }
+
+        if targetPinned < ModelConstants.ditBlocks {
+            for block in targetPinned..<min(
+                ModelConstants.ditBlocks,
+                targetPinned + ANEW8DiTSchedulerPolicy.prefetchDepth) {
+                futures[block] = ANEW8LoadFuture(
+                    block: block, profile: profile, loader: loader, queue: loadQueue)
+            }
+        }
+        pendingLoadMilliseconds += setupLoadMilliseconds
+        pendingForegroundWaitMilliseconds += elapsedMS(since: setupStart)
+    }
+
+    private func takePendingLoadMilliseconds() -> Double {
+        let value = pendingLoadMilliseconds
+        pendingLoadMilliseconds = 0
+        return value
+    }
+
+    private func takePendingForegroundWait() -> Double {
+        let value = pendingForegroundWaitMilliseconds
+        pendingForegroundWaitMilliseconds = 0
+        return value
+    }
+
+    private func elapsedMS(since start: Double) -> Double {
+        (ProcessInfo.processInfo.systemUptime - start) * 1_000
     }
 }
 
