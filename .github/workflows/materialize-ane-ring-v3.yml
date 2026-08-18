@@ -61,6 +61,7 @@ jobs:
           export PATH="$RUNNER_TEMP/xcodegen/bin:$PATH"
           xcodegen generate
           git rm .github/workflows/materialize-ane-ring-v3.yml
+          git rm -f _ane_ring_v3_trigger.txt
           git status --short
 
       - name: Commit materialized probe
@@ -68,6 +69,6 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add AnimaXS/App/DiagnosticsView.swift AnimaXS.xcodeproj AnimaXS/App/ANERingProbe.swift
-          git add -u .github/workflows/materialize-ane-ring-v3.yml
+          git add -u .github/workflows/materialize-ane-ring-v3.yml _ane_ring_v3_trigger.txt || true
           git commit -m 'diag: materialize ANE streaming ring probe v3'
           git push origin HEAD:probe/ane-streaming-ring-v3
