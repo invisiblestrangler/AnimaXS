@@ -579,6 +579,28 @@ BOOL A12ANEPrepareQKVModel(NSData *qBytes, NSData *qBiasF32, NSData *qScaleF32,
     return ok;
 }
 
+- (BOOL)diagnosticUnloadKeepingModel {
+    if (!_model || !_client) return NO;
+    if (!_loaded) return YES;
+    NSError *unloadError = nil;
+    BOOL ok = A12UnloadModel(_client, _model, &unloadError);
+    if (!ok) return NO;
+    _loaded = NO;
+    return YES;
+}
+
+- (double)diagnosticReloadMilliseconds {
+    if (!_model || !_client) return -1.0;
+    if (_loaded) return 0.0;
+    NSError *loadError = nil;
+    double loadMS = 0;
+    BOOL ok = A12LoadModel(_client, _model, &loadError, &loadMS);
+    if (!ok) return -1.0;
+    _loaded = YES;
+    _loadMilliseconds = loadMS;
+    return loadMS;
+}
+
 - (void)invalidate {
     if (!_loaded) return;
     NSError *error = nil;
@@ -707,6 +729,28 @@ static id A12QKVOutputObject(NSString *symbol, id q, id k, id v) {
     BOOL ok = A12Evaluate(_client, _model, request, &evaluationError, milliseconds);
     if (!ok && error) *error = evaluationError ?: A12Error(64, @"ANE QKV evaluation failed");
     return ok;
+}
+
+- (BOOL)diagnosticUnloadKeepingModel {
+    if (!_model || !_client) return NO;
+    if (!_loaded) return YES;
+    NSError *unloadError = nil;
+    BOOL ok = A12UnloadModel(_client, _model, &unloadError);
+    if (!ok) return NO;
+    _loaded = NO;
+    return YES;
+}
+
+- (double)diagnosticReloadMilliseconds {
+    if (!_model || !_client) return -1.0;
+    if (_loaded) return 0.0;
+    NSError *loadError = nil;
+    double loadMS = 0;
+    BOOL ok = A12LoadModel(_client, _model, &loadError, &loadMS);
+    if (!ok) return -1.0;
+    _loaded = YES;
+    _loadMilliseconds = loadMS;
+    return loadMS;
 }
 
 - (void)invalidate {
