@@ -111,6 +111,22 @@ NSString *A12ANERuntimeStatus(void) {
     return @"available";
 }
 
+NSString *A12ANEClientCapabilitySummary(void) {
+    if (!A12LoadANE()) return @"ANE framework unavailable";
+    Class clientClass = NSClassFromString(@"_ANEClient");
+    if (!clientClass) return @"_ANEClient unavailable";
+    BOOL newInstance = class_getInstanceMethod(
+        clientClass, NSSelectorFromString(@"loadModelNewInstance:options:modelInstParams:qos:error:")) != NULL;
+    BOOL chaining = class_getInstanceMethod(
+        clientClass, NSSelectorFromString(@"prepareChainingWithModel:options:chainingReq:qos:error:")) != NULL;
+    BOOL unload = class_getInstanceMethod(
+        clientClass, NSSelectorFromString(@"unloadModel:options:qos:error:")) != NULL;
+    return [NSString stringWithFormat:@"loadModelNewInstance=%@ prepareChaining=%@ unloadModel=%@",
+        newInstance ? @"yes" : @"no",
+        chaining ? @"yes" : @"no",
+        unload ? @"yes" : @"no"];
+}
+
 static A12IOSurfaceRef A12MakeRawSurface(NSUInteger bytes) {
     A12IOSurfaceAPI io = A12IOSurface();
     if (!io.ok) return NULL;
@@ -521,6 +537,25 @@ BOOL A12ANEPrepareQKVModel(NSData *qBytes, NSData *qBiasF32, NSData *qScaleF32,
     _loaded = YES;
     _modelURL = url;
     return self;
+}
+
+- (NSUInteger)procedureCount {
+    NSDictionary *attrs = A12ModelAttributes(_model);
+    id descValue = attrs[@"ANEFModelDescription"];
+    NSDictionary *desc = [descValue isKindOfClass:NSDictionary.class] ? descValue : @{};
+    id proceduresValue = desc[@"ANEFModelProcedures"];
+    NSArray *procedures = [proceduresValue isKindOfClass:NSArray.class] ? proceduresValue : @[];
+    return procedures.count;
+}
+
+- (NSString *)procedureSummary {
+    NSDictionary *attrs = A12ModelAttributes(_model);
+    id descValue = attrs[@"ANEFModelDescription"];
+    NSDictionary *desc = [descValue isKindOfClass:NSDictionary.class] ? descValue : @{};
+    id namesValue = desc[@"kANEFModelProcedureNameToIDMapKey"];
+    NSDictionary *names = [namesValue isKindOfClass:NSDictionary.class] ? namesValue : @{};
+    return [NSString stringWithFormat:@"count=%lu names=%@",
+        (unsigned long)self.procedureCount, A12String(names)];
 }
 
 - (BOOL)evaluateInput:(A12ANESurface *)input output:(A12ANESurface *)output milliseconds:(double *)milliseconds error:(NSError **)error {

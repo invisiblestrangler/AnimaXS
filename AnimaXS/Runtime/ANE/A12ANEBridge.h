@@ -9,6 +9,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// opt-in, device-only experimental path.
 FOUNDATION_EXPORT BOOL A12ANEIsAvailable(void);
 FOUNDATION_EXPORT NSString *A12ANERuntimeStatus(void);
+/// Diagnostic-only selector inventory for the private client.
+FOUNDATION_EXPORT NSString *A12ANEClientCapabilitySummary(void);
 
 /// Disk-cache preparation is intentionally separate from private ANE loading.
 /// These functions only materialize the proven Espresso bundle under the app's
@@ -43,6 +45,9 @@ FOUNDATION_EXPORT BOOL A12ANEPrepareQKVModel(
 @property(nonatomic, readonly) NSUInteger spatial;
 @property(nonatomic, readonly) double loadMilliseconds;
 @property(nonatomic, readonly) NSString *label;
+/// Diagnostic metadata reported by the loaded ANE program.
+@property(nonatomic, readonly) NSUInteger procedureCount;
+@property(nonatomic, readonly) NSString *procedureSummary;
 
 /// qBytes is row-major U8 [outputChannels,inputChannels]. bias/scale are one
 /// Float32 value per output channel, matching the H11 Espresso W8 ABI.

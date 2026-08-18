@@ -6,9 +6,6 @@ on:
   pull_request:
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -19,47 +16,8 @@ env:
   XCODEGEN_ZIP_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
 
 jobs:
-  # One-shot transport. The connector's own branch writes do not recursively
-  # trigger Actions, so this already-existing PR workflow materializes the
-  # diagnostic source exactly once, restores ci.yml from main, and removes all
-  # transport files. A subsequent user-authored empty commit triggers the one
-  # real validation run on the final source tree.
-  materialize-ane-probe:
-    if: github.event_name == 'pull_request' && github.head_ref == 'probe/ane-residency-load'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.head_ref }}
-          fetch-depth: 0
-      - name: Materialize probe source
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 .github/probe_materialize.py
-          git fetch origin main
-          git show origin/main:.github/workflows/ci.yml > .github/workflows/ci.yml
-          git diff --check
-          grep -q 'ANE residency/load probe v1' AnimaXS/App/DiagnosticsView.swift
-          grep -q 'A12ANEClientCapabilitySummary' AnimaXS/Runtime/ANE/A12ANEBridge.m
-          grep -q 'procedureCount' AnimaXS/Runtime/ANE/A12ANEBridge.h
-          test ! -e .github/probe_materialize.py
-          test ! -e .github/workflows/materialize-ane-residency-probe.yml
-      - name: Commit final probe source
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git commit -m "diag: add one-build ANE residency and reload probe"
-          git push origin HEAD:${{ github.head_ref }}
-
   # Job 1 — project consistency: regenerate from project.yml, fail if committed project differs.
-  # Skip the one-shot transport event; the final source receives a separate,
-  # clean validation run after materialization.
   project-consistency:
-    if: github.event_name != 'pull_request' || github.head_ref != 'probe/ane-residency-load'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
