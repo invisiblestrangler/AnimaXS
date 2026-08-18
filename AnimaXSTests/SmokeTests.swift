@@ -94,7 +94,7 @@ final class SmokeTests: XCTestCase {
     func testDiTSlotAcceptsPinnedW8V2Variant() throws {
         let dit = try XCTUnwrap(ModelManifest.entries.first { $0.component == .dit })
         let w8 = try XCTUnwrap(dit.alternates.first)
-        XCTAssertEqual(dit.alternates.count, 1, "the DiT slot accepts exactly one alternate (W8-v2)")
+        XCTAssertEqual(dit.alternates.count, 2, "the DiT slot accepts W8-v2 and W8-ANE-v1 alternates")
         XCTAssertEqual(w8.size, 2_232_975_360,
                        "must match HuggingFace LFS size for the pinned revision")
         XCTAssertEqual(
@@ -105,6 +105,30 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(
             dit.sha256,
             "ba1ce615f03665812f05088f9239f0cb23591a0811067d57fa51773abf6f0d25")
+    }
+
+    /// The DiT slot also accepts the ANE-native W8 pack (w8-ane-v1) as a second
+    /// alternate; its pinned size/SHA must match the HuggingFace LFS metadata
+    /// exactly. This pins the constants so a transcription error is caught in
+    /// CI without downloading the 2.13 GB pack.
+    func testDiTSlotAcceptsPinnedW8ANEV1Variant() throws {
+        let dit = try XCTUnwrap(ModelManifest.entries.first { $0.component == .dit })
+        XCTAssertEqual(dit.alternates.count, 2)
+
+        let ane = dit.alternates[1]
+        XCTAssertEqual(ane.size, 2_128_838_656)
+        XCTAssertEqual(ane.sha256, "f5c80a25114b62a6807996180d439c5d12828d7392c604e1eee15acb28977dc4")
+
+        let descriptor = try ModelManifest.descriptor(
+            for: dit,
+            matchedSize: ane.size,
+            matchedSHA256: ane.sha256)
+
+        XCTAssertEqual(descriptor, ModelManifest.ditW8ANEV1)
+        XCTAssertEqual(descriptor.id, "w8-ane-v1")
+        XCTAssertEqual(
+            descriptor.displayFilename,
+            "anima-turbo-v1.0-xsmax-w8-ane-v1.animapk")
     }
 
     /// A file matching no accepted DiT variant must be rejected by the

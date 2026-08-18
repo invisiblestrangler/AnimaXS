@@ -80,6 +80,13 @@ def main() -> int:
         licenses.mkdir()
         shutil.copy2(Path("docs/model-licenses/CircleStone-NC-1.2.md"), licenses / "CircleStone-NC-1.2.md")
         shutil.copy2(Path("docs/model-licenses/NVIDIA-Open-Model-License.txt"), licenses / "NVIDIA-Open-Model-License.txt")
+        if args.variant == "w8-ane-v1":
+            packing_text = (
+                "ANMA v1 hybrid ANE-native W8: 280 DiT projection matrices use "
+                "per-output-row U8 + FP32 scale/bias; remaining W8 matrices use "
+                "group-64 affine W8 + FP16 scale/zero")
+        else:
+            packing_text = f"ANMA v1 container, bounded-memory packer v2, group size 64, {args.variant}"
         readme = f"""# AnimaXS {args.variant} DiT pack
 
 This is an experimental AnimaXS converted/quantized derivative for the iPhone XS Max / Apple Metal runtime.
@@ -87,7 +94,7 @@ This is an experimental AnimaXS converted/quantized derivative for the iPhone XS
 - Non-commercial model use only; see `MODEL_LICENSE.md` and `MODEL_NOTICE.txt`.
 - Source: `circlestone-labs/Anima`, revision `{source_revision}`.
 - Source SHA-256: `{source_sha}`.
-- Packing: ANMA v1 container, bounded-memory packer v2, group size 64, `{args.variant}`.
+- Packing: {packing_text}.
 - Output SHA-256: `{output_sha}`.
 - Built on NVIDIA Cosmos; this is not an official CircleStone release.
 

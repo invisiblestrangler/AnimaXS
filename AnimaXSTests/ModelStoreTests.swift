@@ -1185,6 +1185,11 @@ final class ModelStoreTests: XCTestCase {
         XCTAssertEqual(DiTNumericsPolicy.fromVariantID("w8-v2"), .w8LegacyStabilized)
     }
 
+    func testVariantW8ANEV1ResolvesToStabilizedLegacyPolicy() {
+        XCTAssertEqual(DiTNumericsPolicy.fromVariantID("w8-ane-v1"), .w8LegacyStabilized)
+    }
+
+
     func testVariantW8V2NeverResolvesToExperimentalBF16() {
         XCTAssertNotEqual(DiTNumericsPolicy.fromVariantID("w8-v2"), .w8BF16Experimental)
     }

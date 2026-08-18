@@ -35,6 +35,13 @@ struct AnimapkTensor: Codable, Equatable {
     let scaleSize: UInt64?
     let zeroOffset: UInt64?
     let zeroSize: UInt64?
+    /// Optional per-tensor encoding discriminator. New ANE-hybrid packs use
+    /// this to distinguish native row-wise U8/FP32 projection payloads from
+    /// ordinary group-64 W8 while preserving ANMA-v1 storage dtype codes.
+    let quantizationFormat: String?
+    /// SHA-256 over data+scale+zero bytes. Optional for legacy packs; required
+    /// for ANE-native projection tensors and used as their cache identity.
+    let blobSHA256: String?
 
     enum CodingKeys: String, CodingKey {
         case name, shape
@@ -51,6 +58,8 @@ struct AnimapkTensor: Codable, Equatable {
         case scaleSize = "scale_size"
         case zeroOffset = "zero_offset"
         case zeroSize = "zero_size"
+        case quantizationFormat = "quantization_format"
+        case blobSHA256 = "blob_sha256"
     }
 
     /// Byte offset of the packed data region relative to the file start.

@@ -316,6 +316,71 @@ static BOOL A12WriteFusedQKVBundle(NSURL *modelURL, NSUInteger channels, NSUInte
     ], why);
 }
 
+BOOL A12ANEPreparedModelExists(NSString *cacheKey) {
+    NSURL *caches = [NSURL fileURLWithPath:[NSSearchPathForDirectoriesInDomains(
+        NSCachesDirectory, NSUserDomainMask, YES) firstObject] isDirectory:YES];
+    NSURL *base = [caches URLByAppendingPathComponent:@"AnimaXS-ANE" isDirectory:YES];
+    NSString *safe = A12SanitizeCacheKey(cacheKey);
+    NSURL *destination = [base URLByAppendingPathComponent:
+        [safe stringByAppendingString:@".mlmodelc"] isDirectory:YES];
+    return [[NSFileManager defaultManager] fileExistsAtPath:destination.path];
+}
+
+BOOL A12ANEPrepareProjectionModel(NSData *qBytes, NSData *biasF32, NSData *scaleF32,
+                                  NSUInteger inputChannels, NSUInteger outputChannels,
+                                  NSUInteger spatial, NSString *label, NSString *cacheKey,
+                                  NSError **error) {
+    NSError *fileError = nil;
+    NSURL *url = A12PreparedModelURL(cacheKey, &fileError);
+    if (!url) {
+        if (error) *error = fileError ?: A12Error(31, @"ANE template preparation failed");
+        return NO;
+    }
+    if (![url.lastPathComponent hasPrefix:@"."]) return YES;
+    NSString *why = nil;
+    if (!A12WriteW8ConvBundle(url, label, inputChannels, outputChannels, spatial,
+                              qBytes, biasF32, scaleF32, &why)) {
+        [[NSFileManager defaultManager] removeItemAtURL:url error:NULL];
+        if (error) *error = A12Error(32, why ?: @"ANE model patch failed");
+        return NO;
+    }
+    if (!A12FinalizePreparedModelURL(&url, cacheKey, &fileError)) {
+        [[NSFileManager defaultManager] removeItemAtURL:url error:NULL];
+        if (error) *error = fileError ?: A12Error(33, @"ANE model cache finalize failed");
+        return NO;
+    }
+    return YES;
+}
+
+BOOL A12ANEPrepareQKVModel(NSData *qBytes, NSData *qBiasF32, NSData *qScaleF32,
+                           NSData *kBytes, NSData *kBiasF32, NSData *kScaleF32,
+                           NSData *vBytes, NSData *vBiasF32, NSData *vScaleF32,
+                           NSUInteger channels, NSUInteger spatial, NSString *label,
+                           NSString *cacheKey, NSError **error) {
+    NSError *fileError = nil;
+    NSURL *url = A12PreparedModelURL(cacheKey, &fileError);
+    if (!url) {
+        if (error) *error = fileError ?: A12Error(51, @"ANE QKV template preparation failed");
+        return NO;
+    }
+    if (![url.lastPathComponent hasPrefix:@"."]) return YES;
+    NSString *why = nil;
+    if (!A12WriteFusedQKVBundle(url, channels, spatial,
+                                qBytes, qBiasF32, qScaleF32,
+                                kBytes, kBiasF32, kScaleF32,
+                                vBytes, vBiasF32, vScaleF32, &why)) {
+        [[NSFileManager defaultManager] removeItemAtURL:url error:NULL];
+        if (error) *error = A12Error(52, why ?: @"ANE fused QKV patch failed");
+        return NO;
+    }
+    if (!A12FinalizePreparedModelURL(&url, cacheKey, &fileError)) {
+        [[NSFileManager defaultManager] removeItemAtURL:url error:NULL];
+        if (error) *error = fileError ?: A12Error(53, @"ANE QKV model cache finalize failed");
+        return NO;
+    }
+    return YES;
+}
+
 @interface A12ANESurface () {
     A12IOSurfaceRef _surface;
 }
@@ -384,21 +449,59 @@ static BOOL A12WriteFusedQKVBundle(NSURL *modelURL, NSUInteger channels, NSUInte
     _inputChannels = inputChannels; _outputChannels = outputChannels; _spatial = spatial;
     _label = [label copy];
     NSError *fileError = nil;
+    if (!A12ANEPrepareProjectionModel(qBytes, biasF32, scaleF32, inputChannels, outputChannels,
+                                      spatial, label, cacheKey, &fileError)) {
+        if (error) *error = fileError ?: A12Error(33, @"ANE model cache preparation failed");
+        return nil;
+    }
     NSURL *url = A12PreparedModelURL(cacheKey, &fileError);
-    if (!url) { if (error) *error = fileError ?: A12Error(31, @"ANE template preparation failed"); return nil; }
-    BOOL isTemporary = [url.lastPathComponent hasPrefix:@"."];
-    if (isTemporary) {
-        NSString *why = nil;
-        if (!A12WriteW8ConvBundle(url, label, inputChannels, outputChannels, spatial, qBytes, biasF32, scaleF32, &why)) {
-            [[NSFileManager defaultManager] removeItemAtURL:url error:NULL];
-            if (error) *error = A12Error(32, why ?: @"ANE model patch failed");
-            return nil;
-        }
-        if (!A12FinalizePreparedModelURL(&url, cacheKey, &fileError)) {
-            [[NSFileManager defaultManager] removeItemAtURL:url error:NULL];
-            if (error) *error = fileError ?: A12Error(33, @"ANE model cache finalize failed");
-            return nil;
-        }
+    if (!url || [url.lastPathComponent hasPrefix:@"."]) {
+        if (error) *error = fileError ?: A12Error(33, @"ANE prepared model cache missing after preparation");
+        return nil;
+    }
+    Class modelClass = NSClassFromString(@"_ANEModel");
+    Class clientClass = NSClassFromString(@"_ANEClient");
+    _model = ((id(*)(Class,SEL,id,id))objc_msgSend)(modelClass, NSSelectorFromString(@"modelAtURL:key:"),
+                                                    url, A12GenericKey(spatial, inputChannels, outputChannels));
+    _client = ((id(*)(Class,SEL))objc_msgSend)(clientClass, NSSelectorFromString(@"sharedConnection"));
+    if (!_model || !_client) {
+        if (error) *error = A12Error(34, @"ANE model/client construction failed");
+        return nil;
+    }
+    NSError *loadError = nil; double loadMs = 0;
+    if (!A12LoadModel(_client, _model, &loadError, &loadMs)) {
+        if (error) *error = loadError ?: A12Error(35, @"ANE model load failed");
+        return nil;
+    }
+    _loadMilliseconds = loadMs;
+    _loaded = YES;
+    _modelURL = url;
+    return self;
+}
+
+- (nullable instancetype)initPreparedWithInputChannels:(NSUInteger)inputChannels
+                                        outputChannels:(NSUInteger)outputChannels
+                                               spatial:(NSUInteger)spatial
+                                                 label:(NSString *)label
+                                              cacheKey:(NSString *)cacheKey
+                                                 error:(NSError **)error {
+    self = [super init];
+    if (!self) return nil;
+    if (!A12ANEIsAvailable()) {
+        if (error) *error = A12Error(30, A12ANERuntimeStatus());
+        return nil;
+    }
+    if (!A12ANEPreparedModelExists(cacheKey)) {
+        if (error) *error = A12Error(36, @"ANE prepared model cache entry is missing");
+        return nil;
+    }
+    _inputChannels = inputChannels; _outputChannels = outputChannels; _spatial = spatial;
+    _label = [label copy];
+    NSError *fileError = nil;
+    NSURL *url = A12PreparedModelURL(cacheKey, &fileError);
+    if (!url || [url.lastPathComponent hasPrefix:@"."]) {
+        if (error) *error = fileError ?: A12Error(36, @"ANE prepared model cache could not be opened");
+        return nil;
     }
     Class modelClass = NSClassFromString(@"_ANEModel");
     Class clientClass = NSClassFromString(@"_ANEClient");
@@ -475,24 +578,51 @@ static id A12QKVOutputObject(NSString *symbol, id q, id k, id v) {
     if (!A12ANEIsAvailable()) { if (error) *error = A12Error(50, A12ANERuntimeStatus()); return nil; }
     _channels = channels; _spatial = spatial; _label = [label copy];
     NSError *fileError = nil;
+    if (!A12ANEPrepareQKVModel(qBytes, qBiasF32, qScaleF32,
+                               kBytes, kBiasF32, kScaleF32,
+                               vBytes, vBiasF32, vScaleF32,
+                               channels, spatial, label, cacheKey, &fileError)) {
+        if (error) *error = fileError ?: A12Error(53, @"ANE QKV cache preparation failed");
+        return nil;
+    }
     NSURL *url = A12PreparedModelURL(cacheKey, &fileError);
-    if (!url) { if (error) *error = fileError ?: A12Error(51, @"ANE QKV template preparation failed"); return nil; }
-    BOOL isTemporary = [url.lastPathComponent hasPrefix:@"."];
-    if (isTemporary) {
-        NSString *why = nil;
-        if (!A12WriteFusedQKVBundle(url, channels, spatial,
-                                    qBytes, qBiasF32, qScaleF32,
-                                    kBytes, kBiasF32, kScaleF32,
-                                    vBytes, vBiasF32, vScaleF32, &why)) {
-            [[NSFileManager defaultManager] removeItemAtURL:url error:NULL];
-            if (error) *error = A12Error(52, why ?: @"ANE fused QKV patch failed");
-            return nil;
-        }
-        if (!A12FinalizePreparedModelURL(&url, cacheKey, &fileError)) {
-            [[NSFileManager defaultManager] removeItemAtURL:url error:NULL];
-            if (error) *error = fileError ?: A12Error(53, @"ANE QKV model cache finalize failed");
-            return nil;
-        }
+    if (!url || [url.lastPathComponent hasPrefix:@"."]) {
+        if (error) *error = fileError ?: A12Error(53, @"ANE prepared QKV cache missing after preparation");
+        return nil;
+    }
+    Class modelClass = NSClassFromString(@"_ANEModel");
+    Class clientClass = NSClassFromString(@"_ANEClient");
+    _model = ((id(*)(Class,SEL,id,id))objc_msgSend)(modelClass, NSSelectorFromString(@"modelAtURL:key:"),
+                                                    url, A12QKVKey(spatial, channels));
+    _client = ((id(*)(Class,SEL))objc_msgSend)(clientClass, NSSelectorFromString(@"sharedConnection"));
+    if (!_model || !_client) { if (error) *error = A12Error(54, @"ANE QKV model/client construction failed"); return nil; }
+    NSError *loadError = nil; double loadMs = 0;
+    if (!A12LoadModel(_client, _model, &loadError, &loadMs)) {
+        if (error) *error = loadError ?: A12Error(55, @"ANE QKV model load failed");
+        return nil;
+    }
+    _loadMilliseconds = loadMs; _loaded = YES; _modelURL = url;
+    return self;
+}
+
+- (nullable instancetype)initPreparedWithChannels:(NSUInteger)channels
+                                           spatial:(NSUInteger)spatial
+                                             label:(NSString *)label
+                                          cacheKey:(NSString *)cacheKey
+                                             error:(NSError **)error {
+    self = [super init];
+    if (!self) return nil;
+    if (!A12ANEIsAvailable()) { if (error) *error = A12Error(50, A12ANERuntimeStatus()); return nil; }
+    if (!A12ANEPreparedModelExists(cacheKey)) {
+        if (error) *error = A12Error(56, @"ANE prepared QKV cache entry is missing");
+        return nil;
+    }
+    _channels = channels; _spatial = spatial; _label = [label copy];
+    NSError *fileError = nil;
+    NSURL *url = A12PreparedModelURL(cacheKey, &fileError);
+    if (!url || [url.lastPathComponent hasPrefix:@"."]) {
+        if (error) *error = fileError ?: A12Error(56, @"ANE prepared QKV cache could not be opened");
+        return nil;
     }
     Class modelClass = NSClassFromString(@"_ANEModel");
     Class clientClass = NSClassFromString(@"_ANEClient");

@@ -38,7 +38,7 @@ struct ModelManifestEntry: Codable, Equatable {
 /// Runtime descriptor for one accepted model pack variant.
 ///
 /// Unlike `ModelVariant` (which is the persisted receipt shape), this carries
-/// the human-visible variant id ("w4" or "w8-v2") and the display filename so
+/// the human-visible variant id ("w4", "w8-v2", or "w8-ane-v1") and the display filename so
 /// telemetry can report which pack actually ran even though the app-owned
 /// local file is always named after the W4 slot.
 struct ModelVariantDescriptor: Hashable {
@@ -67,7 +67,10 @@ enum DiTNumericsPolicy: String, Equatable {
     case w8BF16Experimental
 
     static func fromVariantID(_ id: String) -> DiTNumericsPolicy {
-        id == "w8-v2" ? .w8LegacyStabilized : .w4Legacy
+        switch id {
+        case "w8-v2", "w8-ane-v1": return .w8LegacyStabilized
+        default: return .w4Legacy
+        }
     }
 }
 
@@ -89,6 +92,13 @@ enum ModelManifest {
         displayFilename: "anima-turbo-v1.0-xsmax-w8-v2.animapk",
         size: 2_232_975_360,
         sha256: "8b63c7fd9b5872805e5a2ba799ab6d79989c54a6a89a4f34edf022c59c9ed130")
+
+    /// Descriptor for the ANE-native W8 DiT variant.
+    static let ditW8ANEV1 = ModelVariantDescriptor(
+        id: "w8-ane-v1",
+        displayFilename: "anima-turbo-v1.0-xsmax-w8-ane-v1.animapk",
+        size: 2_128_838_656,
+        sha256: "f5c80a25114b62a6807996180d439c5d12828d7392c604e1eee15acb28977dc4")
 
     /// Matches `matchedSize` + `matchedSHA256` against the entry's primary
     /// variant then accepted alternates, returning the corresponding
@@ -124,12 +134,20 @@ enum ModelManifest {
     }
 
     /// The descriptor for an alternate variant. Only the DiT entry has
-    /// alternates; the W8-v2 alternate is identified by its known descriptor.
+    /// alternates; the W8-v2 and W8-ANE-v1 alternates are identified by their
+    /// known descriptors.
     private static func alternateDescriptor(
         for entry: ModelManifestEntry, alternateIndex: Int, variant: ModelVariant
     ) -> ModelVariantDescriptor {
-        if entry.component == .dit, alternateIndex == 0 {
-            return ditW8V2
+        if entry.component == .dit {
+            switch alternateIndex {
+            case 0:
+                return ditW8V2
+            case 1:
+                return ditW8ANEV1
+            default:
+                break
+            }
         }
         // Fallback for any future alternate: synthesize a descriptor.
         return ModelVariantDescriptor(
@@ -140,7 +158,7 @@ enum ModelManifest {
     }
 
     static let entries: [ModelManifestEntry] = [
-        // The DiT slot accepts either the W4 or the W8-v2 pack. Whichever is
+        // The DiT slot accepts the W4, W8-v2, or W8-ANE-v1 pack. Whichever is
         // imported is the DiT used by generation. W4 remains the primary so
         // existing W4 installs/receipts stay valid.
         entry(
@@ -151,6 +169,9 @@ enum ModelManifest {
                 ModelVariant(
                     size: 2_232_975_360,
                     sha256: "8b63c7fd9b5872805e5a2ba799ab6d79989c54a6a89a4f34edf022c59c9ed130"),
+                ModelVariant(
+                    size: 2_128_838_656,
+                    sha256: "f5c80a25114b62a6807996180d439c5d12828d7392c604e1eee15acb28977dc4"),
             ]),
         entry(
             "qwen3-0.6b-xsmax-w8.animapk", size: 635_305_984,

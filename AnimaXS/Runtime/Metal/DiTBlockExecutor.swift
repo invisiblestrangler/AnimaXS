@@ -63,7 +63,7 @@ final class DiTBlockExecutor {
 
     private let context: MetalContext
     private let file: AnimapkFile
-    private let locator: DiTBlockLocator
+    private let blockRanges: [AnimapkExecutionRange]
     private let streamer: WeightStreamer
     private let buffers: BufferPool
     private let linear: LinearExecutor
@@ -103,13 +103,18 @@ final class DiTBlockExecutor {
          monitor: NumericalMonitor? = nil,
          optimization: InferenceOptimizationConfig = .currentBaseline,
          crossKVCache: CrossKVCache? = nil) throws {
-        let locator = try DiTBlockLocator(file: file)
-        guard let maximum = locator.blocks.map(\.length).max(), maximum <= UInt64(Int.max) else {
+        let ranges: [AnimapkExecutionRange]
+        if optimization.linearBackend == .aneHybridW8 {
+            ranges = try DiTANEHybridMetalLocator(file: file).blocks
+        } else {
+            ranges = try DiTBlockLocator(file: file).blocks
+        }
+        guard let maximum = ranges.map(\.length).max(), maximum <= UInt64(Int.max) else {
             throw AnimapkError.validation("invalid DiT execution ranges")
         }
         self.context = context
         self.file = file
-        self.locator = locator
+        self.blockRanges = ranges
         self.optimization = optimization
         self.crossKVCache = crossKVCache
         if optimization.linearBackend == .aneHybridW8 {
@@ -169,7 +174,7 @@ final class DiTBlockExecutor {
                 diagnosticBranchCompleted: diagnosticBranchCompleted)
             return
         }
-        let range = try locator.block(blockIndex)
+        let range = try blockRange(blockIndex)
         metrics?.beginBlock(blockIndex)
         // Load the block's weights unless a prefetch (prologue or previous
         // iteration) already placed them in this slot.
@@ -237,7 +242,7 @@ final class DiTBlockExecutor {
         var prefetchError: Error?
         if let prefetchIndex {
             do {
-                let nextRange = try locator.block(prefetchIndex)
+                let nextRange = try blockRange(prefetchIndex)
                 let copyStart = ProcessInfo.processInfo.systemUptime
                 let result = try streamer.load(
                     nextRange, from: file, slot: prefetchSlot,
@@ -298,16 +303,16 @@ final class DiTBlockExecutor {
         }
         metrics?.beginBlock(blockIndex)
 
-        // Model preparation reads the original mmap'd pack, not the streamed
-        // ring slot. Do it before marking the slot in-flight so first-step ANE
-        // compile/load latency never extends the ring's ownership window.
+        // Espresso files were materialized before diffusion. First use here
+        // only constructs/loads the already-prepared ANE programs; no weight
+        // quantization, hashing or model.espresso.weights write is allowed.
         let modelResult = try aneModelCache.models(for: blockIndex)
         if modelResult.newlyLoadedMilliseconds > 0 {
             metrics?.recordANEModelLoad(seconds: modelResult.newlyLoadedMilliseconds / 1_000.0)
         }
         let models = modelResult.models
 
-        let range = try locator.block(blockIndex)
+        let range = try blockRange(blockIndex)
         if streamer.loadedLogicalIndexes[slot] != blockIndex {
             let copyStart = ProcessInfo.processInfo.systemUptime
             let result = try streamer.load(range, from: file, slot: slot, mode: .copied)
@@ -318,7 +323,7 @@ final class DiTBlockExecutor {
                 bytes: Int(range.length),
                 seconds: ProcessInfo.processInfo.systemUptime - copyStart)
         }
-        let weights = try BlockWeights(range: range, ring: streamer.buffer(for: slot))
+        let weights = try ANEBlockWeights(range: range, ring: streamer.buffer(for: slot))
         streamer.markInFlight(slot)
         var slotReleased = false
         defer {
@@ -358,7 +363,7 @@ final class DiTBlockExecutor {
         var prefetchError: Error?
         if let prefetchIndex, prefetchSlot != slot {
             do {
-                let nextRange = try locator.block(prefetchIndex)
+                let nextRange = try blockRange(prefetchIndex)
                 let copyStart = ProcessInfo.processInfo.systemUptime
                 let result = try streamer.load(nextRange, from: file, slot: prefetchSlot, mode: .copied)
                 guard result.mode != .noCopy else {
@@ -618,7 +623,7 @@ final class DiTBlockExecutor {
         residual: MTLBuffer,
         siluEmb: MTLBuffer,
         adalnLora: MTLBuffer,
-        weights: BlockWeights,
+        weights: any DiTAuxWeights,
         cross: Bool
     ) throws -> (modulation: MTLBuffer, projectionInput: MTLBuffer) {
         let modulation = try encodeModulation(
@@ -659,7 +664,7 @@ final class DiTBlockExecutor {
         cross: Bool,
         blockIndex: Int,
         rope: MTLBuffer,
-        weights: BlockWeights,
+        weights: any DiTAuxWeights,
         slot: Int,
         projectedKVAvailable: Bool
     ) throws -> MTLBuffer {
@@ -817,7 +822,7 @@ final class DiTBlockExecutor {
         residual: MTLBuffer,
         siluEmb: MTLBuffer,
         adalnLora: MTLBuffer,
-        weights: BlockWeights
+        weights: any DiTAuxWeights
     ) throws -> (modulation: MTLBuffer, projectionInput: MTLBuffer) {
         let modulation = try encodeModulation(
             command, siluEmb: siluEmb, adalnLora: adalnLora,
@@ -967,10 +972,17 @@ final class DiTBlockExecutor {
         metrics?.recordHostWait(seconds: max(0, hostWindowSeconds - gpuSeconds))
     }
 
+    private func blockRange(_ logicalIndex: Int) throws -> AnimapkExecutionRange {
+        guard blockRanges.indices.contains(logicalIndex) else {
+            throw AnimapkError.validation("DiT block index \(logicalIndex) is out of range")
+        }
+        return blockRanges[logicalIndex]
+    }
+
     /// Load a block's weights into a slot without executing it (ping-pong
     /// prologue). The loop's in-flight guard still applies.
     func prefetch(blockIndex: Int, slot: Int) throws {
-        let range = try locator.block(blockIndex)
+        let range = try blockRange(blockIndex)
         let copyStart = ProcessInfo.processInfo.systemUptime
         let result = try streamer.load(
             range, from: file, slot: slot,
@@ -1767,7 +1779,69 @@ final class CommandBufferGate {
     }
 }
 
-private struct BlockWeights {
+private protocol DiTAuxWeights {
+    var modSelf1: QuantizedLinearWeightBuffers { get }
+    var modSelf2: QuantizedLinearWeightBuffers { get }
+    var modCross1: QuantizedLinearWeightBuffers { get }
+    var modCross2: QuantizedLinearWeightBuffers { get }
+    var modMLP1: QuantizedLinearWeightBuffers { get }
+    var modMLP2: QuantizedLinearWeightBuffers { get }
+    var selfQNorm: Int { get }
+    var selfKNorm: Int { get }
+    var crossQNorm: Int { get }
+    var crossKNorm: Int { get }
+}
+
+/// The compact Metal-only half of one ANE-native DiT block: six modulation
+/// matrices plus four learned RMSNorm vectors. The ten large projections are
+/// deliberately absent from this streamed range and live in prepared ANE models.
+private struct ANEBlockWeights: DiTAuxWeights {
+    let modSelf1, modSelf2, modCross1, modCross2, modMLP1, modMLP2: QuantizedLinearWeightBuffers
+    let selfQNorm, selfKNorm, crossQNorm, crossKNorm: Int
+
+    init(range: AnimapkExecutionRange, ring: MTLBuffer) throws {
+        let prefix = "model.diffusion_model.blocks.\(range.logicalIndex)."
+        var spans: [String: AnimapkTensorSpans] = [:]
+        for item in range.tensors {
+            guard item.tensor.name.hasPrefix(prefix),
+                  item.tensor.quantizationFormat != ANEW8NativePack.tensorFormat else {
+                throw AnimapkError.validation("invalid tensor in ANE Metal-only block range")
+            }
+            spans[String(item.tensor.name.dropFirst(prefix.count))] = item
+        }
+        func matrix(_ name: String, _ rows: Int, _ columns: Int) throws -> QuantizedLinearWeightBuffers {
+            guard let item = spans[name] else {
+                throw AnimapkError.validation("missing ANE Metal matrix \(prefix)\(name)")
+            }
+            return try DiTQuantizedWeightFactory.makeMatrix(
+                item, ring: ring, rows: rows, columns: columns,
+                label: "DiT ANE Metal \(prefix)\(name)")
+        }
+        func norm(_ name: String) throws -> Int {
+            guard let item = spans[name], item.tensor.shape == [128],
+                  item.tensor.storage == .fp16, item.data.length == 256,
+                  item.data.offset <= UInt64(Int.max) else {
+                throw AnimapkError.validation("invalid ANE Metal norm \(prefix)\(name)")
+            }
+            return Int(item.data.offset)
+        }
+        modSelf1 = try matrix("adaln_modulation_self_attn.1.weight", 256, 2_048)
+        modSelf2 = try matrix("adaln_modulation_self_attn.2.weight", 6_144, 256)
+        modCross1 = try matrix("adaln_modulation_cross_attn.1.weight", 256, 2_048)
+        modCross2 = try matrix("adaln_modulation_cross_attn.2.weight", 6_144, 256)
+        modMLP1 = try matrix("adaln_modulation_mlp.1.weight", 256, 2_048)
+        modMLP2 = try matrix("adaln_modulation_mlp.2.weight", 6_144, 256)
+        selfQNorm = try norm("self_attn.q_norm.weight")
+        selfKNorm = try norm("self_attn.k_norm.weight")
+        crossQNorm = try norm("cross_attn.q_norm.weight")
+        crossKNorm = try norm("cross_attn.k_norm.weight")
+        guard spans.count == 10 else {
+            throw AnimapkError.validation("ANE Metal-only DiT block must contain exactly 10 tensors")
+        }
+    }
+}
+
+private struct BlockWeights: DiTAuxWeights {
     let modSelf1, modSelf2, modCross1, modCross2, modMLP1, modMLP2: QuantizedLinearWeightBuffers
     let selfQ, selfK, selfV, selfO: QuantizedLinearWeightBuffers
     let crossQ, crossK, crossV, crossO: QuantizedLinearWeightBuffers

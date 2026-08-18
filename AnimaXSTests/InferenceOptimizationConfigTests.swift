@@ -749,12 +749,33 @@ final class InferenceOptimizationConfigTests: XCTestCase {
         }
     }
 
-    // The central compatibility gate allows the ANE backend itself. Runtime
-    // preflight (real device + W8 tensor inventory) is intentionally handled by
-    // ANEW8DiTModelCache because this pure config layer has no model file.
-    func testANEHybridBackendPassesCentralConfigGate() {
+    // Without a resolved variant id the pure settings validator keeps its
+    // historical behavior. Once the model is resolved, the native pack/backend
+    // pair is enforced explicitly.
+    func testANEHybridBackendPassesConfigOnlyGateWithoutResolvedPack() {
         XCTAssertNil(InferenceOptimizationConfig.blockingReason(
             for: config(linearBackend: .aneHybridW8), numerics: .w8LegacyStabilized))
+    }
+
+    func testANEHybridRequiresNativePackVariant() {
+        let c = config(linearBackend: .aneHybridW8)
+        XCTAssertNil(InferenceOptimizationConfig.blockingReason(
+            for: c, numerics: .w8LegacyStabilized, ditVariantID: "w8-ane-v1"))
+        for id in ["w4", "w8-v2"] {
+            let reason = InferenceOptimizationConfig.blockingReason(
+                for: c, numerics: .w8LegacyStabilized, ditVariantID: id)
+            XCTAssertEqual(reason, InferenceOptimizationConfig.aneNativePackRequiredReason)
+        }
+    }
+
+    func testNativeANEPackBlockedFromNonANEBackends() {
+        let reason = InferenceOptimizationConfig.blockingReason(
+            for: config(linearBackend: .dequantizedMPS),
+            numerics: .w8LegacyStabilized, ditVariantID: "w8-ane-v1")
+        XCTAssertEqual(reason, InferenceOptimizationConfig.aneNativeBackendRequiredReason)
+        XCTAssertNil(InferenceOptimizationConfig.blockingReason(
+            for: config(linearBackend: .dequantizedMPS),
+            numerics: .w8LegacyStabilized, ditVariantID: "w8-v2"))
     }
 
     // Experimental BF16 numerics + strided token-major attention is blocked:

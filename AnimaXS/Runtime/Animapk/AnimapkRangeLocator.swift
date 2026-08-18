@@ -173,6 +173,59 @@ struct DiTBlockLocator {
     }
 }
 
+/// Compact per-block stream ranges for the ANE-native hybrid pack.
+///
+/// The packer physically places the ten ANE projection blobs after the tensors
+/// still consumed by Metal. This locator excludes those ANE-native blobs and
+/// returns only the contiguous Metal prefix so the streaming ring never copies
+/// ~63 MiB/block of projection weights that ANE reads from its prepared model
+/// cache instead.
+struct DiTANEHybridMetalLocator {
+    static let nativeFormat = "ane_u8_per_row_fp32_v1"
+    static let expectedNativePerBlock = 10
+    let blocks: [AnimapkExecutionRange]
+
+    init(file: AnimapkFile) throws {
+        guard file.component == "dit", file.quantScheme == "w8-ane-hybrid-v1" else {
+            throw AnimapkError.validation("ANE hybrid Metal locator requires w8-ane-hybrid-v1 DiT pack")
+        }
+        var ranges: [AnimapkExecutionRange] = []
+        ranges.reserveCapacity(DiTBlockLocator.blockCount)
+        for logicalIndex in 0..<DiTBlockLocator.blockCount {
+            ranges.append(try Self.metalRange(tensors: file.tensors, logicalIndex: logicalIndex))
+        }
+        self.blocks = ranges
+    }
+
+    static func metalRange(
+        tensors: [AnimapkTensor], logicalIndex: Int
+    ) throws -> AnimapkExecutionRange {
+        let prefix = "model.diffusion_model.blocks.\(logicalIndex)."
+        let all = tensors.filter { $0.name.hasPrefix(prefix) }
+        let native = all.filter { $0.quantizationFormat == Self.nativeFormat }
+        let metal = all.filter { $0.quantizationFormat != Self.nativeFormat }
+        guard all.count == 20, native.count == Self.expectedNativePerBlock, metal.count == 10 else {
+            throw AnimapkError.validation(
+                "ANE hybrid block \(logicalIndex) must contain 10 Metal + 10 native projection tensors")
+        }
+        let range = try AnimapkRangeBuilder.executionRange(
+            tensors: metal, exactPrefix: prefix, logicalIndex: logicalIndex)
+        let metalEnd = range.fileRange.upperBound
+        guard let firstNative = native.map(\.blobOffset).min(), firstNative >= metalEnd else {
+            throw AnimapkError.validation(
+                "ANE hybrid block \(logicalIndex) projection blobs interleave its Metal stream range")
+        }
+        return range
+    }
+
+    func block(_ logicalIndex: Int) throws -> AnimapkExecutionRange {
+        guard blocks.indices.contains(logicalIndex) else {
+            throw AnimapkError.validation("DiT ANE hybrid block index \(logicalIndex) is out of range")
+        }
+        return blocks[logicalIndex]
+    }
+}
+
 struct DiTFinalLayerLocator {
     let range: AnimapkExecutionRange
 

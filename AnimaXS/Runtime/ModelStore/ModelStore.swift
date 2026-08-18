@@ -193,7 +193,7 @@ actor ModelStore {
                   matchedSize: receipt.expectedSize,
                   matchedSHA256: receipt.expectedSHA256) else {
             throw AnimapkError.validation(
-                "valid receipt for \\(entry.component.rawValue) but no manifest variant matches")
+                "valid receipt for \(entry.component.rawValue) but no manifest variant matches")
         }
         return ResolvedModelPack(url: url, component: entry.component, variant: variant)
     }

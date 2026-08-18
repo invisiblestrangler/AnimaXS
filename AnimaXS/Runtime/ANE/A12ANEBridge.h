@@ -10,6 +10,21 @@ NS_ASSUME_NONNULL_BEGIN
 FOUNDATION_EXPORT BOOL A12ANEIsAvailable(void);
 FOUNDATION_EXPORT NSString *A12ANERuntimeStatus(void);
 
+/// Disk-cache preparation is intentionally separate from private ANE loading.
+/// These functions only materialize the proven Espresso bundle under the app's
+/// cache directory and are safe to call during explicit model import.
+FOUNDATION_EXPORT BOOL A12ANEPreparedModelExists(NSString *cacheKey);
+FOUNDATION_EXPORT BOOL A12ANEPrepareProjectionModel(
+    NSData *qBytes, NSData *biasF32, NSData *scaleF32,
+    NSUInteger inputChannels, NSUInteger outputChannels, NSUInteger spatial,
+    NSString *label, NSString *cacheKey, NSError **error);
+FOUNDATION_EXPORT BOOL A12ANEPrepareQKVModel(
+    NSData *qBytes, NSData *qBiasF32, NSData *qScaleF32,
+    NSData *kBytes, NSData *kBiasF32, NSData *kScaleF32,
+    NSData *vBytes, NSData *vBiasF32, NSData *vScaleF32,
+    NSUInteger channels, NSUInteger spatial, NSString *label,
+    NSString *cacheKey, NSError **error);
+
 @interface A12ANESurface : NSObject
 @property(nonatomic, readonly) id<MTLBuffer> metalBuffer;
 @property(nonatomic, readonly) NSUInteger channels;
@@ -41,6 +56,15 @@ FOUNDATION_EXPORT NSString *A12ANERuntimeStatus(void);
                                cacheKey:(NSString *)cacheKey
                                   error:(NSError **)error;
 
+/// Loads an already-prepared model. Never writes model.espresso.weights.
+- (nullable instancetype)initPreparedWithInputChannels:(NSUInteger)inputChannels
+                                        outputChannels:(NSUInteger)outputChannels
+                                               spatial:(NSUInteger)spatial
+                                                 label:(NSString *)label
+                                              cacheKey:(NSString *)cacheKey
+                                                 error:(NSError **)error
+    NS_SWIFT_NAME(init(preparedInputChannels:outputChannels:spatial:label:cacheKey:));
+
 - (BOOL)evaluateInput:(A12ANESurface *)input
                 output:(A12ANESurface *)output
            milliseconds:(nullable double *)milliseconds
@@ -70,6 +94,14 @@ FOUNDATION_EXPORT NSString *A12ANERuntimeStatus(void);
                                    label:(NSString *)label
                                 cacheKey:(NSString *)cacheKey
                                    error:(NSError **)error;
+
+/// Loads an already-prepared fused QKV model. Never writes weights.
+- (nullable instancetype)initPreparedWithChannels:(NSUInteger)channels
+                                           spatial:(NSUInteger)spatial
+                                             label:(NSString *)label
+                                          cacheKey:(NSString *)cacheKey
+                                             error:(NSError **)error
+    NS_SWIFT_NAME(init(preparedChannels:spatial:label:cacheKey:));
 
 - (BOOL)evaluateInput:(A12ANESurface *)input
                qOutput:(A12ANESurface *)qOutput

@@ -201,6 +201,9 @@ struct InferenceOptimizationConfig: Equatable {
     /// carries one (defense-in-depth).
     static let linearBackendBlockingReason = "P8 direct QGEMM (.directQuantized / .hybrid) is quarantined for device use: it measured ~10x slower than dequantized MPS on the A12 device (performance regression, not a proven correctness failure)."
 
+    static let aneNativePackRequiredReason = "ANE Hybrid W8 requires the ANE-native W8 pack (w8-ane-v1). Import that pack before using this backend."
+    static let aneNativeBackendRequiredReason = "The ANE-native W8 pack can only run with ANE Hybrid W8 because its projection tensors use ANE row-wise quantization."
+
     /// EXPERIMENTAL BF16 numerics + strided token-major attention layout.
     /// `AttentionExecutor` throws "P4 strided token-major attention does not
     /// support bf16Compute numerics" for this exact combination — the BF16
@@ -257,19 +260,32 @@ struct InferenceOptimizationConfig: Equatable {
     /// reason and left exactly as the user set it.
     static func blockingReason(
         for config: InferenceOptimizationConfig,
-        numerics: DiTNumericsPolicy = .w4Legacy
+        numerics: DiTNumericsPolicy = .w4Legacy,
+        ditVariantID: String? = nil
     ) -> String? {
         // 1. P6 no-copy (Task 5): a physical A12 run hit a real GPU page
         // fault while no-copy bytes were being served.
         if config.noCopyWeightSource {
             return noCopyBlockingReason
         }
-        // 2. P8 quarantined linear backends (Task 4): measured ~10x slower
+        // 2. The ANE-native pack and ANE backend are an inseparable pair.
+        // Native projection scale/bias bytes must never reach the group-64
+        // MPS/QGEMM decoders, and the ANE backend must never runtime-repack an
+        // old W8-v2 pack.
+        if let ditVariantID {
+            if config.linearBackend == .aneHybridW8, ditVariantID != "w8-ane-v1" {
+                return aneNativePackRequiredReason
+            }
+            if ditVariantID == "w8-ane-v1", config.linearBackend != .aneHybridW8 {
+                return aneNativeBackendRequiredReason
+            }
+        }
+        // 3. P8 quarantined linear backends (Task 4): measured ~10x slower
         // than dequantized MPS on the A12 device.
         if config.linearBackend.isQuarantined {
             return linearBackendBlockingReason
         }
-        // 3. Experimental BF16 numerics + strided token-major attention:
+        // 4. Experimental BF16 numerics + strided token-major attention:
         // AttentionExecutor refuses bf16Compute for the strided layout.
         // Only the explicit experimental policy resolves to BF16 numerics
         // (w8LegacyStabilized -> legacy/legacy, compatible with strided).
