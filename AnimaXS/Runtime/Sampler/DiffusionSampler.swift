@@ -92,10 +92,13 @@ final class DiffusionSampler {
         preparation = try DiTPreparationExecutor(
             context: context, file: file, activationNumerics: resolvedActivation,
             monitor: monitor, optimization: optimization)
-        // P5: per-generation cross-attention K/V cache. Created when the toggle
-        // is on; if the device cannot allocate the buffer it fails gracefully
-        // to nil and the legacy per-step projection path runs (never crashes).
-        let cache = optimization.crossKVCache ? CrossKVCache(device: context.device) : nil
+        // P5: per-generation exact cross-attention K/V cache. The ANE W8
+        // backend always requests it because device measurements show that the
+        // post-hit six-program working set materially reduces private-runtime
+        // load/residency/unload cost. Allocation failure still falls back
+        // safely to bounded full8 execution for every traversal.
+        let cache = Self.shouldUseCrossKVCache(optimization: optimization)
+            ? CrossKVCache(device: context.device) : nil
         self.crossKVCache = cache
         forward = try DitForward(
             context: context, file: file, attentionNumerics: resolvedAttention,
@@ -117,6 +120,12 @@ final class DiffusionSampler {
             if let base = bytes.baseAddress { memcpy(rope.contents(), base, bytes.count) }
         }
         self.rope = rope
+    }
+
+    /// Pure policy seam: P5 remains opt-in for Metal backends, while ANE
+    /// makes exact K/V reuse part of its measured production recipe.
+    static func shouldUseCrossKVCache(optimization: InferenceOptimizationConfig) -> Bool {
+        optimization.crossKVCache || optimization.linearBackend == .aneHybridW8
     }
 
     /// Runs the eight model evaluations and writes the final fp32 latent.

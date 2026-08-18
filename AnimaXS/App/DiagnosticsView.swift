@@ -279,7 +279,7 @@ struct DiagnosticsView: View {
     /// math on Metal.
     private var aneHybridNote: some View {
         Label {
-            Text("ANE hybrid (A12/H11): W8-only experimental device backend. Self/cross-attention projection GEMMs and MLP1/MLP2 run on ANE; AdaLN, RMSNorm, RoPE, attention, GELU and residual math stay on Metal. Use for sideload/device testing, not App Store distribution.")
+            Text("ANE hybrid (A12/H11): W8-only experimental device backend. Self/cross-attention projection GEMMs and MLP1/MLP2 run on ANE; AdaLN, RMSNorm, RoPE, attention, GELU and residual math stay on Metal. Exact cross-attention K/V caching is automatically requested for this backend even when the standalone P5 toggle is off; if its private buffer cannot be allocated, ANE falls back to bounded full8 streaming. Use for sideload/device testing, not App Store distribution.")
                 .font(.caption2)
         } icon: {
             Image(systemName: "cpu")

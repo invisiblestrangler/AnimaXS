@@ -303,6 +303,11 @@ struct GenerationMetrics: Equatable {
             lines.append("Direct MPS linear I/O: \(config.directLinearMPSIO ? "on" : "off")")
             lines.append("Ping-pong weight streaming: \(config.pingPongWeightStreaming ? "on" : "off")")
             lines.append("Numerical monitor: \(config.numericalMonitoring ? "on" : "off")")
+            if config.linearBackend == .aneHybridW8 && !config.crossKVCache {
+                lines.append("Cross-attention K/V cache: auto (ANE)")
+            } else {
+                lines.append("Cross-attention K/V cache: \(config.crossKVCache ? "on" : "off")")
+            }
             lines.append("Mmap no-copy weight source: \(config.noCopyWeightSource ? "on" : "off")")
         }
         lines.append("")
