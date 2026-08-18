@@ -6,6 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -139,6 +144,260 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             test
         timeout-minutes: 30
+
+  # Failure diagnostics are deliberately separate from the primary jobs. They
+  # rerun the relevant command and capture output *inside the runner*, then post
+  # the compact result to the PR. Do not replace this with Actions log-download
+  # API calls; see CI_DEBUG_PROTOCOL.md.
+
+  project-consistency-diagnostics:
+    name: Project consistency failure bot
+    if: ${{ always() && github.event_name == 'pull_request' && needs.project-consistency.result == 'failure' }}
+    needs: [project-consistency]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Reproduce and capture project-consistency failure
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          LOG="$RUNNER_TEMP/project-consistency.log"
+          (
+            set -e
+            sudo xcode-select -s "$DEVELOPER_DIR"
+            xcodebuild -version
+            curl --fail --location --silent --show-error \
+              "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+              --output "$RUNNER_TEMP/xcodegen.zip"
+            echo "${XCODEGEN_ZIP_SHA256}  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
+            ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP"
+            export PATH="$RUNNER_TEMP/xcodegen/bin:$PATH"
+            xcodegen generate
+            git diff --exit-code -- AnimaXS.xcodeproj project.yml
+          ) 2>&1 | tee "$LOG"
+          STATUS=${PIPESTATUS[0]}
+          python3 .github/scripts/extract_ci_failure.py \
+            "$LOG" \
+            "project consistency" \
+            "$RUNNER_TEMP/project-consistency-diagnostics.md" \
+            "$STATUS" \
+            "xcodegen generate && git diff --exit-code -- AnimaXS.xcodeproj project.yml"
+          exit 0
+      - name: Post project-consistency diagnostics to PR
+        if: ${{ always() }}
+        uses: actions/github-script@v8
+        env:
+          DIAG_PATH: ${{ runner.temp }}/project-consistency-diagnostics.md
+          JOB_KEY: project-consistency
+          JOB_LABEL: Project consistency
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = `<!-- animaxs-ci-diagnostic:${process.env.JOB_KEY}:${context.payload.pull_request.head.sha} -->`;
+            let diagnostics;
+            if (fs.existsSync(process.env.DIAG_PATH)) {
+              diagnostics = fs.readFileSync(process.env.DIAG_PATH, 'utf8');
+            } else {
+              diagnostics = `### CI FAILURE — ${process.env.JOB_LABEL}\n\nThe diagnostic rerun did not produce its capture file. Fix the CI diagnostic path before diagnosing source code.`;
+            }
+            const runURL = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `${marker}\n${diagnostics}\n**PR head:** \`${context.payload.pull_request.head.sha}\`  \n**Diagnostic workflow run:** ${runURL}`;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+  iphone-build-diagnostics:
+    name: iPhone build failure bot
+    if: ${{ always() && github.event_name == 'pull_request' && needs.iphone-build.result == 'failure' }}
+    needs: [iphone-build]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Reproduce and capture generic iPhone build failure
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          LOG="$RUNNER_TEMP/iphone-build.log"
+          (
+            set -e
+            sudo xcode-select -s "$DEVELOPER_DIR"
+            xcodebuild -version
+            if ! xcrun --find metal >/dev/null 2>&1; then
+              xcodebuild -downloadComponent MetalToolchain
+              sudo xcode-select -s "$DEVELOPER_DIR"
+            fi
+            xcodebuild \
+              -project AnimaXS.xcodeproj \
+              -scheme AnimaXS \
+              -configuration Debug \
+              -destination 'generic/platform=iOS' \
+              -derivedDataPath .derivedData-ci-diagnostic \
+              CODE_SIGNING_ALLOWED=NO \
+              build
+          ) 2>&1 | tee "$LOG"
+          STATUS=${PIPESTATUS[0]}
+          python3 .github/scripts/extract_ci_failure.py \
+            "$LOG" \
+            "generic iPhone build" \
+            "$RUNNER_TEMP/iphone-build-diagnostics.md" \
+            "$STATUS" \
+            "xcodebuild -project AnimaXS.xcodeproj -scheme AnimaXS -configuration Debug -destination generic/platform=iOS CODE_SIGNING_ALLOWED=NO build"
+          exit 0
+      - name: Post iPhone build diagnostics to PR
+        if: ${{ always() }}
+        uses: actions/github-script@v8
+        env:
+          DIAG_PATH: ${{ runner.temp }}/iphone-build-diagnostics.md
+          JOB_KEY: iphone-build
+          JOB_LABEL: Generic iPhone build
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = `<!-- animaxs-ci-diagnostic:${process.env.JOB_KEY}:${context.payload.pull_request.head.sha} -->`;
+            let diagnostics;
+            if (fs.existsSync(process.env.DIAG_PATH)) {
+              diagnostics = fs.readFileSync(process.env.DIAG_PATH, 'utf8');
+            } else {
+              diagnostics = `### CI FAILURE — ${process.env.JOB_LABEL}\n\nThe diagnostic rerun did not produce its capture file. Fix the CI diagnostic path before diagnosing source code.`;
+            }
+            const runURL = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `${marker}\n${diagnostics}\n**PR head:** \`${context.payload.pull_request.head.sha}\`  \n**Diagnostic workflow run:** ${runURL}`;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+  simulator-tests-diagnostics:
+    name: Simulator tests failure bot
+    if: ${{ always() && github.event_name == 'pull_request' && needs.simulator-tests.result == 'failure' }}
+    needs: [simulator-tests]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
+        with:
+          path: |
+            .derivedData-ci-diagnostic/SourcePackages
+          key: animaxs-spm-diag-${{ runner.os }}-${{ hashFiles('**/Package.resolved', 'project.yml') }}
+          restore-keys: |
+            animaxs-spm-diag-${{ runner.os }}-
+      - name: Reproduce and capture simulator test failure
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          LOG="$RUNNER_TEMP/simulator-tests.log"
+          (
+            set -e
+            sudo xcode-select -s "$DEVELOPER_DIR"
+            xcodebuild -version
+            if ! xcrun --find metal >/dev/null 2>&1; then
+              xcodebuild -downloadComponent MetalToolchain
+              sudo xcode-select -s "$DEVELOPER_DIR"
+            fi
+            DEST=$(xcrun simctl list devices available -j \
+              | python3 -c "import sys,json;d=json.load(sys.stdin);[print(dv['udid']) for rt in d['devices'].values() for dv in rt if 'iPhone' in dv['name'] and dv['isAvailable']]" \
+              | head -1)
+            [ -n "$DEST" ] || { echo "::error::No available iPhone simulator"; exit 1; }
+            xcrun simctl shutdown "$DEST" 2>/dev/null || true
+            xcrun simctl erase "$DEST"
+            xcodebuild \
+              -project AnimaXS.xcodeproj \
+              -scheme AnimaXS \
+              -configuration Debug \
+              -destination "platform=iOS Simulator,id=$DEST" \
+              -derivedDataPath .derivedData-ci-diagnostic \
+              CODE_SIGNING_ALLOWED=NO \
+              test
+          ) 2>&1 | tee "$LOG"
+          STATUS=${PIPESTATUS[0]}
+          python3 .github/scripts/extract_ci_failure.py \
+            "$LOG" \
+            "simulator tests" \
+            "$RUNNER_TEMP/simulator-tests-diagnostics.md" \
+            "$STATUS" \
+            "xcodebuild -project AnimaXS.xcodeproj -scheme AnimaXS -configuration Debug -destination iOS-Simulator CODE_SIGNING_ALLOWED=NO test"
+          exit 0
+      - name: Post simulator diagnostics to PR
+        if: ${{ always() }}
+        uses: actions/github-script@v8
+        env:
+          DIAG_PATH: ${{ runner.temp }}/simulator-tests-diagnostics.md
+          JOB_KEY: simulator-tests
+          JOB_LABEL: Simulator tests
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = `<!-- animaxs-ci-diagnostic:${process.env.JOB_KEY}:${context.payload.pull_request.head.sha} -->`;
+            let diagnostics;
+            if (fs.existsSync(process.env.DIAG_PATH)) {
+              diagnostics = fs.readFileSync(process.env.DIAG_PATH, 'utf8');
+            } else {
+              diagnostics = `### CI FAILURE — ${process.env.JOB_LABEL}\n\nThe diagnostic rerun did not produce its capture file. Fix the CI diagnostic path before diagnosing source code.`;
+            }
+            const runURL = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `${marker}\n${diagnostics}\n**PR head:** \`${context.payload.pull_request.head.sha}\`  \n**Diagnostic workflow run:** ${runURL}`;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
 
   # Pure-reference and pack-free Metal/MPS tests are folded into simulator-tests.
   # There is no duplicate test job because swift-transformers is expensive to build.
