@@ -17,7 +17,10 @@ enum ANERingProbe {
         let name: String
         let passed: Bool
         let detail: String
-        var line: String { "\(passed ? \"PASS\" : \"FAIL\") \(name): \(detail)" }
+        var line: String {
+            let status = passed ? "PASS" : "FAIL"
+            return "\(status) \(name): \(detail)"
+        }
     }
 
     private final class ChurnWorker: @unchecked Sendable {
@@ -38,452 +41,520 @@ enum ANERingProbe {
             return try A12ANEProjectionModel(
                 preparedInputChannels: UInt(spec.columns),
                 outputChannels: UInt(spec.rows),
-                spatial: UInt(spec.spatial),
-                label: label,
-                cacheKey: key)
+                sequenceLength: UInt(ANEW8NativePack.expectedSequenceLength),
+                cacheKey: key,
+                label: label)
+        }
+
+        func makeQKV(block: Int, label: String) throws -> A12ANEQKVModel {
+            let q = try ANEW8NativePack.tensor(file: file, block: block, suffix: "self.q.weight")
+            let k = try ANEW8NativePack.tensor(file: file, block: block, suffix: "self.k.weight")
+            let v = try ANEW8NativePack.tensor(file: file, block: block, suffix: "self.v.weight")
+            guard let qHash = q.blobSHA256, let kHash = k.blobSHA256, let vHash = v.blobSHA256 else {
+                throw AnimapkError.validation("V7 fused QKV native tensor hash missing")
+            }
+            let key = ANEW8NativePack.qkvCacheKey(block: block, qHash: qHash, kHash: kHash, vHash: vHash)
+            return try A12ANEQKVModel(
+                preparedInputChannels: UInt(ANEW8NativePack.expectedHiddenSize),
+                outputChannels: UInt(ANEW8NativePack.expectedHiddenSize),
+                sequenceLength: UInt(ANEW8NativePack.expectedSequenceLength),
+                cacheKey: key,
+                label: label)
         }
     }
 
-    private final class ErrorBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var messages: [String] = []
-        func add(_ error: Error) {
-            lock.lock(); messages.append(String(describing: error)); lock.unlock()
+    private static func elapsedMS(_ start: UInt64, _ end: UInt64) -> Double {
+        Double(end - start) / 1_000_000.0
+    }
+
+    private static func maxAbsDiff(_ a: [Float], _ b: [Float]) -> Float {
+        guard a.count == b.count else { return .infinity }
+        var result: Float = 0
+        for i in a.indices {
+            result = max(result, abs(a[i] - b[i]))
         }
-        var summary: String {
-            lock.lock(); defer { lock.unlock() }
-            return messages.joined(separator: " | ")
+        return result
+    }
+
+    private static func meanAbsDiff(_ a: [Float], _ b: [Float]) -> Float {
+        guard a.count == b.count, !a.isEmpty else { return .infinity }
+        var sum: Double = 0
+        for i in a.indices {
+            sum += Double(abs(a[i] - b[i]))
         }
-        var isEmpty: Bool {
-            lock.lock(); defer { lock.unlock() }
-            return messages.isEmpty
+        return Float(sum / Double(a.count))
+    }
+
+    private static func relativeRMSE(_ a: [Float], _ b: [Float]) -> Float {
+        guard a.count == b.count, !a.isEmpty else { return .infinity }
+        var err2: Double = 0
+        var ref2: Double = 0
+        for i in a.indices {
+            let d = Double(a[i] - b[i])
+            err2 += d * d
+            let r = Double(b[i])
+            ref2 += r * r
+        }
+        return Float(sqrt(err2 / max(ref2, 1e-30)))
+    }
+
+    private static func finite(_ x: [Float]) -> Bool {
+        x.allSatisfy(\.isFinite)
+    }
+
+    private static func makeInput(count: Int, seed: UInt64) -> [Float] {
+        var state = seed
+        return (0..<count).map { i in
+            state &*= 6_364_136_223_846_793_005
+            state &+= 1_442_695_040_888_963_407
+            let u = Float((state >> 40) & 0xFFFFFF) / Float(0xFFFFFF)
+            return (u * 2 - 1) * 0.2 + Float((i % 17) - 8) * 0.001
         }
     }
 
+    private static func readF16Buffer(_ buffer: MTLBuffer, count: Int) -> [Float] {
+        let ptr = buffer.contents().bindMemory(to: UInt16.self, capacity: count)
+        return (0..<count).map { Float(Float16(bitPattern: ptr[$0])) }
+    }
+
+    private static func writeF16Buffer(_ values: [Float], to buffer: MTLBuffer) {
+        let ptr = buffer.contents().bindMemory(to: UInt16.self, capacity: values.count)
+        for i in values.indices {
+            ptr[i] = Float16(values[i]).bitPattern
+        }
+    }
+
+    private static func cpuProjectionReference(
+        file: AnimapkFile,
+        block: Int,
+        suffix: String,
+        input: [Float],
+        tokenCount: Int
+    ) throws -> [Float] {
+        guard let spec = ANEW8NativePack.spec(suffix: suffix) else {
+            throw AnimapkError.validation("V7 CPU reference unknown suffix \(suffix)")
+        }
+        let tensor = try ANEW8NativePack.tensor(file: file, block: block, suffix: suffix)
+        let rows = spec.rows
+        let columns = spec.columns
+        guard input.count == tokenCount * columns else {
+            throw AnimapkError.validation("V7 CPU reference input count mismatch")
+        }
+
+        var output = [Float](repeating: 0, count: tokenCount * rows)
+        try tensor.withANEUInt8PerRow { quantized, scales, biases in
+            for token in 0..<tokenCount {
+                let xBase = token * columns
+                let yBase = token * rows
+                for row in 0..<rows {
+                    let wBase = row * columns
+                    let scale = scales[row]
+                    let bias = biases[row]
+                    var sum: Float = 0
+                    for col in 0..<columns {
+                        let weight = Float(quantized[wBase + col]) * scale + bias
+                        sum += input[xBase + col] * weight
+                    }
+                    output[yBase + row] = sum
+                }
+            }
+        }
+        return output
+    }
+
+    private static func projectionOutput(
+        _ model: A12ANEProjectionModel,
+        input: MTLBuffer,
+        inputOffsetBytes: Int,
+        output: MTLBuffer,
+        outputOffsetBytes: Int,
+        outputCount: Int
+    ) throws -> [Float] {
+        try model.evaluateInput(
+            input,
+            inputOffsetBytes: UInt(inputOffsetBytes),
+            output: output,
+            outputOffsetBytes: UInt(outputOffsetBytes))
+        let offset = outputOffsetBytes / MemoryLayout<UInt16>.stride
+        let ptr = output.contents().bindMemory(to: UInt16.self, capacity: offset + outputCount)
+        return (0..<outputCount).map { Float(Float16(bitPattern: ptr[offset + $0])) }
+    }
+
+    private static func layoutRoundTrip(
+        device: MTLDevice,
+        commandQueue: MTLCommandQueue,
+        kernels: AnimaKernels
+    ) throws -> Outcome {
+        let tokens = 37
+        let channels = 64
+        let tokenCount = tokens * channels
+        let planeStride = ANEW8DiTExecutor.alignedANEPlaneStrideElements(sequence: tokens)
+        let aneCount = planeStride * channels
+        let sourceValues = makeInput(count: tokenCount, seed: 0xA11CE)
+
+        guard let source = device.makeBuffer(length: tokenCount * 2, options: .storageModeShared),
+              let ane = device.makeBuffer(length: aneCount * 2, options: .storageModeShared),
+              let roundTrip = device.makeBuffer(length: tokenCount * 2, options: .storageModeShared),
+              let commandBuffer = commandQueue.makeCommandBuffer() else {
+            return Outcome(name: "layout-roundtrip", passed: false, detail: "Metal allocation failed")
+        }
+        writeF16Buffer(sourceValues, to: source)
+        try kernels.encodeTokenToANE(
+            commandBuffer: commandBuffer,
+            source: source,
+            sourceOffsetBytes: 0,
+            destination: ane,
+            destinationOffsetBytes: 0,
+            tokenCount: tokens,
+            channels: channels,
+            planeStrideElements: planeStride)
+        try kernels.encodeANEToToken(
+            commandBuffer: commandBuffer,
+            source: ane,
+            sourceOffsetBytes: 0,
+            destination: roundTrip,
+            destinationOffsetBytes: 0,
+            tokenCount: tokens,
+            channels: channels,
+            planeStrideElements: planeStride)
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        let decoded = readF16Buffer(roundTrip, count: tokenCount)
+        let sourceF16 = sourceValues.map { Float(Float16($0)) }
+        let maxDiff = maxAbsDiff(decoded, sourceF16)
+        return Outcome(
+            name: "layout-roundtrip",
+            passed: maxDiff == 0,
+            detail: String(format: "tokens=%d channels=%d planeStride=%d maxAbs=%.8g", tokens, channels, planeStride, maxDiff))
+    }
+
+    private static func projectionVsCPU(
+        file: AnimapkFile,
+        device: MTLDevice,
+        commandQueue: MTLCommandQueue,
+        kernels: AnimaKernels
+    ) throws -> Outcome {
+        let block = 0
+        let suffix = "cross.q.weight"
+        let tokenCount = 4
+        guard let spec = ANEW8NativePack.spec(suffix: suffix) else {
+            return Outcome(name: "w8-vs-cpu", passed: false, detail: "missing projection spec")
+        }
+        let inputValues = makeInput(count: tokenCount * spec.columns, seed: 0xC0FFEE)
+        let cpu = try cpuProjectionReference(
+            file: file, block: block, suffix: suffix, input: inputValues, tokenCount: tokenCount)
+        let planeStride = ANEW8DiTExecutor.alignedANEPlaneStrideElements(sequence: ANEW8NativePack.expectedSequenceLength)
+        let inputANECount = planeStride * spec.columns
+        let outputANECount = planeStride * spec.rows
+        guard let tokenInput = device.makeBuffer(length: tokenCount * spec.columns * 2, options: .storageModeShared),
+              let aneInput = device.makeBuffer(length: inputANECount * 2, options: .storageModeShared),
+              let aneOutput = device.makeBuffer(length: outputANECount * 2, options: .storageModeShared),
+              let tokenOutput = device.makeBuffer(length: ANEW8NativePack.expectedSequenceLength * spec.rows * 2, options: .storageModeShared),
+              let encode = commandQueue.makeCommandBuffer(),
+              let decode = commandQueue.makeCommandBuffer() else {
+            return Outcome(name: "w8-vs-cpu", passed: false, detail: "Metal allocation failed")
+        }
+        writeF16Buffer(inputValues, to: tokenInput)
+        try kernels.encodeTokenToANE(
+            commandBuffer: encode,
+            source: tokenInput,
+            sourceOffsetBytes: 0,
+            destination: aneInput,
+            destinationOffsetBytes: 0,
+            tokenCount: tokenCount,
+            channels: spec.columns,
+            planeStrideElements: planeStride)
+        encode.commit()
+        encode.waitUntilCompleted()
+
+        let worker = ChurnWorker(file: file)
+        let model = try worker.makeProjection(block: block, suffix: suffix, label: "V7 cpu compare")
+        defer { model.invalidate() }
+        try model.evaluateInput(
+            aneInput,
+            inputOffsetBytes: 0,
+            output: aneOutput,
+            outputOffsetBytes: 0)
+
+        try kernels.encodeANEToToken(
+            commandBuffer: decode,
+            source: aneOutput,
+            sourceOffsetBytes: 0,
+            destination: tokenOutput,
+            destinationOffsetBytes: 0,
+            tokenCount: tokenCount,
+            channels: spec.rows,
+            planeStrideElements: planeStride)
+        decode.commit()
+        decode.waitUntilCompleted()
+        let ane = readF16Buffer(tokenOutput, count: tokenCount * spec.rows)
+        let rel = relativeRMSE(ane, cpu)
+        let maxDiff = maxAbsDiff(ane, cpu)
+        return Outcome(
+            name: "w8-vs-cpu",
+            passed: finite(ane) && rel < 0.02,
+            detail: String(format: "relRMSE=%.6g maxAbs=%.6g cpuFinite=%@ aneFinite=%@", rel, maxDiff, String(finite(cpu)), String(finite(ane))))
+    }
+
+    private static func p5RoundTrip(
+        device: MTLDevice,
+        commandQueue: MTLCommandQueue
+    ) -> Outcome {
+        let count = 8192
+        guard let source = device.makeBuffer(length: count * 2, options: .storageModeShared),
+              let cache = device.makeBuffer(length: count * 2, options: .storageModePrivate),
+              let decoded = device.makeBuffer(length: count * 2, options: .storageModeShared),
+              let commandBuffer = commandQueue.makeCommandBuffer(),
+              let blit = commandBuffer.makeBlitCommandEncoder() else {
+            return Outcome(name: "p5-private-blit", passed: false, detail: "Metal allocation failed")
+        }
+        let values = makeInput(count: count, seed: 0xB117)
+        writeF16Buffer(values, to: source)
+        blit.copy(from: source, sourceOffset: 0, to: cache, destinationOffset: 0, size: count * 2)
+        blit.copy(from: cache, sourceOffset: 0, to: decoded, destinationOffset: 0, size: count * 2)
+        blit.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        let expected = values.map { Float(Float16($0)) }
+        let actual = readF16Buffer(decoded, count: count)
+        let maxDiff = maxAbsDiff(expected, actual)
+        return Outcome(
+            name: "p5-private-blit",
+            passed: maxDiff == 0,
+            detail: String(format: "count=%d maxAbs=%.8g", count, maxDiff))
+    }
+
+    private static func repeatedDeterminism(
+        file: AnimapkFile,
+        device: MTLDevice,
+        commandQueue: MTLCommandQueue,
+        kernels: AnimaKernels
+    ) throws -> Outcome {
+        let block = 0
+        let suffix = "cross.q.weight"
+        guard let spec = ANEW8NativePack.spec(suffix: suffix) else {
+            return Outcome(name: "repeat-determinism", passed: false, detail: "missing spec")
+        }
+        let tokenCount = 8
+        let planeStride = ANEW8DiTExecutor.alignedANEPlaneStrideElements(sequence: ANEW8NativePack.expectedSequenceLength)
+        guard let tokenInput = device.makeBuffer(length: tokenCount * spec.columns * 2, options: .storageModeShared),
+              let aneInput = device.makeBuffer(length: planeStride * spec.columns * 2, options: .storageModeShared),
+              let aneOutput = device.makeBuffer(length: planeStride * spec.rows * 2, options: .storageModeShared),
+              let tokenOutput = device.makeBuffer(length: ANEW8NativePack.expectedSequenceLength * spec.rows * 2, options: .storageModeShared),
+              let encode = commandQueue.makeCommandBuffer() else {
+            return Outcome(name: "repeat-determinism", passed: false, detail: "Metal allocation failed")
+        }
+        let values = makeInput(count: tokenCount * spec.columns, seed: 0xDE71)
+        writeF16Buffer(values, to: tokenInput)
+        try kernels.encodeTokenToANE(
+            commandBuffer: encode,
+            source: tokenInput,
+            sourceOffsetBytes: 0,
+            destination: aneInput,
+            destinationOffsetBytes: 0,
+            tokenCount: tokenCount,
+            channels: spec.columns,
+            planeStrideElements: planeStride)
+        encode.commit()
+        encode.waitUntilCompleted()
+
+        let model = try ChurnWorker(file: file).makeProjection(block: block, suffix: suffix, label: "V7 deterministic")
+        defer { model.invalidate() }
+        var baseline: [Float]?
+        var worst: Float = 0
+        for _ in 0..<12 {
+            try model.evaluateInput(aneInput, inputOffsetBytes: 0, output: aneOutput, outputOffsetBytes: 0)
+            guard let decode = commandQueue.makeCommandBuffer() else {
+                return Outcome(name: "repeat-determinism", passed: false, detail: "decode command buffer failed")
+            }
+            try kernels.encodeANEToToken(
+                commandBuffer: decode,
+                source: aneOutput,
+                sourceOffsetBytes: 0,
+                destination: tokenOutput,
+                destinationOffsetBytes: 0,
+                tokenCount: tokenCount,
+                channels: spec.rows,
+                planeStrideElements: planeStride)
+            decode.commit()
+            decode.waitUntilCompleted()
+            let current = readF16Buffer(tokenOutput, count: tokenCount * spec.rows)
+            if let baseline {
+                worst = max(worst, maxAbsDiff(baseline, current))
+            } else {
+                baseline = current
+            }
+        }
+        return Outcome(
+            name: "repeat-determinism",
+            passed: worst == 0,
+            detail: String(format: "12 evaluations worstMaxAbs=%.8g", worst))
+    }
+
+    private static func sharedClientConcurrency(
+        file: AnimapkFile,
+        device: MTLDevice,
+        commandQueue: MTLCommandQueue,
+        kernels: AnimaKernels
+    ) throws -> Outcome {
+        let worker = ChurnWorker(file: file)
+        let stableBlock = 0
+        let stableSuffix = "cross.q.weight"
+        guard let spec = ANEW8NativePack.spec(suffix: stableSuffix) else {
+            return Outcome(name: "shared-client-concurrency", passed: false, detail: "missing spec")
+        }
+        let tokenCount = 8
+        let planeStride = ANEW8DiTExecutor.alignedANEPlaneStrideElements(sequence: ANEW8NativePack.expectedSequenceLength)
+        guard let tokenInput = device.makeBuffer(length: tokenCount * spec.columns * 2, options: .storageModeShared),
+              let aneInput = device.makeBuffer(length: planeStride * spec.columns * 2, options: .storageModeShared),
+              let aneOutput = device.makeBuffer(length: planeStride * spec.rows * 2, options: .storageModeShared),
+              let tokenOutput = device.makeBuffer(length: ANEW8NativePack.expectedSequenceLength * spec.rows * 2, options: .storageModeShared),
+              let encode = commandQueue.makeCommandBuffer() else {
+            return Outcome(name: "shared-client-concurrency", passed: false, detail: "Metal allocation failed")
+        }
+        let values = makeInput(count: tokenCount * spec.columns, seed: 0x51A1)
+        writeF16Buffer(values, to: tokenInput)
+        try kernels.encodeTokenToANE(
+            commandBuffer: encode,
+            source: tokenInput,
+            sourceOffsetBytes: 0,
+            destination: aneInput,
+            destinationOffsetBytes: 0,
+            tokenCount: tokenCount,
+            channels: spec.columns,
+            planeStrideElements: planeStride)
+        encode.commit()
+        encode.waitUntilCompleted()
+
+        let stable = try worker.makeProjection(block: stableBlock, suffix: stableSuffix, label: "V7 foreground")
+        defer { stable.invalidate() }
+
+        func evaluateAndDecode() throws -> [Float] {
+            try stable.evaluateInput(aneInput, inputOffsetBytes: 0, output: aneOutput, outputOffsetBytes: 0)
+            guard let cb = commandQueue.makeCommandBuffer() else {
+                throw AnimapkError.validation("V7 decode command buffer failed")
+            }
+            try kernels.encodeANEToToken(
+                commandBuffer: cb,
+                source: aneOutput,
+                sourceOffsetBytes: 0,
+                destination: tokenOutput,
+                destinationOffsetBytes: 0,
+                tokenCount: tokenCount,
+                channels: spec.rows,
+                planeStrideElements: planeStride)
+            cb.commit()
+            cb.waitUntilCompleted()
+            return readF16Buffer(tokenOutput, count: tokenCount * spec.rows)
+        }
+
+        let baseline = try evaluateAndDecode()
+        let churnQueue = DispatchQueue(label: "AnimaXS.V7.churn", qos: .userInitiated)
+        let group = DispatchGroup()
+        group.enter()
+        var churnError: Error?
+        churnQueue.async {
+            defer { group.leave() }
+            do {
+                for i in 0..<24 {
+                    let block = 10 + (i % 6)
+                    let model = try worker.makeProjection(
+                        block: block,
+                        suffix: "cross.o.weight",
+                        label: "V7 churn b\(block)")
+                    model.invalidate()
+                }
+            } catch {
+                churnError = error
+            }
+        }
+
+        var worst: Float = 0
+        var failedEval: String?
+        for i in 0..<64 {
+            do {
+                let current = try evaluateAndDecode()
+                worst = max(worst, maxAbsDiff(baseline, current))
+                if !finite(current) {
+                    failedEval = "foreground iteration \(i) non-finite"
+                    break
+                }
+            } catch {
+                failedEval = "foreground iteration \(i): \(error.localizedDescription)"
+                break
+            }
+        }
+        group.wait()
+        if let churnError {
+            failedEval = "background churn: \(churnError.localizedDescription)"
+        }
+        return Outcome(
+            name: "shared-client-concurrency",
+            passed: failedEval == nil && worst == 0,
+            detail: failedEval ?? String(format: "64 foreground evals + 24 load/unload cycles worstMaxAbs=%.8g", worst))
+    }
+
+    @MainActor
     static func run() async -> String {
         var lines: [String] = [
             "ANE correctness microscope v7",
-            "Purpose: isolate checker/woven output and late NaN/Inf without a full diffusion run.",
-            "Production inference is NOT modified by this probe."
+            "Diagnostic only; production inference is unchanged.",
+            "Tests: layout -> W8 CPU reference -> P5 private blit -> determinism -> shared-client load/unload concurrency.",
+            "",
         ]
-        var outcomes: [Outcome] = []
-
         do {
-            guard let context = MetalContext() else {
-                throw AnimapkError.validation("Metal unavailable")
+            guard A12ANERuntime.runtimeStatus.available else {
+                lines.append("SKIP: AppleNeuralEngine runtime unavailable")
+                return lines.joined(separator: "\n")
             }
-            guard let ditEntry = ModelManifest.entries.first(where: { $0.component == .dit }) else {
-                throw AnimapkError.validation("DiT manifest entry missing")
+            guard let device = MTLCreateSystemDefaultDevice(),
+                  let commandQueue = device.makeCommandQueue() else {
+                lines.append("FAIL: Metal device/queue unavailable")
+                return lines.joined(separator: "\n")
             }
-            let store = try ModelStore()
-            let ditURL = await store.localURL(for: ditEntry)
-            guard FileManager.default.fileExists(atPath: ditURL.path) else {
-                throw AnimapkError.validation("installed DiT pack missing")
-            }
-            let file = try AnimapkFile(url: ditURL)
+            let kernels = try AnimaKernels(device: device)
+            let file = try ProductionModelStore.shared.resolveDiTPackForDiagnostics()
             try ANEW8NativePack.validate(file: file)
             guard ANEW8ModelPreparer.isPrepared(file: file) else {
-                throw AnimapkError.validation("ANE prepared-model cache is incomplete")
+                lines.append("FAIL: prepared ANE cache missing; run/import native W8 pack first")
+                return lines.joined(separator: "\n")
             }
-            guard A12ANEIsAvailable() else {
-                throw AnimapkError.validation(
-                    "A12 ANE runtime unavailable: \(A12ANERuntimeStatus())")
-            }
-
-            lines.append("runtime: \(A12ANERuntimeStatus())")
-            lines.append("client: \(A12ANEClientCapabilitySummary())")
-            lines.append(
-                "pack: \(ditURL.lastPathComponent) scheme=\(file.quantScheme) " +
-                "prepared=\(ANEW8NativePack.expectedPreparedModelCount)")
+            lines.append("pack=\(file.url.lastPathComponent) scheme=\(file.manifest.quantScheme ?? "unknown")")
+            lines.append("runtime selectors: \(A12ANERuntime.runtimeStatus.selectorSummary)")
             lines.append("")
 
-            outcomes.append(try layoutRoundTrip(context: context))
-            outcomes.append(try projectionReference(context: context, file: file))
-            outcomes.append(try p5PrivateBlitRoundTrip(context: context))
-            outcomes.append(try repeatDeterminism(context: context, file: file))
-            outcomes.append(try sharedClientConcurrency(context: context, file: file))
-        } catch {
-            lines.append("FATAL SETUP ERROR: \(error)")
-        }
-
-        if !outcomes.isEmpty {
+            let tests: [Outcome] = [
+                try layoutRoundTrip(device: device, commandQueue: commandQueue, kernels: kernels),
+                try projectionVsCPU(file: file, device: device, commandQueue: commandQueue, kernels: kernels),
+                p5RoundTrip(device: device, commandQueue: commandQueue),
+                try repeatedDeterminism(file: file, device: device, commandQueue: commandQueue, kernels: kernels),
+                try sharedClientConcurrency(file: file, device: device, commandQueue: commandQueue, kernels: kernels),
+            ]
+            lines.append(contentsOf: tests.map(\.line))
             lines.append("")
-            lines.append("V7 CORRECTNESS SCORECARD")
-            lines.append(contentsOf: outcomes.map(\.line))
-            lines.append("")
-            if let firstFailure = outcomes.first(where: { !$0.passed }) {
-                lines.append("FIRST FAILING BOUNDARY: \(firstFailure.name)")
+            if let firstFailure = tests.first(where: { !$0.passed }) {
+                lines.append("FIRST BAD BOUNDARY: \(firstFailure.name)")
+                switch firstFailure.name {
+                case "layout-roundtrip":
+                    lines.append("Interpretation: token<->ANE bridge/layout is corrupt before private ANE math.")
+                case "w8-vs-cpu":
+                    lines.append("Interpretation: native W8 projection semantics/layout disagree with the pack reference.")
+                case "p5-private-blit":
+                    lines.append("Interpretation: private cache storage/blit path corrupts exact K/V reuse.")
+                case "repeat-determinism":
+                    lines.append("Interpretation: repeated evaluation of one loaded model is not deterministic.")
+                case "shared-client-concurrency":
+                    lines.append("Interpretation: overlapping private load/unload with foreground evaluate is unsafe; serialize ANE client operations before touching math/P5.")
+                default:
+                    break
+                }
             } else {
-                lines.append("ALL MICRO-BOUNDARIES PASSED")
-                lines.append(
-                    "If the image is still woven, the next probe must compare a real " +
-                    "ANE block residual against the legacy/CPU oracle; do not blame VAE processOut.")
+                lines.append("ALL V7 MICRO-BOUNDARIES PASSED")
+                lines.append("Next target: compare a complete production DiT block ANE vs dequantized-MPS intermediate tensors, because corruption is above the isolated primitives.")
             }
+        } catch {
+            lines.append("FAIL probe threw: \(error.localizedDescription)")
         }
         return lines.joined(separator: "\n")
-    }
-
-    // MARK: - Test 1: exact production layout kernels
-
-    private static func layoutRoundTrip(context: MetalContext) throws -> Outcome {
-        let rows = 37
-        let channels = 19
-        let planeStrideElements = ((rows * 2 + 63) & ~63) / 2
-        let count = rows * channels
-        guard let token = context.device.makeBuffer(
-                length: count * MemoryLayout<Float16>.stride,
-                options: .storageModeShared),
-              let ane = context.device.makeBuffer(
-                length: channels * planeStrideElements * MemoryLayout<Float16>.stride,
-                options: .storageModeShared),
-              let roundTrip = context.device.makeBuffer(
-                length: count * MemoryLayout<Float16>.stride,
-                options: .storageModeShared),
-              let command = context.commandQueue.makeCommandBuffer() else {
-            throw AnimapkError.validation("V7 layout buffers unavailable")
-        }
-
-        let input = token.contents().bindMemory(to: Float16.self, capacity: count)
-        for index in 0..<count {
-            let value = Float(((index * 37) % 251) - 125) / 31.0
-            input[index] = Float16(value)
-        }
-        memset(ane.contents(), 0xA5, ane.length)
-        memset(roundTrip.contents(), 0, roundTrip.length)
-
-        try encodeLayout(
-            context: context, command: command, kernel: "dit_token_to_ane_f16",
-            source: token, destination: ane, rows: rows, channels: channels,
-            planeStrideElements: planeStrideElements)
-        try encodeLayout(
-            context: context, command: command, kernel: "dit_ane_to_token_f16",
-            source: ane, destination: roundTrip, rows: rows, channels: channels,
-            planeStrideElements: planeStrideElements)
-        command.commit()
-        command.waitUntilCompleted()
-        if let error = command.error { throw error }
-
-        let output = roundTrip.contents().bindMemory(to: Float16.self, capacity: count)
-        var mismatches = 0
-        for index in 0..<count where output[index].bitPattern != input[index].bitPattern {
-            mismatches += 1
-        }
-        return Outcome(
-            name: "layout token<->ANE",
-            passed: mismatches == 0,
-            detail: "rows=\(rows) channels=\(channels) stride=\(planeStrideElements) mismatches=\(mismatches)/\(count)")
-    }
-
-    private static func encodeLayout(
-        context: MetalContext,
-        command: MTLCommandBuffer,
-        kernel: String,
-        source: MTLBuffer,
-        destination: MTLBuffer,
-        rows: Int,
-        channels: Int,
-        planeStrideElements: Int
-    ) throws {
-        let pipeline = try context.pipeline(named: kernel)
-        guard let encoder = command.makeComputeCommandEncoder() else {
-            throw AnimapkError.validation("V7 failed to make \(kernel) encoder")
-        }
-        var r = UInt32(rows)
-        var c = UInt32(channels)
-        var stride = UInt32(planeStrideElements)
-        encoder.setComputePipelineState(pipeline)
-        encoder.setBuffer(source, offset: 0, index: 0)
-        encoder.setBuffer(destination, offset: 0, index: 1)
-        encoder.setBytes(&r, length: 4, index: 2)
-        encoder.setBytes(&c, length: 4, index: 3)
-        encoder.setBytes(&stride, length: 4, index: 4)
-        let total = rows * channels
-        let width = min(max(1, total), pipeline.maxTotalThreadsPerThreadgroup)
-        encoder.dispatchThreads(
-            MTLSize(width: total, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
-        encoder.endEncoding()
-    }
-
-    // MARK: - Test 2: W8 projection math/orientation
-
-    private static func projectionReference(
-        context: MetalContext, file: AnimapkFile
-    ) throws -> Outcome {
-        let block = 0
-        let suffix = "cross_attn.q_proj.weight"
-        guard let spec = ANEW8NativePack.spec(suffix: suffix) else {
-            throw AnimapkError.validation("V7 crossQ spec missing")
-        }
-        let tensor = try ANEW8NativePack.tensor(file: file, block: block, suffix: suffix)
-        let native = try ANEW8NativePack.nativeWeight(
-            file: file, tensor: tensor,
-            expectedRows: spec.rows, expectedColumns: spec.columns)
-        guard let digest = tensor.blobSHA256 else {
-            throw AnimapkError.validation("V7 crossQ digest missing")
-        }
-        let key = ANEW8NativePack.projectionCacheKey(
-            block: block, tag: spec.tag, hash: digest)
-        let model = try A12ANEProjectionModel(
-            preparedInputChannels: UInt(spec.columns),
-            outputChannels: UInt(spec.rows),
-            spatial: UInt(spec.spatial),
-            label: "v7_reference_b0_cross_q",
-            cacheKey: key)
-        defer { model.invalidate() }
-
-        let input = try A12ANESurface(
-            device: context.device, channels: UInt(spec.columns), spatial: UInt(spec.spatial))
-        let output = try A12ANESurface(
-            device: context.device, channels: UInt(spec.rows), spatial: UInt(spec.spatial))
-        memset(input.metalBuffer.contents(), 0, input.byteCount)
-        memset(output.metalBuffer.contents(), 0, output.byteCount)
-
-        let activeInput = 17
-        let inStride = Int(input.planeStrideElements)
-        let inputHalf = input.metalBuffer.contents().bindMemory(
-            to: Float16.self, capacity: input.byteCount / 2)
-        for spatial in 0..<spec.spatial {
-            let value = Float((spatial % 9) - 4) / 4.0
-            inputHalf[activeInput * inStride + spatial] = Float16(value)
-        }
-
-        var evaluationMS = 0.0
-        _ = try model.evaluateInput(input, output: output, milliseconds: &evaluationMS)
-
-        let q = native.q.withUnsafeBytes { Array($0.bindMemory(to: UInt8.self)) }
-        let scale = native.scaleF32.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
-        let bias = native.biasF32.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
-        guard q.count == spec.rows * spec.columns,
-              scale.count == spec.rows, bias.count == spec.rows else {
-            throw AnimapkError.validation("V7 native W8 payload shape mismatch")
-        }
-
-        let outStride = Int(output.planeStrideElements)
-        let actual = output.metalBuffer.contents().bindMemory(
-            to: Float16.self, capacity: output.byteCount / 2)
-        let sampleSpatial = [0, 1, 7, 31, spec.spatial / 2, spec.spatial - 1]
-        var rowSquare = 0.0
-        var transposeSquare = 0.0
-        var rowMax = 0.0
-        var samples = 0
-
-        for row in stride(from: 0, to: min(spec.rows, 512), by: 7) {
-            let rowWeight = Float(q[row * spec.columns + activeInput]) * scale[row] + bias[row]
-            let transposeWeight =
-                Float(q[activeInput * spec.columns + row]) * scale[row] + bias[row]
-            for spatial in sampleSpatial {
-                let x = Float(inputHalf[activeInput * inStride + spatial])
-                let y = Float(actual[row * outStride + spatial])
-                let rowError = Double(y - x * rowWeight)
-                let transposeError = Double(y - x * transposeWeight)
-                rowSquare += rowError * rowError
-                transposeSquare += transposeError * transposeError
-                rowMax = max(rowMax, abs(rowError))
-                samples += 1
-            }
-        }
-
-        let rowRMSE = sqrt(rowSquare / Double(max(1, samples)))
-        let transposeRMSE = sqrt(transposeSquare / Double(max(1, samples)))
-        let pass = rowRMSE < 0.01 && rowRMSE <= transposeRMSE
-        return Outcome(
-            name: "W8 projection reference",
-            passed: pass,
-            detail: String(
-                format: "eval=%.2fms rowMajorRMSE=%.6g rowMax=%.6g transposeRMSE=%.6g samples=%d",
-                evaluationMS, rowRMSE, rowMax, transposeRMSE, samples))
-    }
-
-    // MARK: - Test 3: real private P5 buffer copy path
-
-    private static func p5PrivateBlitRoundTrip(context: MetalContext) throws -> Outcome {
-        guard let cache = CrossKVCache(device: context.device) else {
-            return Outcome(
-                name: "P5 private-buffer blit",
-                passed: false,
-                detail: "CrossKVCache allocation failed")
-        }
-        let bytes = CrossKVCache.tensorBytes
-        guard let source = context.device.makeBuffer(
-                length: bytes, options: .storageModeShared),
-              let destination = context.device.makeBuffer(
-                length: bytes, options: .storageModeShared),
-              let command = context.commandQueue.makeCommandBuffer(),
-              let blit = command.makeBlitCommandEncoder() else {
-            throw AnimapkError.validation("V7 P5 blit buffers unavailable")
-        }
-        let src = source.contents().bindMemory(to: UInt8.self, capacity: bytes)
-        for index in 0..<bytes {
-            src[index] = UInt8(truncatingIfNeeded: index &* 131 &+ 17)
-        }
-        memset(destination.contents(), 0, bytes)
-        blit.copy(
-            from: source, sourceOffset: 0,
-            to: cache.buffer, destinationOffset: cache.kOffset(block: 13), size: bytes)
-        blit.copy(
-            from: cache.buffer, sourceOffset: cache.kOffset(block: 13),
-            to: destination, destinationOffset: 0, size: bytes)
-        blit.endEncoding()
-        command.commit()
-        command.waitUntilCompleted()
-        if let error = command.error { throw error }
-
-        let dst = destination.contents().bindMemory(to: UInt8.self, capacity: bytes)
-        var mismatches = 0
-        for index in 0..<bytes where src[index] != dst[index] {
-            mismatches += 1
-            if mismatches > 1024 { break }
-        }
-        return Outcome(
-            name: "P5 private-buffer blit",
-            passed: mismatches == 0,
-            detail: "bytes=\(bytes) mismatches=\(mismatches)")
-    }
-
-    // MARK: - Test 4: same model/input must be deterministic
-
-    private static func repeatDeterminism(
-        context: MetalContext, file: AnimapkFile
-    ) throws -> Outcome {
-        let worker = ChurnWorker(file: file)
-        let model = try worker.makeProjection(
-            block: 0, suffix: "cross_attn.q_proj.weight", label: "v7_repeat_cross_q")
-        defer { model.invalidate() }
-        let input = try A12ANESurface(
-            device: context.device,
-            channels: UInt(DiTBlockExecutor.dim),
-            spatial: UInt(DiTBlockExecutor.tokens))
-        let output = try A12ANESurface(
-            device: context.device,
-            channels: UInt(DiTBlockExecutor.dim),
-            spatial: UInt(DiTBlockExecutor.tokens))
-        fillDeterministicSurface(input)
-
-        var ms = 0.0
-        _ = try model.evaluateInput(input, output: output, milliseconds: &ms)
-        let baseline = Data(bytes: output.metalBuffer.contents(), count: output.byteCount)
-        var changedRuns = 0
-        var firstMismatch = -1
-        var totalMS = ms
-
-        for _ in 0..<8 {
-            var value = 0.0
-            _ = try model.evaluateInput(input, output: output, milliseconds: &value)
-            totalMS += value
-            let now = Data(bytes: output.metalBuffer.contents(), count: output.byteCount)
-            if now != baseline {
-                changedRuns += 1
-                if firstMismatch < 0 {
-                    firstMismatch = firstDifferentByte(baseline, now)
-                }
-            }
-        }
-        return Outcome(
-            name: "repeat ANE determinism",
-            passed: changedRuns == 0,
-            detail: String(
-                format: "9 evals totalANE=%.2fms changedRuns=%d firstByte=%d",
-                totalMS, changedRuns, firstMismatch))
-    }
-
-    // MARK: - Test 5: production's shared-client overlap assumption
-
-    private static func sharedClientConcurrency(
-        context: MetalContext, file: AnimapkFile
-    ) throws -> Outcome {
-        let worker = ChurnWorker(file: file)
-        let foreground = try worker.makeProjection(
-            block: 0, suffix: "cross_attn.q_proj.weight", label: "v7_fg_cross_q")
-        defer { foreground.invalidate() }
-        let input = try A12ANESurface(
-            device: context.device,
-            channels: UInt(DiTBlockExecutor.dim),
-            spatial: UInt(DiTBlockExecutor.tokens))
-        let output = try A12ANESurface(
-            device: context.device,
-            channels: UInt(DiTBlockExecutor.dim),
-            spatial: UInt(DiTBlockExecutor.tokens))
-        fillDeterministicSurface(input)
-
-        var initialMS = 0.0
-        _ = try foreground.evaluateInput(input, output: output, milliseconds: &initialMS)
-        let baseline = Data(bytes: output.metalBuffer.contents(), count: output.byteCount)
-
-        let queue = DispatchQueue(
-            label: "com.invisiblestrangler.AnimaXS.ane-v7-churn",
-            qos: .userInitiated)
-        let errors = ErrorBox()
-        var changedRuns = 0
-        var firstMismatch = -1
-        var foregroundMS = initialMS
-
-        for iteration in 0..<12 {
-            let group = DispatchGroup()
-            group.enter()
-            queue.async {
-                defer { group.leave() }
-                do {
-                    let background = try worker.makeProjection(
-                        block: 1 + (iteration % 4),
-                        suffix: "cross_attn.q_proj.weight",
-                        label: "v7_churn_\(iteration)")
-                    background.invalidate()
-                } catch {
-                    errors.add(error)
-                }
-            }
-
-            var value = 0.0
-            _ = try foreground.evaluateInput(input, output: output, milliseconds: &value)
-            foregroundMS += value
-            group.wait()
-
-            let now = Data(bytes: output.metalBuffer.contents(), count: output.byteCount)
-            if now != baseline {
-                changedRuns += 1
-                if firstMismatch < 0 {
-                    firstMismatch = firstDifferentByte(baseline, now)
-                }
-            }
-        }
-
-        let pass = changedRuns == 0 && errors.isEmpty
-        let errorSuffix = errors.isEmpty ? "" : " churnErrors=\(errors.summary)"
-        return Outcome(
-            name: "shared-client load/unload overlap",
-            passed: pass,
-            detail: String(
-                format: "12 overlapped evals fgANE=%.2fms changedRuns=%d firstByte=%d",
-                foregroundMS, changedRuns, firstMismatch) + errorSuffix)
-    }
-
-    private static func fillDeterministicSurface(_ surface: A12ANESurface) {
-        memset(surface.metalBuffer.contents(), 0, surface.byteCount)
-        let stride = Int(surface.planeStrideElements)
-        let ptr = surface.metalBuffer.contents().bindMemory(
-            to: Float16.self, capacity: surface.byteCount / 2)
-        let channels = min(Int(surface.channels), 64)
-        let spatial = Int(surface.spatial)
-        for channel in 0..<channels {
-            for position in 0..<spatial {
-                let raw = ((channel * 29 + position * 17) % 127) - 63
-                ptr[channel * stride + position] = Float16(Float(raw) / 64.0)
-            }
-        }
-    }
-
-    private static func firstDifferentByte(_ a: Data, _ b: Data) -> Int {
-        let count = min(a.count, b.count)
-        return a.withUnsafeBytes { aBytes in
-            b.withUnsafeBytes { bBytes in
-                let ap = aBytes.bindMemory(to: UInt8.self)
-                let bp = bBytes.bindMemory(to: UInt8.self)
-                for index in 0..<count where ap[index] != bp[index] {
-                    return index
-                }
-                return a.count == b.count ? -1 : count
-            }
-        }
     }
 }
