@@ -1,6 +1,8 @@
 from pathlib import Path
 import json
 import struct
+import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -116,6 +118,10 @@ class OracleECaptureAndCompareTests(unittest.TestCase):
             self.assertEqual((out / "prepared_embedding.f32").stat().st_size, 2048 * 4)
             self.assertEqual((out / "prepared_adaln_lora.f32").stat().st_size, 6144 * 4)
             self.assertEqual(manifest["prepared_state_source"], "synthetic")
+            self.assertEqual(manifest["generation_width"], 512)
+            self.assertEqual(manifest["generation_height"], 512)
+            self.assertEqual(manifest["latent_shape"], [1, 16, 64, 64])
+            self.assertEqual(manifest["dit_token_count"], 1024)
             self.assertTrue((out / "step00_block27_mlp.f32").is_file())
 
     def test_unpack_rejects_missing_prepared_state(self):
@@ -137,6 +143,33 @@ class OracleECaptureAndCompareTests(unittest.TestCase):
             path.write_bytes(raw)
             with self.assertRaises(ValueError):
                 unpack_capture(path, Path(td) / "out")
+
+    def test_v2_patcher_adds_only_optional_geometry_override(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "v2.py"
+            output = root / "e.py"
+            source.write_text(
+                'import os\n'
+                'def build_prompt():\n'
+                '    g = CFG["generation"]\n'
+                '    node={"class_type":"AnimaOracleArm"}\n'
+                'ap.add_argument("--instrument",choices=["none","capture","fp16_boundaries"],default="none")\n'
+            )
+            repo_root = Path(__file__).resolve().parents[2]
+            subprocess.run(
+                [sys.executable, str(repo_root / "scripts/ane_oracle_e_patch_v2_runner.py"),
+                 str(source), str(output)],
+                cwd=repo_root,
+                check=True,
+            )
+            patched = output.read_text()
+            patch_manifest = output.with_suffix(output.suffix + ".patch.txt").read_text()
+            self.assertIn('ANIMA_ORACLE_E_WIDTH', patched)
+            self.assertIn('ANIMA_ORACLE_E_HEIGHT', patched)
+            self.assertIn('"class_type":"AnimaOracleEArm"', patched)
+            self.assertIn('E2_device_residual', patched)
+            self.assertIn('semantic_edits=3', patch_manifest)
 
     def test_compare_identity_is_zero_everywhere(self):
         with tempfile.TemporaryDirectory() as td:
