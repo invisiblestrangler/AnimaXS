@@ -34,9 +34,7 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ env.EVIDENCE_RUN_ID }}
 
-      - name: Download failed Phase 0 evidence artifact if it exists
-        id: phase0_artifact
-        continue-on-error: true
+      - name: Download failed Phase 0 evidence artifact
         uses: actions/download-artifact@v5
         with:
           name: ane-oracle-e-phase0
@@ -45,90 +43,83 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ env.PHASE0_RUN_ID }}
 
-      - name: Build bounded artifact inspection report
+      - name: Build concise artifact-only diagnosis
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p inspector-out
-          {
-            echo '# ANE Oracle E CI Artifact Inspection'
-            echo
-            echo '- Phase 0 run: `${{ env.PHASE0_RUN_ID }}`'
-            echo '- Evidence mirror run: `${{ env.EVIDENCE_RUN_ID }}`'
-            echo '- Phase 0 artifact download outcome: `${{ steps.phase0_artifact.outcome }}`'
-            echo '- This report was generated exclusively from workflow artifacts; no CI logs were downloaded or queried.'
-            echo
-            echo '## Evidence mirror files'
-            echo '```text'
-            find inspected/evidence -type f -printf '%P\n' | sort | head -200
-            echo '```'
-            echo
-            if [ -f inspected/evidence/SELECTED_MANIFEST.json ]; then
-              echo '## SELECTED_MANIFEST.json'
-              echo '```json'
-              python - <<'PY'
+          python - <<'PY'
           from pathlib import Path
-          p = Path('inspected/evidence/SELECTED_MANIFEST.json')
-          print(p.read_text(errors='replace')[:30000])
-          PY
-              echo '```'
-              echo
-            fi
-            if [ -f inspected/evidence/SELECTED_TEXT_DUMP.txt ]; then
-              echo '## Oracle V2/D selected text evidence'
-              echo '```text'
-              python - <<'PY'
-          from pathlib import Path
-          p = Path('inspected/evidence/SELECTED_TEXT_DUMP.txt')
-          text = p.read_text(errors='replace')
-          print(text[:60000])
-          PY
-              echo '```'
-              echo
-            fi
-            echo '## Phase 0 artifact files'
-            if [ -d inspected/phase0 ]; then
-              echo '```text'
-              find inspected/phase0 -type f -printf '%P\n' | sort | head -200
-              echo '```'
-              for f in \
-                inspected/phase0/ANE_ORACLE_E_WEIGHT_AUDIT.md \
-                inspected/phase0/PROVENANCE.txt \
-                inspected/phase0/ORACLE_D_FILE_LIST.txt \
-                inspected/phase0/ORACLE_V2_FILE_LIST.txt; do
-                if [ -f "$f" ]; then
-                  echo
-                  echo "### $(basename "$f")"
-                  echo '```text'
-                  python - "$f" <<'PY'
-          from pathlib import Path
-          import sys
-          print(Path(sys.argv[1]).read_text(errors='replace')[:50000])
-          PY
-                  echo '```'
-                fi
-              done
-            else
-              echo 'No Phase 0 artifact was available from the failed run.'
-            fi
-          } > inspector-out/REPORT.md
+          import json
 
-      - name: Upload inspection report
+          root = Path('inspected/phase0')
+          files = sorted(p for p in root.rglob('*') if p.is_file())
+          rel = [str(p.relative_to(root)) for p in files]
+          sizes = {str(p.relative_to(root)): p.stat().st_size for p in files}
+
+          expected = {
+              'oracle_v2_list': 'ORACLE_V2_FILE_LIST.txt',
+              'oracle_d_list': 'ORACLE_D_FILE_LIST.txt',
+              'audit_json': 'ANE_ORACLE_E_WEIGHT_AUDIT.json',
+              'audit_csv': 'ANE_ORACLE_E_WEIGHT_AUDIT.csv',
+              'audit_md': 'ANE_ORACLE_E_WEIGHT_AUDIT.md',
+              'provenance': 'PROVENANCE.txt',
+              'checksums': 'SHA256SUMS',
+          }
+          present = {k: (v in rel) for k, v in expected.items()}
+
+          if present['provenance'] and present['checksums']:
+              milestone = 'Phase 0 audit completed; failure occurred during or after publish/upload/finalization.'
+          elif present['audit_md'] or present['audit_json'] or present['audit_csv']:
+              milestone = 'Weight audit completed; failure occurred before provenance/checksum completion.'
+          elif present['oracle_v2_list'] and present['oracle_d_list']:
+              milestone = 'Oracle evidence enumeration completed; failure occurred before weight-audit outputs were produced.'
+          else:
+              milestone = 'Failure occurred before Oracle evidence enumeration completed.'
+
+          summary = {
+              'phase0_run_id': 32241837235,
+              'source': 'workflow artifacts only; no CI logs queried',
+              'file_count': len(rel),
+              'files': rel,
+              'sizes': sizes,
+              'expected_present': present,
+              'inferred_last_milestone': milestone,
+          }
+          Path('inspector-out/SUMMARY.json').write_text(json.dumps(summary, indent=2) + '\n')
+
+          lines = [
+              '# ANE Oracle E Phase 0 artifact-only diagnosis',
+              '',
+              '- Source: workflow artifacts only; **no CI logs were downloaded or queried**.',
+              f'- Phase 0 run: `32241837235`',
+              f'- Artifact file count: `{len(rel)}`',
+              f'- Inferred last milestone: **{milestone}**',
+              '',
+              '## Expected evidence presence',
+          ]
+          for key, path in expected.items():
+              lines.append(f'- `{path}`: {"present" if present[key] else "MISSING"}')
+          lines += ['', '## Files actually present']
+          for path in rel:
+              lines.append(f'- `{path}` — {sizes[path]} bytes')
+          Path('inspector-out/SUMMARY.md').write_text('\n'.join(lines) + '\n')
+          PY
+
+      - name: Upload concise diagnosis
         uses: actions/upload-artifact@v7
         with:
-          name: ane-oracle-e-ci-artifact-inspection
+          name: ane-oracle-e-ci-artifact-diagnosis
           retention-days: 14
-          path: inspector-out/REPORT.md
+          path: inspector-out/
           if-no-files-found: error
 
-      - name: Post inspection report to PR 35
+      - name: Post concise diagnosis to PR 35
         uses: actions/github-script@v8
         with:
           script: |
             const fs = require('fs');
-            let body = fs.readFileSync('inspector-out/REPORT.md', 'utf8');
-            const max = 60000;
-            if (body.length > max) body = body.slice(0, max) + '\n\n_(truncated; full report is in the workflow artifact)_';
+            const body = fs.readFileSync('inspector-out/SUMMARY.md', 'utf8');
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
