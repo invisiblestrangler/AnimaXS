@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """Exact ANIMAPK arithmetic helpers for the ANE Oracle E controls.
 
-This module intentionally does *not* model undocumented ANE instructions.  It
-models the public contract AnimaXS itself supplies to the private runtime:
+This module intentionally does *not* model undocumented ANE instructions. It
+models only contracts visible in the current AnimaXS pack/runtime:
 
-* native projection weights are unsigned U8 with one FP32 scale and FP32 bias
-  per output row (``ane_u8_per_row_fp32_v1``);
-* the mathematical reconstructed row is ``q * scale + bias``;
-* ANE activation surfaces are FP16;
-* residual checkpoints use a deterministic bounded sample so CUDA and A12 can
-  be compared without exporting ~672 MiB of full step-0 residuals.
+* native ANE projections: U8 + one FP32 scale/bias per output row;
+* Metal-only W8 matrices: row-reset group64 U8 + FP16 scale/zero;
+* learned RMSNorm vectors: exact FP16 payload bytes;
+* ANE activation surfaces: FP16;
+* residual checkpoints: deterministic bounded FP32 samples.
 
-The helpers are shared by the external CUDA/ComfyUI oracle and by CPU unit
-checks.  Keeping the ANIMAPK parser here prevents Oracle E from silently using
-source weights or a second quantizer implementation.
+The helpers are shared by the external CUDA/ComfyUI oracle and CPU unit checks.
+Reading arithmetic directly from the ANIMAPK prevents Oracle E from silently
+using source weights or a second quantizer implementation.
 """
 from __future__ import annotations
 
@@ -104,6 +103,8 @@ class AnimapkReference:
         if self.quant_scheme != ANE_QUANT_SCHEME:
             raise ValueError(
                 f"Oracle E requires {ANE_QUANT_SCHEME}, got {self.quant_scheme!r}")
+        if self.group != 64:
+            raise ValueError(f"Oracle E requires quant group 64, got {self.group}")
 
     def close(self) -> None:
         blob = getattr(self, "_blob", None)
@@ -130,7 +131,7 @@ class AnimapkReference:
     def native_rows(
         self, name: str, row_start: int = 0, row_end: int | None = None
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return copied ``(q_u8, scale_f32, bias_f32)`` rows for a native tensor."""
+        """Copied ``(q_u8, scale_f32, bias_f32)`` rows for a native tensor."""
         rec = self.record(name)
         if rec.quantization_format != ANE_TENSOR_FORMAT or rec.storage_dtype != "w8":
             raise ValueError(f"{name} is not an ANE-native tensor")
@@ -163,6 +164,68 @@ class AnimapkReference:
         q, scale, bias = self.native_rows(name, row_start, row_end)
         return q.astype(np.float32) * scale[:, None] + bias[:, None]
 
+    def group64_rows(
+        self, name: str, row_start: int = 0, row_end: int | None = None
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Copied W8 group64 rows and the *exact FP16* scale/zero metadata."""
+        rec = self.record(name)
+        if rec.storage_dtype != "w8" or rec.quantization_format != GROUP64_TENSOR_FORMAT:
+            raise ValueError(f"{name} is not group64 W8/{GROUP64_TENSOR_FORMAT}")
+        if len(rec.shape) != 2:
+            raise ValueError(f"{name} is not rank-2")
+        rows, cols = rec.shape
+        end = rows if row_end is None else int(row_end)
+        start = int(row_start)
+        if not (0 <= start <= end <= rows):
+            raise IndexError(f"row slice [{start}:{end}] out of range 0...{rows}")
+        count = end - start
+        groups_per_row = (cols + self.group - 1) // self.group
+
+        q_base = rec.blob_offset + rec.data_offset + start * cols
+        q = np.frombuffer(self._blob, dtype=np.uint8, count=count * cols, offset=q_base)
+        q = q.reshape(count, cols).copy()
+
+        metadata_count = count * groups_per_row
+        scale_base = rec.blob_offset + rec.scale_offset + start * groups_per_row * 2
+        zero_base = rec.blob_offset + rec.zero_offset + start * groups_per_row * 2
+        scale = np.frombuffer(
+            self._blob, dtype="<f2", count=metadata_count, offset=scale_base
+        ).reshape(count, groups_per_row).copy()
+        zero = np.frombuffer(
+            self._blob, dtype="<f2", count=metadata_count, offset=zero_base
+        ).reshape(count, groups_per_row).copy()
+        if not np.isfinite(scale).all() or not np.isfinite(zero).all():
+            raise ValueError(f"{name} contains non-finite group64 metadata")
+        if not (scale > 0).all():
+            raise ValueError(f"{name} contains non-positive group64 scale")
+        return q, scale, zero
+
+    def group64_reconstructed_rows(
+        self, name: str, row_start: int = 0, row_end: int | None = None
+    ) -> np.ndarray:
+        q, scale, zero = self.group64_rows(name, row_start, row_end)
+        cols = q.shape[1]
+        group_index = np.arange(cols, dtype=np.int64) // self.group
+        # Device matvec/dequant kernels load the FP16 metadata then promote to
+        # float for q*scale+zero. Do the same: promote metadata before arithmetic.
+        scale_f32 = scale.astype(np.float32)[:, group_index]
+        zero_f32 = zero.astype(np.float32)[:, group_index]
+        return q.astype(np.float32) * scale_f32 + zero_f32
+
+    def fp16_tensor(self, name: str) -> np.ndarray:
+        """Return exact FP16 payload bytes reshaped to the tensor's declared shape."""
+        rec = self.record(name)
+        if rec.storage_dtype != FP16_TENSOR_FORMAT:
+            raise ValueError(f"{name} is not FP16 storage")
+        count = math.prod(rec.shape)
+        expected_bytes = count * 2
+        if rec.data_size != expected_bytes:
+            raise ValueError(
+                f"{name} FP16 byte count mismatch: {rec.data_size} != {expected_bytes}")
+        base = rec.blob_offset + rec.data_offset
+        values = np.frombuffer(self._blob, dtype="<f2", count=count, offset=base).copy()
+        return values.reshape(rec.shape)
+
 
 def fp16_roundtrip_numpy(values: np.ndarray) -> np.ndarray:
     """Device-surface storage boundary, returned in FP32 for stable comparison."""
@@ -176,12 +239,10 @@ def native_linear_numpy(
     *,
     output_row_chunk: int = 256,
 ) -> np.ndarray:
-    """Reference native projection with FP16 surface input/output and FP32 dot products.
+    """Native projection reference: FP16 surface I/O + FP32 dot product control.
 
-    This is a mathematical control, not a claim about the private ANE's exact
-    accumulator implementation.  ``x`` may have any leading dimensions; the
-    final dimension must equal the packed K dimension.  The returned array is
-    FP32 containing values exactly representable in FP16.
+    FP32 dot accumulation is a *reference arithmetic choice*, not a claim that
+    Apple's private ANE is instruction-identical internally.
     """
     rec = pack.record(name)
     if len(rec.shape) != 2:
@@ -198,6 +259,36 @@ def native_linear_numpy(
         weight = pack.native_reconstructed_rows(name, row0, row1)
         out[:, row0:row1] = x_surface @ weight.T
     out = fp16_roundtrip_numpy(out)
+    return out.reshape(*x_arr.shape[:-1], out_features)
+
+
+def group64_matvec_numpy(
+    pack: AnimapkReference,
+    name: str,
+    x: np.ndarray,
+    *,
+    output_row_chunk: int = 256,
+) -> np.ndarray:
+    """Metal-only group64 W8 matvec control with FP32 input/output.
+
+    The A12 modulation path decodes W8 q/FP16-scale/FP16-zero in the direct
+    matvec kernel and accumulates to FP32. This function mirrors that visible
+    contract while intentionally not claiming the same parallel reduction order.
+    """
+    rec = pack.record(name)
+    if len(rec.shape) != 2:
+        raise ValueError("group64 matvec weight must be rank-2")
+    out_features, in_features = rec.shape
+    x_arr = np.asarray(x, dtype=np.float32)
+    if x_arr.shape[-1] != in_features:
+        raise ValueError(
+            f"input K={x_arr.shape[-1]} does not match {name} K={in_features}")
+    flat = x_arr.reshape(-1, in_features)
+    out = np.empty((flat.shape[0], out_features), dtype=np.float32)
+    for row0 in range(0, out_features, output_row_chunk):
+        row1 = min(out_features, row0 + output_row_chunk)
+        weight = pack.group64_reconstructed_rows(name, row0, row1)
+        out[:, row0:row1] = flat @ weight.T
     return out.reshape(*x_arr.shape[:-1], out_features)
 
 
