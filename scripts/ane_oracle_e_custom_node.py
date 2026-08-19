@@ -1,17 +1,25 @@
 # AnimaXS Oracle E ComfyUI custom node.
 #
-# E1 isolates the real hybrid pack's ANE-native projection arithmetic from
-# Oracle D.  E2 adds the iPhone's FP32 residual-stream policy.  The actual
-# pinned ComfyUI Anima forward remains in control of all non-projection math;
-# this node patches only the ten ANE projection modules per block, the exact
-# half->float GELU->half handoff, Q/K/V post-normalization surface boundaries,
-# and bounded diagnostic hooks.
+# E1/E2 keep the pinned ComfyUI Anima forward in control of block structure,
+# attention, LayerNorm/AdaLN, gating, and residual updates. Only the seams that
+# differ in the physical hybrid pack/runtime are replaced:
+#
+# * 10 ANE projections/block: exact U8 + FP32 per-row scale/bias from ANIMAPK,
+#   with FP16 activation surface input/output;
+# * 6 Metal modulation matvecs/block: exact group64 W8 + FP16 scale/zero;
+# * 4 learned attention RMSNorm vectors/block: exact FP16 pack payload;
+# * MLP activation: FP16 -> FP32 exact-erf GELU -> FP16;
+# * Q/K/V post-transform storage: FP16;
+# * E2 residual stream: FP32.
+#
+# This is a software reference for the *visible* hybrid contract. FP32 torch.mm
+# is deliberately used as stable reference accumulation; it is NOT a claim
+# about undocumented private-ANE accumulator instructions/reduction order.
 from __future__ import annotations
 
 from pathlib import Path
 import hashlib
 import json
-import math
 import os
 import threading
 from typing import Any
@@ -24,6 +32,7 @@ from safetensors.torch import load_file, save_file
 try:
     from .ane_oracle_e_pack_reference import (
         ANE_TENSOR_FORMAT,
+        GROUP64_TENSOR_FORMAT,
         DEFAULT_SAMPLE_COUNT,
         AnimapkReference,
         deterministic_stride,
@@ -31,6 +40,7 @@ try:
 except Exception:
     from scripts.ane_oracle_e_pack_reference import (
         ANE_TENSOR_FORMAT,
+        GROUP64_TENSOR_FORMAT,
         DEFAULT_SAMPLE_COUNT,
         AnimapkReference,
         deterministic_stride,
@@ -39,13 +49,16 @@ except Exception:
 PINNED_PACK_SHA256 = "f5c80a25114b62a6807996180d439c5d12828d7392c604e1eee15acb28977dc4"
 PINNED_PACK_BYTES = 2_128_838_656
 MODES = ("E1_native_ane", "E2_device_residual")
+STEP0_SENTINEL = "__ANIMA_ORACLE_E_STEP0_COMPLETE__"
 RUN_DIR = Path(os.environ.get("ANIMA_ORACLE_E_RUN_DIR", "/tmp/anima_oracle_e"))
 RUN_DIR.mkdir(parents=True, exist_ok=True)
 SAMPLE_COUNT = int(os.environ.get("ANIMA_ORACLE_E_SAMPLE_COUNT", str(DEFAULT_SAMPLE_COUNT)))
 OUTPUT_ROW_CHUNK = int(os.environ.get("ANIMA_ORACLE_E_OUTPUT_ROW_CHUNK", "256"))
 PACK_PATH = Path(os.environ.get("ANIMA_ORACLE_E_PACK", ""))
 EXPECTED_PACK_SHA256 = os.environ.get("ANIMA_ORACLE_E_PACK_SHA256", PINNED_PACK_SHA256).lower()
-NOISE_MODE = os.environ.get("ANIMA_ORACLE_E_NOISE_MODE", os.environ.get("ANIMA_ORACLE_NOISE_MODE", "none"))
+STOP_AFTER_STEP0 = os.environ.get("ANIMA_ORACLE_E_STOP_AFTER_STEP0", "0") == "1"
+NOISE_MODE = os.environ.get(
+    "ANIMA_ORACLE_E_NOISE_MODE", os.environ.get("ANIMA_ORACLE_NOISE_MODE", "none"))
 NOISE_FILE = Path(os.environ.get(
     "ANIMA_ORACLE_E_NOISE_FILE",
     os.environ.get("ANIMA_ORACLE_NOISE_FILE", str(RUN_DIR / "initial_noise.safetensors")),
@@ -84,7 +97,7 @@ def _locate_diffusion_model(patcher: Any) -> Any:
     raise RuntimeError("Oracle E: could not locate diffusion_model on MODEL")
 
 
-def _native_name(block: int, suffix: str) -> str:
+def _tensor_name(block: int, suffix: str) -> str:
     return f"model.diffusion_model.blocks.{block}.{suffix}.weight"
 
 
@@ -103,13 +116,33 @@ def _native_modules(block: Any) -> list[tuple[str, Any]]:
     ]
 
 
-def _ane_linear_torch(pack: AnimapkReference, name: str, x: torch.Tensor) -> torch.Tensor:
-    """FP16 surface I/O + exact q*FP32-scale+FP32-bias weight reconstruction.
+def _modulation_modules(block: Any) -> list[tuple[str, Any]]:
+    groups = [
+        ("adaln_modulation_self_attn", block.adaln_modulation_self_attn),
+        ("adaln_modulation_cross_attn", block.adaln_modulation_cross_attn),
+        ("adaln_modulation_mlp", block.adaln_modulation_mlp),
+    ]
+    result: list[tuple[str, Any]] = []
+    for prefix, sequence in groups:
+        if len(sequence) != 3:
+            raise RuntimeError(
+                f"Oracle E expected SiLU+Linear+Linear for {prefix}, found length {len(sequence)}")
+        result.append((f"{prefix}.1", sequence[1]))
+        result.append((f"{prefix}.2", sequence[2]))
+    return result
 
-    Matmul is deliberately FP32 with TF32 disabled by the arm step.  That is a
-    reference arithmetic choice, not a claim that Apple's private ANE uses
-    instruction-for-instruction FP32 accumulation.
-    """
+
+def _norm_modules(block: Any) -> list[tuple[str, Any]]:
+    return [
+        ("self_attn.q_norm", block.self_attn.q_norm),
+        ("self_attn.k_norm", block.self_attn.k_norm),
+        ("cross_attn.q_norm", block.cross_attn.q_norm),
+        ("cross_attn.k_norm", block.cross_attn.k_norm),
+    ]
+
+
+def _ane_linear_torch(pack: AnimapkReference, name: str, x: torch.Tensor) -> torch.Tensor:
+    """Exact packed native weights + FP16 surface I/O + FP32 reference dot."""
     rec = pack.record(name)
     if rec.quantization_format != ANE_TENSOR_FORMAT or len(rec.shape) != 2:
         raise RuntimeError(f"Oracle E native projection contract mismatch: {name}")
@@ -117,11 +150,9 @@ def _ane_linear_torch(pack: AnimapkReference, name: str, x: torch.Tensor) -> tor
     if x.shape[-1] != in_features:
         raise RuntimeError(
             f"Oracle E input K mismatch for {name}: {x.shape[-1]} != {in_features}")
-    original_dtype = x.dtype
     x_surface = x.to(torch.float16).reshape(-1, in_features).to(torch.float32)
     out = torch.empty(
-        (x_surface.shape[0], out_features), device=x.device, dtype=torch.float32
-    )
+        (x_surface.shape[0], out_features), device=x.device, dtype=torch.float32)
     for row0 in range(0, out_features, OUTPUT_ROW_CHUNK):
         row1 = min(out_features, row0 + OUTPUT_ROW_CHUNK)
         q_np, scale_np, bias_np = pack.native_rows(name, row0, row1)
@@ -130,23 +161,57 @@ def _ane_linear_torch(pack: AnimapkReference, name: str, x: torch.Tensor) -> tor
         bias = torch.from_numpy(bias_np).to(device=x.device, dtype=torch.float32)
         weight = q.mul_(scale[:, None]).add_(bias[:, None])
         out[:, row0:row1] = torch.mm(x_surface, weight.t())
-    # The private-runtime output IOSurface is FP16.  Return in the caller's
-    # dtype only after that storage roundtrip so the source model can continue.
-    out = out.to(torch.float16).to(original_dtype)
+    # Do NOT cast back to BF16. The actual private-runtime output surface is
+    # FP16; downstream Metal consumes those FP16 values.
+    return out.to(torch.float16).reshape(*x.shape[:-1], out_features)
+
+
+def _group64_matvec_torch(pack: AnimapkReference, name: str, x: torch.Tensor) -> torch.Tensor:
+    """Exact group64 W8/FP16-metadata modulation matvec, FP32 input/output."""
+    rec = pack.record(name)
+    if rec.quantization_format != GROUP64_TENSOR_FORMAT or rec.storage_dtype != "w8":
+        raise RuntimeError(f"Oracle E Metal modulation contract mismatch: {name}")
+    if len(rec.shape) != 2:
+        raise RuntimeError(f"Oracle E modulation tensor is not rank-2: {name}")
+    out_features, in_features = rec.shape
+    if x.shape[-1] != in_features:
+        raise RuntimeError(
+            f"Oracle E modulation K mismatch for {name}: {x.shape[-1]} != {in_features}")
+    x_f32 = x.to(torch.float32).reshape(-1, in_features)
+    out = torch.empty(
+        (x_f32.shape[0], out_features), device=x.device, dtype=torch.float32)
+    for row0 in range(0, out_features, OUTPUT_ROW_CHUNK):
+        row1 = min(out_features, row0 + OUTPUT_ROW_CHUNK)
+        weight_np = pack.group64_reconstructed_rows(name, row0, row1)
+        weight = torch.from_numpy(weight_np).to(device=x.device, dtype=torch.float32)
+        out[:, row0:row1] = torch.mm(x_f32, weight.t())
     return out.reshape(*x.shape[:-1], out_features)
 
 
+def _install_exact_fp16_norm(pack: AnimapkReference, name: str, module: Any) -> torch.Tensor:
+    weight = getattr(module, "weight", None)
+    if weight is None:
+        raise RuntimeError(f"Oracle E norm has no weight parameter: {name}")
+    exact_np = pack.fp16_tensor(name)
+    if tuple(exact_np.shape) != tuple(weight.shape):
+        raise RuntimeError(
+            f"Oracle E norm shape mismatch for {name}: pack={exact_np.shape} module={tuple(weight.shape)}")
+    original = weight.detach().clone()
+    exact = torch.from_numpy(exact_np.copy()).to(device=weight.device, dtype=torch.float16)
+    # Keep the original Parameter object so Comfy's parameter/offload tracking
+    # remains intact; replace only its data storage/dtype on the cloned model.
+    weight.data = exact
+    return original
+
+
 def _fp16_rt(x: torch.Tensor) -> torch.Tensor:
-    return x.to(torch.float16).to(x.dtype)
+    return x.to(torch.float16)
 
 
 def _device_gelu(x: torch.Tensor) -> torch.Tensor:
-    # Mirrors current baseline ANE path: half surface -> FP32 exact-erf GELU ->
-    # half surface.  CUDA's exact GELU is the control; Metal's local erf helper
-    # may differ by a few ulps and is therefore not asserted bit-identical.
-    original_dtype = x.dtype
+    # Current baseline ANE path: FP16 surface -> FP32 exact-erf GELU -> FP16.
     y = F.gelu(x.to(torch.float16).to(torch.float32), approximate="none")
-    return y.to(torch.float16).to(original_dtype)
+    return y.to(torch.float16)
 
 
 def _checkpoint_stats(x: torch.Tensor) -> dict[str, Any]:
@@ -194,11 +259,12 @@ class _CaptureState:
         self.traversal += 1
 
     def capture(self, block: int, branch: str, tensor: torch.Tensor) -> None:
-        # CFG is pinned to 1.0 in the Oracle V2 graph, therefore traversal 0 is
-        # exactly diffusion step 0.  Later traversals run normally but are not
-        # exported in this localization pass.
+        # CFG is pinned to 1.0, so traversal 0 is diffusion step 0.
         if self.traversal != 0:
             return
+        key = (block, branch)
+        if any((r["block"], r["branch"]) == key for r in self.records):
+            raise RuntimeError(f"Oracle E duplicate checkpoint {key}")
         flat = tensor.detach().reshape(-1)
         stride = deterministic_stride(flat.numel(), SAMPLE_COUNT)
         sample = flat[::stride][:SAMPLE_COUNT].to(torch.float32).cpu().contiguous()
@@ -235,6 +301,7 @@ class _CaptureState:
             "expected_step0_checkpoints": 84,
             "completed_step0_checkpoints": len(self.records),
             "complete": len(self.records) == 84,
+            "stop_after_step0": STOP_AFTER_STEP0,
             "records": self.records,
         }
         tmp = RUN_DIR / "oracle_e_checkpoints.json.tmp"
@@ -326,11 +393,13 @@ class AnimaOracleEArm:
         state = _CaptureState(mode, digest)
         handles = []
         originals = []
+        group64_count = 0
+        fp16_norm_count = 0
 
         for block_index, block in enumerate(blocks):
-            # Patch exactly the ten projection modules selected by pack_anima.py.
+            # Ten large projections use exact ANE-native row-U8 weights.
             for suffix, module in _native_modules(block):
-                name = _native_name(block_index, suffix)
+                name = _tensor_name(block_index, suffix)
                 rec = pack.record(name)
                 if rec.quantization_format != ANE_TENSOR_FORMAT:
                     pack.close()
@@ -339,19 +408,48 @@ class AnimaOracleEArm:
                     pack.close()
                     raise RuntimeError(f"Oracle E expected bias-free native projection: {name}")
                 original_forward = module.forward
-                originals.append((module, original_forward))
+                originals.append((module, "forward", original_forward))
 
                 def native_forward(x, _name=name, _pack=pack):
                     return _ane_linear_torch(_pack, _name, x)
 
                 module.forward = native_forward
 
-            # Q/K/V leaving normalization/RoPE live in FP16 Metal/ANE handoff
-            # buffers on device.  Wrapping compute_qkv catches self (norm+RoPE)
-            # and cross (norm) at the source model's exact seam.
+            # Six compact Metal-only modulation matrices stay group64 W8 in the
+            # hybrid pack. V2's reconstructed checkpoint rounded them to BF16,
+            # so replace those forwards with exact pack arithmetic here.
+            for suffix, module in _modulation_modules(block):
+                name = _tensor_name(block_index, suffix)
+                rec = pack.record(name)
+                if rec.quantization_format != GROUP64_TENSOR_FORMAT or rec.storage_dtype != "w8":
+                    pack.close()
+                    raise RuntimeError(f"Oracle E modulation is not group64 W8: {name}")
+                if getattr(module, "bias", None) is not None:
+                    pack.close()
+                    raise RuntimeError(f"Oracle E expected bias-free modulation linear: {name}")
+                original_forward = module.forward
+                originals.append((module, "forward", original_forward))
+
+                def modulation_forward(x, _name=name, _pack=pack):
+                    return _group64_matvec_torch(_pack, _name, x)
+
+                module.forward = modulation_forward
+                group64_count += 1
+
+            # Four learned RMSNorm vectors are raw FP16 in the pack. Preserve
+            # the Parameter objects but restore those exact FP16 payload values
+            # so self fused RMS+RoPE and cross RMSNorm do not inherit V2's BF16
+            # reconstruction loss.
+            for suffix, module in _norm_modules(block):
+                name = _tensor_name(block_index, suffix)
+                original = _install_exact_fp16_norm(pack, name, module)
+                originals.append((module, "weight_data", original))
+                fp16_norm_count += 1
+
+            # Q/K/V after the source norm/RoPE seam live in FP16 device buffers.
             for attention in (block.self_attn, block.cross_attn):
                 original_compute_qkv = attention.compute_qkv
-                originals.append((attention, original_compute_qkv))
+                originals.append((attention, "compute_qkv", original_compute_qkv))
 
                 def compute_qkv(*args, _orig=original_compute_qkv, **kwargs):
                     q, k, v = _orig(*args, **kwargs)
@@ -359,16 +457,16 @@ class AnimaOracleEArm:
 
                 attention.compute_qkv = compute_qkv
 
-            # Current ANE baseline uses half -> float GELU -> half with fused
-            # activation disabled.  Patch only this activation seam.
+            # Current ANE baseline has fused MLP activation OFF:
+            # half -> float GELU -> half.
             activation = block.mlp.activation
             original_activation = activation.forward
-            originals.append((activation, original_activation))
+            originals.append((activation, "forward", original_activation))
             activation.forward = lambda x: _device_gelu(x)
 
-            # These are exact post-branch seams in pinned MiniTrainDIT:
-            # cross-LN input == post-self residual; MLP-LN input == post-cross;
-            # block output == post-MLP residual.
+            # Exact post-branch seams in pinned MiniTrainDIT:
+            # cross-LN input == post-self; MLP-LN input == post-cross; block
+            # output == post-MLP.
             def make_pre_capture(b: int, branch: str):
                 def hook(_module, args):
                     state.capture(b, branch, args[0])
@@ -377,6 +475,10 @@ class AnimaOracleEArm:
             def make_post_capture(b: int):
                 def hook(_module, _args, output):
                     state.capture(b, "mlp", output)
+                    if (STOP_AFTER_STEP0 and state.traversal == 0 and b == 27
+                            and len(state.records) == 84):
+                        (RUN_DIR / "STEP0_COMPLETE").write_text(STEP0_SENTINEL + "\n")
+                        raise RuntimeError(STEP0_SENTINEL)
                 return hook
 
             handles.append(block.layer_norm_cross_attn.register_forward_pre_hook(
@@ -385,9 +487,16 @@ class AnimaOracleEArm:
                 make_pre_capture(block_index, "cross")))
             handles.append(block.register_forward_hook(make_post_capture(block_index)))
 
-        # Block 0 is the stable traversal seam used by Oracle V2.  E2 converts
-        # only the incoming residual to FP32; all later blocks naturally remain
-        # FP32 because addcmul uses residual_dtype from x.
+        if group64_count != 28 * 6:
+            pack.close()
+            raise RuntimeError(f"Oracle E expected 168 group64 modulation matrices, got {group64_count}")
+        if fp16_norm_count != 28 * 4:
+            pack.close()
+            raise RuntimeError(f"Oracle E expected 112 FP16 learned norm vectors, got {fp16_norm_count}")
+
+        # Block 0 is the stable traversal seam used by V2. E2 keeps the
+        # residual stream FP32 like AnimaXS; E1 preserves V2's residual dtype so
+        # D -> E1 isolates hybrid packed projection/aux-weight semantics.
         def traversal_hook(_module, args):
             state.begin_traversal()
             if mode == "E2_device_residual":
@@ -410,21 +519,26 @@ class AnimaOracleEArm:
             "diffusion_class": f"{dm.__class__.__module__}.{dm.__class__.__name__}",
             "block_count": len(blocks),
             "native_projection_count": len(native_records),
+            "metal_group64_modulation_count": group64_count,
+            "metal_fp16_norm_count": fp16_norm_count,
             "pack_path": str(PACK_PATH),
             "pack_bytes": PACK_PATH.stat().st_size,
             "pack_sha256": digest,
             "native_format": ANE_TENSOR_FORMAT,
+            "metal_group64_format": GROUP64_TENSOR_FORMAT,
             "sample_count": SAMPLE_COUNT,
             "output_row_chunk": OUTPUT_ROW_CHUNK,
             "tf32_disabled": bool(torch.cuda.is_available()),
             "noise_mode": NOISE_MODE,
             "noise_file": str(NOISE_FILE),
-            "reference_accumulation": "FP32 torch.mm; not claimed instruction-identical to private ANE",
+            "stop_after_step0": STOP_AFTER_STEP0,
+            "native_reference_accumulation": "FP32 torch.mm; not claimed instruction-identical to private ANE",
+            "modulation_reference_accumulation": "FP32 torch.mm over exact group64 W8/FP16 metadata; reduction order not claimed identical to Metal",
             "gelu_reference": "FP16 input -> CUDA exact-erf FP32 GELU -> FP16 output",
+            "residual_policy": "FP32 in E2; inherited V2 dtype in E1",
         }
         (RUN_DIR / "oracle_e_arm.json").write_text(
             json.dumps(meta, indent=2, sort_keys=True) + "\n")
-        # Emit an initial manifest even if the model fails before block 0.
         state._write_manifest()
         return (m,)
 
