@@ -6,6 +6,8 @@ on:
       - agent/ane-oracle-e
     paths:
       - .github/workflows/ane-oracle-e-xcodegen.yml
+      - AnimaXS/**/*.swift
+      - project.yml
   workflow_dispatch:
 
 permissions:
@@ -20,6 +22,9 @@ jobs:
   sync:
     runs-on: macos-15
     timeout-minutes: 15
+    concurrency:
+      group: ane-oracle-e-xcodegen
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v7
         with:
@@ -39,6 +44,10 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$RUNNER_TEMP/xcodegen/bin:$PATH"
+          # Refresh to the current branch tip so an earlier queued sync can
+          # never regenerate a stale checkout after newer Oracle E Swift files land.
+          git fetch origin agent/ane-oracle-e
+          git reset --hard origin/agent/ane-oracle-e
           xcodegen generate
           if git diff --quiet -- AnimaXS.xcodeproj project.yml; then
             echo "No generated-project changes."
