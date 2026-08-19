@@ -1,0 +1,137 @@
+name: ANE Oracle E CI Artifact Inspector
+
+on:
+  push:
+    branches:
+      - agent/ane-oracle-e
+    paths:
+      - .github/workflows/ane-oracle-e-ci-inspect.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+  pull-requests: write
+
+env:
+  PHASE0_RUN_ID: '32241837235'
+  EVIDENCE_RUN_ID: '32241837172'
+
+jobs:
+  inspect-artifacts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download successful Oracle evidence mirror artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: ane-oracle-e-oracle-v2-small-evidence
+          path: inspected/evidence
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.EVIDENCE_RUN_ID }}
+
+      - name: Download failed Phase 0 evidence artifact if it exists
+        id: phase0_artifact
+        continue-on-error: true
+        uses: actions/download-artifact@v5
+        with:
+          name: ane-oracle-e-phase0
+          path: inspected/phase0
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.PHASE0_RUN_ID }}
+
+      - name: Build bounded artifact inspection report
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p inspector-out
+          {
+            echo '# ANE Oracle E CI Artifact Inspection'
+            echo
+            echo '- Phase 0 run: `${{ env.PHASE0_RUN_ID }}`'
+            echo '- Evidence mirror run: `${{ env.EVIDENCE_RUN_ID }}`'
+            echo '- Phase 0 artifact download outcome: `${{ steps.phase0_artifact.outcome }}`'
+            echo '- This report was generated exclusively from workflow artifacts; no CI logs were downloaded or queried.'
+            echo
+            echo '## Evidence mirror files'
+            echo '```text'
+            find inspected/evidence -type f -printf '%P\n' | sort | head -200
+            echo '```'
+            echo
+            if [ -f inspected/evidence/SELECTED_MANIFEST.json ]; then
+              echo '## SELECTED_MANIFEST.json'
+              echo '```json'
+              python - <<'PY'
+          from pathlib import Path
+          p = Path('inspected/evidence/SELECTED_MANIFEST.json')
+          print(p.read_text(errors='replace')[:30000])
+          PY
+              echo '```'
+              echo
+            fi
+            if [ -f inspected/evidence/SELECTED_TEXT_DUMP.txt ]; then
+              echo '## Oracle V2/D selected text evidence'
+              echo '```text'
+              python - <<'PY'
+          from pathlib import Path
+          p = Path('inspected/evidence/SELECTED_TEXT_DUMP.txt')
+          text = p.read_text(errors='replace')
+          print(text[:60000])
+          PY
+              echo '```'
+              echo
+            fi
+            echo '## Phase 0 artifact files'
+            if [ -d inspected/phase0 ]; then
+              echo '```text'
+              find inspected/phase0 -type f -printf '%P\n' | sort | head -200
+              echo '```'
+              for f in \
+                inspected/phase0/ANE_ORACLE_E_WEIGHT_AUDIT.md \
+                inspected/phase0/PROVENANCE.txt \
+                inspected/phase0/ORACLE_D_FILE_LIST.txt \
+                inspected/phase0/ORACLE_V2_FILE_LIST.txt; do
+                if [ -f "$f" ]; then
+                  echo
+                  echo "### $(basename "$f")"
+                  echo '```text'
+                  python - "$f" <<'PY'
+          from pathlib import Path
+          import sys
+          print(Path(sys.argv[1]).read_text(errors='replace')[:50000])
+          PY
+                  echo '```'
+                fi
+              done
+            else
+              echo 'No Phase 0 artifact was available from the failed run.'
+            fi
+          } > inspector-out/REPORT.md
+
+      - name: Upload inspection report
+        uses: actions/upload-artifact@v7
+        with:
+          name: ane-oracle-e-ci-artifact-inspection
+          retention-days: 14
+          path: inspector-out/REPORT.md
+          if-no-files-found: error
+
+      - name: Post inspection report to PR 35
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            let body = fs.readFileSync('inspector-out/REPORT.md', 'utf8');
+            const max = 60000;
+            if (body.length > max) body = body.slice(0, max) + '\n\n_(truncated; full report is in the workflow artifact)_';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: 35,
+              body
+            });
