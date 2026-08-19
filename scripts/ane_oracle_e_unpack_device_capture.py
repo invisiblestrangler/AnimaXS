@@ -4,8 +4,12 @@
 The Swift producer writes one bounded single-file bundle. This tool validates
 all offsets before touching payload bytes, extracts the exact device initial
 latent, cross-context, step-0 prepared residual/embedding/AdaLN-LoRA state,
-and all 84 deterministic branch samples. It can optionally convert the raw
-initial latent into the safetensors shape expected by the proven V2 runner.
+and all 84 deterministic branch samples.
+
+Physical XS Max captures are the app's fixed 512x512 lane: initial latent
+[1,16,64,64] and prepared DiT residual [1024,2048]. When requested, this tool
+writes `initial_noise.safetensors` directly in the captured latent shape; it
+must NOT reshape those values through Oracle V2's 1024x1024 noise template.
 """
 from __future__ import annotations
 
@@ -21,12 +25,18 @@ MAGIC = b"AXOECAP1"
 VERSION = 1
 HEADER_BYTES = 64
 EXPECTED_CHECKPOINTS = 84
+DEVICE_WIDTH = 512
+DEVICE_HEIGHT = 512
+EXPECTED_PAYLOAD_SHAPES = {
+    "initial_latent": [1, 16, 64, 64],
+    "cross_context": [1, 512, 1024],
+    "prepared_residual": [1024, 2048],
+    "prepared_embedding": [2048],
+    "prepared_adaln_lora": [6144],
+}
 EXPECTED_PAYLOAD_BYTES = {
-    "initial_latent": 16 * 64 * 64 * 4,
-    "cross_context": 512 * 1024 * 4,
-    "prepared_residual": 1024 * 2048 * 4,
-    "prepared_embedding": 2048 * 4,
-    "prepared_adaln_lora": 6144 * 4,
+    name: int(np.prod(shape, dtype=np.int64)) * 4
+    for name, shape in EXPECTED_PAYLOAD_SHAPES.items()
 }
 
 
@@ -98,10 +108,15 @@ def unpack_capture(capture: Path, out_dir: Path) -> dict[str, Any]:
         raise ValueError(f"missing device payloads: {sorted(required - names)}")
     by_name = {item["name"]: item for item in payload_records}
     for name, expected_bytes in EXPECTED_PAYLOAD_BYTES.items():
-        actual = int(by_name[name]["byteCount"])
-        if actual != expected_bytes:
+        actual_bytes = int(by_name[name]["byteCount"])
+        actual_shape = [int(x) for x in by_name[name]["shape"]]
+        if actual_bytes != expected_bytes:
             raise ValueError(
-                f"device payload {name} has {actual} bytes; expected {expected_bytes}")
+                f"device payload {name} has {actual_bytes} bytes; expected {expected_bytes}")
+        expected_shape = EXPECTED_PAYLOAD_SHAPES[name]
+        if actual_shape != expected_shape:
+            raise ValueError(
+                f"device payload {name} has shape {actual_shape}; expected {expected_shape}")
 
     checkpoint_records: list[dict[str, Any]] = []
     seen: set[tuple[int, int, str]] = set()
@@ -155,6 +170,10 @@ def unpack_capture(capture: Path, out_dir: Path) -> dict[str, Any]:
         "conditioning_source": manifest["conditioningSource"],
         "initial_latent_source": manifest["initialLatentSource"],
         "prepared_state_source": manifest.get("preparedStateSource"),
+        "generation_width": DEVICE_WIDTH,
+        "generation_height": DEVICE_HEIGHT,
+        "latent_shape": EXPECTED_PAYLOAD_SHAPES["initial_latent"],
+        "dit_token_count": EXPECTED_PAYLOAD_SHAPES["prepared_residual"][0],
         "payloads": payload_records,
         "expected_step0_checkpoints": EXPECTED_CHECKPOINTS,
         "completed_step0_checkpoints": len(checkpoint_records),
@@ -165,20 +184,20 @@ def unpack_capture(capture: Path, out_dir: Path) -> dict[str, Any]:
     return portable
 
 
-def write_noise_safetensors(out_dir: Path, template: Path) -> Path:
+def write_noise_safetensors(out_dir: Path, portable: dict[str, Any]) -> Path:
+    """Write the captured A12 latent in its native 512x512 graph shape."""
     # Import lazily so capture validation/unpacking itself only needs NumPy.
     import torch
-    from safetensors.torch import load_file, save_file
+    from safetensors.torch import save_file
 
-    template_data = load_file(str(template), device="cpu")
-    if "noise" not in template_data:
-        raise ValueError(f"noise template {template} does not contain tensor 'noise'")
-    shape = tuple(template_data["noise"].shape)
-    element_count = int(np.prod(shape, dtype=np.int64))
+    shape = tuple(int(x) for x in portable["latent_shape"])
+    if list(shape) != EXPECTED_PAYLOAD_SHAPES["initial_latent"]:
+        raise ValueError(f"unexpected device latent shape for noise export: {shape}")
     values = np.fromfile(out_dir / "initial_latent.f32", dtype="<f4")
+    element_count = int(np.prod(shape, dtype=np.int64))
     if values.size != element_count:
         raise ValueError(
-            f"device latent has {values.size} values but noise template shape {shape} needs {element_count}")
+            f"device latent has {values.size} values but captured shape {shape} needs {element_count}")
     noise = torch.from_numpy(values.copy()).reshape(shape).contiguous()
     destination = out_dir / "initial_noise.safetensors"
     save_file({"noise": noise}, str(destination))
@@ -190,19 +209,22 @@ def main() -> None:
     ap.add_argument("capture", type=Path)
     ap.add_argument("--out-dir", type=Path, required=True)
     ap.add_argument(
-        "--noise-template",
-        type=Path,
-        help="Oracle-V2 A1 initial_noise.safetensors; writes device values in the exact tensor shape",
+        "--write-noise-safetensors",
+        action="store_true",
+        help="write captured [1,16,64,64] latent as initial_noise.safetensors for the 512x512 CUDA parity graph",
     )
     args = ap.parse_args()
 
     portable = unpack_capture(args.capture, args.out_dir)
     noise_path = None
-    if args.noise_template is not None:
-        noise_path = write_noise_safetensors(args.out_dir, args.noise_template)
+    if args.write_noise_safetensors:
+        noise_path = write_noise_safetensors(args.out_dir, portable)
     print(json.dumps({
         "status": portable["status"],
         "checkpoints": portable["completed_step0_checkpoints"],
+        "generation_width": portable["generation_width"],
+        "generation_height": portable["generation_height"],
+        "dit_token_count": portable["dit_token_count"],
         "device_manifest": str(args.out_dir / "device_manifest.json"),
         "noise_safetensors": str(noise_path) if noise_path else None,
         "cross_context": str(args.out_dir / "cross_context.f32"),
