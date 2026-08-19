@@ -9,6 +9,14 @@ on:
       - scripts/ane_oracle_e_weight_audit.py
       - scripts/pack_anima.py
       - scripts/tests/test_ane_pack_profile.py
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/ane-oracle-e-phase0.yml
+      - scripts/ane_oracle_e_weight_audit.py
+      - scripts/pack_anima.py
+      - scripts/tests/test_ane_pack_profile.py
   workflow_dispatch:
 
 permissions:
@@ -125,6 +133,7 @@ jobs:
           cat out/ANE_ORACLE_E_WEIGHT_AUDIT.md
 
       - name: Publish small Phase 0 evidence to Hugging Face
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
