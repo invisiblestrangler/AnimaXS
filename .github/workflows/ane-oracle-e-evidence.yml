@@ -7,12 +7,6 @@ on:
     paths:
       - .github/workflows/ane-oracle-e-evidence.yml
       - scripts/ane_oracle_e_collect_hf_evidence.py
-  pull_request:
-    branches:
-      - main
-    paths:
-      - .github/workflows/ane-oracle-e-evidence.yml
-      - scripts/ane_oracle_e_collect_hf_evidence.py
   workflow_dispatch:
 
 permissions:
@@ -50,12 +44,6 @@ jobs:
             --out-dir out \
             --max-file-bytes 2000000 \
             --max-total-bytes 20000000
-
-      - name: Print selected manifest and text dump
-        run: |
-          set -euo pipefail
-          cat out/SELECTED_MANIFEST.json
-          cat out/SELECTED_TEXT_DUMP.txt
 
       - name: Upload evidence mirror
         uses: actions/upload-artifact@v7
