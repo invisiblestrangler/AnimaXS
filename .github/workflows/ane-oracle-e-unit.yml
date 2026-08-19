@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/ane-oracle-e-unit.yml
       - scripts/ane_oracle_e_pack_reference.py
+      - scripts/ane_oracle_e_custom_node.py
       - scripts/tests/test_ane_oracle_e_pack_reference.py
   workflow_dispatch:
 
@@ -24,11 +25,27 @@ jobs:
           python-version: '3.11'
       - name: Install unit dependencies
         run: python -m pip install --upgrade numpy
-      - name: Run Oracle E pack-reference tests
+      - name: Compile Oracle E Python sources
         shell: bash
         run: |
           set -uo pipefail
           mkdir -p out
+          if python -m py_compile \
+            scripts/ane_oracle_e_pack_reference.py \
+            scripts/ane_oracle_e_custom_node.py \
+            scripts/tests/test_ane_oracle_e_pack_reference.py \
+            > out/compile.txt 2>&1; then
+            echo PASS > out/COMPILE_STATUS.txt
+          else
+            rc=$?
+            echo FAIL > out/COMPILE_STATUS.txt
+            tail -n 200 out/compile.txt > out/COMPILE_FAILURE.txt
+            exit "$rc"
+          fi
+      - name: Run Oracle E pack-reference tests
+        shell: bash
+        run: |
+          set -uo pipefail
           if python -m unittest scripts.tests.test_ane_oracle_e_pack_reference -v > out/unit.txt 2>&1; then
             echo PASS > out/STATUS.txt
           else
