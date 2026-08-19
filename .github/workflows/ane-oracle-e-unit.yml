@@ -19,6 +19,8 @@ on:
 
 permissions:
   contents: read
+  issues: write
+  pull-requests: write
 
 jobs:
   unit:
@@ -77,3 +79,25 @@ jobs:
           retention-days: 14
           path: out/
           if-no-files-found: error
+      - name: Post bounded unit result to PR 35
+        if: always()
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const read = p => fs.existsSync(p) ? fs.readFileSync(p, 'utf8').trim() : '';
+            const compile = read('out/COMPILE_STATUS.txt') || 'NOT_RUN';
+            const tests = read('out/STATUS.txt') || 'NOT_RUN';
+            const failure = read('out/COMPILE_FAILURE.txt') || read('out/FAILURE.txt');
+            const marker = `<!-- ane-oracle-e-unit:${context.sha} -->`;
+            let body = `${marker}\n### ANE Oracle E lightweight checks\n\n` +
+              `- Python/shell compile: **${compile}**\n` +
+              `- Unit tests: **${tests}**\n` +
+              `- Source: bounded workflow artifact/output only; no CI log download.\n`;
+            if (failure) body += `\n\`\`\`text\n${failure.slice(0, 12000)}\n\`\`\`\n`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: 35,
+              body,
+            });
