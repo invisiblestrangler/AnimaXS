@@ -11,7 +11,7 @@ from scripts.ane_oracle_e_unpack_device_capture import MAGIC, HEADER_BYTES, unpa
 
 
 class OracleECaptureAndCompareTests(unittest.TestCase):
-    def _write_capture(self, path: Path) -> None:
+    def _write_capture(self, path: Path, *, omit_payload: str | None = None) -> None:
         payloads = []
         checkpoints = []
         raw = bytearray(b"\x00" * HEADER_BYTES)
@@ -19,6 +19,8 @@ class OracleECaptureAndCompareTests(unittest.TestCase):
         struct.pack_into("<I", raw, 8, 1)
 
         def append(name: str, values: np.ndarray, shape: list[int]):
+            if name == omit_payload:
+                return
             offset = len(raw)
             blob = np.asarray(values, dtype="<f4").tobytes()
             raw.extend(blob)
@@ -33,6 +35,9 @@ class OracleECaptureAndCompareTests(unittest.TestCase):
 
         append("initial_latent", np.zeros(16 * 64 * 64, dtype=np.float32), [1, 16, 64, 64])
         append("cross_context", np.zeros(512 * 1024, dtype=np.float32), [1, 512, 1024])
+        append("prepared_residual", np.zeros(1024 * 2048, dtype=np.float32), [1024, 2048])
+        append("prepared_embedding", np.zeros(2048, dtype=np.float32), [2048])
+        append("prepared_adaln_lora", np.zeros(6144, dtype=np.float32), [6144])
 
         for block in range(28):
             for branch_index, branch in enumerate(("self", "cross", "mlp")):
@@ -64,6 +69,7 @@ class OracleECaptureAndCompareTests(unittest.TestCase):
             "pingPongWeightStreaming": False,
             "conditioningSource": "synthetic",
             "initialLatentSource": "synthetic",
+            "preparedStateSource": "synthetic",
             "completedStep0Checkpoints": 84,
             "payloads": payloads,
             "checkpoints": checkpoints,
@@ -106,7 +112,19 @@ class OracleECaptureAndCompareTests(unittest.TestCase):
             self.assertEqual(manifest["completed_step0_checkpoints"], 84)
             self.assertEqual((out / "initial_latent.f32").stat().st_size, 16 * 64 * 64 * 4)
             self.assertEqual((out / "cross_context.f32").stat().st_size, 512 * 1024 * 4)
+            self.assertEqual((out / "prepared_residual.f32").stat().st_size, 1024 * 2048 * 4)
+            self.assertEqual((out / "prepared_embedding.f32").stat().st_size, 2048 * 4)
+            self.assertEqual((out / "prepared_adaln_lora.f32").stat().st_size, 6144 * 4)
+            self.assertEqual(manifest["prepared_state_source"], "synthetic")
             self.assertTrue((out / "step00_block27_mlp.f32").is_file())
+
+    def test_unpack_rejects_missing_prepared_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            capture = root / "missing.oraclee"
+            self._write_capture(capture, omit_payload="prepared_embedding")
+            with self.assertRaisesRegex(ValueError, "missing device payloads"):
+                unpack_capture(capture, root / "out")
 
     def test_unpack_rejects_bad_manifest_range(self):
         with tempfile.TemporaryDirectory() as td:
