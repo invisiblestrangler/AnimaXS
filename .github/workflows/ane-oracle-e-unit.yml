@@ -1,0 +1,47 @@
+name: ANE Oracle E Unit Checks
+
+on:
+  push:
+    branches:
+      - agent/ane-oracle-e
+    paths:
+      - .github/workflows/ane-oracle-e-unit.yml
+      - scripts/ane_oracle_e_pack_reference.py
+      - scripts/tests/test_ane_oracle_e_pack_reference.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install unit dependencies
+        run: python -m pip install --upgrade numpy
+      - name: Run Oracle E pack-reference tests
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p out
+          if python -m unittest scripts.tests.test_ane_oracle_e_pack_reference -v > out/unit.txt 2>&1; then
+            echo PASS > out/STATUS.txt
+          else
+            rc=$?
+            echo FAIL > out/STATUS.txt
+            tail -n 200 out/unit.txt > out/FAILURE.txt
+            exit "$rc"
+          fi
+      - name: Upload unit evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ane-oracle-e-unit
+          retention-days: 14
+          path: out/
+          if-no-files-found: error
