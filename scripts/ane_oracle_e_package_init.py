@@ -9,8 +9,11 @@ conditioning. For physical A12 parity, the runner supplies four raw FP32 files:
 * exact device adapter cross-context [512,1024]
 
 This thin layer injects those values only into the *first* 28-block traversal.
-That removes text-encoder/adapter/preparation drift from E2-vs-A12 and leaves
-the comparison scoped to the hybrid DiT blocks themselves.
+The residual is injected only at block 0; the embedding, AdaLN-LoRA base and
+cross-context are re-injected for every block because the source MiniTrainDIT
+passes those global values separately into each block. That removes
+text-encoder/adapter/preparation drift from E2-vs-A12 and leaves the comparison
+scoped to the hybrid DiT blocks themselves.
 """
 from __future__ import annotations
 
@@ -97,40 +100,40 @@ def _arm_with_optional_device_state(self, model, mode):
             cache[key] = replacement
         return replacement
 
+    def replace_global_block_inputs(args):
+        if len(args) < 5:
+            raise RuntimeError(
+                "Oracle E block call must expose residual, embedding, cross context, rope, and AdaLN as positional args")
+        mutable = list(args)
+        mutable[1] = tensor_for("prepared_embedding", mutable[1])
+        mutable[2] = tensor_for("cross_context", mutable[2])
+        if mutable[4] is None:
+            raise RuntimeError("Oracle E expected non-nil AdaLN-LoRA block input")
+        mutable[4] = tensor_for("prepared_adaln_lora", mutable[4])
+        return mutable
+
     def block0_device_hook(_module, args):
         nonlocal first_block0_pending
         if not first_block0_pending:
             return None
-        if len(args) < 5:
-            raise RuntimeError(
-                "Oracle E block0 call must expose residual, embedding, cross context, rope, and AdaLN as positional args")
-        mutable = list(args)
+        mutable = replace_global_block_inputs(args)
         mutable[0] = tensor_for("prepared_residual", mutable[0])
-        mutable[1] = tensor_for("prepared_embedding", mutable[1])
-        mutable[2] = tensor_for("cross_context", mutable[2])
-        if mutable[4] is None:
-            raise RuntimeError("Oracle E expected non-nil AdaLN-LoRA input on block0")
-        mutable[4] = tensor_for("prepared_adaln_lora", mutable[4])
         first_block0_pending = False
         return tuple(mutable)
 
-    def later_block_context_hook(_module, args):
+    def later_block_device_hook(_module, args):
         # Core's block0 traversal hook has already incremented traversal to 0
         # when blocks 1...27 execute. Do not override any later diffusion step.
         if state.traversal != 0:
             return None
-        if len(args) < 3:
-            raise RuntimeError("Oracle E block call did not expose cross context as arg 2")
-        mutable = list(args)
-        mutable[2] = tensor_for("cross_context", mutable[2])
-        return tuple(mutable)
+        return tuple(replace_global_block_inputs(args))
 
     # Registered after the core hook with prepend=True, therefore this block0
     # hook executes first and replaces the prepared values before core advances
     # traversal -1 -> 0.
     handles.append(blocks[0].register_forward_pre_hook(block0_device_hook, prepend=True))
     for block in blocks[1:]:
-        handles.append(block.register_forward_pre_hook(later_block_context_hook, prepend=True))
+        handles.append(block.register_forward_pre_hook(later_block_device_hook, prepend=True))
 
     arm_path = _core.RUN_DIR / "oracle_e_arm.json"
     if arm_path.is_file():
@@ -143,7 +146,8 @@ def _arm_with_optional_device_state(self, model, mode):
             }
             for name in sorted(paths)
         }
-        meta["device_override_scope"] = "first 28-block traversal only"
+        meta["device_override_scope"] = (
+            "first 28-block traversal only; residual at block0, embedding/AdaLN/cross at all 28 blocks")
         arm_path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n")
     return result
 
