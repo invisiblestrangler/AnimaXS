@@ -1,0 +1,72 @@
+name: ANE Oracle E Oracle Code Inspector
+
+on:
+  push:
+    branches:
+      - agent/ane-oracle-e
+    paths:
+      - .github/workflows/ane-oracle-e-oracle-code-inspect.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+  pull-requests: write
+
+env:
+  EVIDENCE_RUN_ID: '32241837172'
+
+jobs:
+  inspect-oracle-code:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download Oracle V2 small-evidence artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: ane-oracle-e-oracle-v2-small-evidence
+          path: evidence
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.EVIDENCE_RUN_ID }}
+      - name: Build exact Oracle implementation excerpt
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          from pathlib import Path
+          wanted = [
+              'files/oracle_config.json',
+              'files/oracle_custom_node.py',
+              'files/02_run_source.py',
+              'files/06_reconstruct_animapk.py',
+          ]
+          parts = ['# Oracle V2 exact implementation evidence', '',
+                   'Extracted from the successful Evidence Mirror artifact; no CI logs were queried.', '']
+          for rel in wanted:
+              p = Path('evidence') / rel
+              if not p.exists():
+                  parts += [f'## MISSING `{rel}`', '']
+                  continue
+              lang = 'json' if p.suffix == '.json' else 'python'
+              parts += [f'## `{rel}`', f'```{lang}', p.read_text(errors='replace'), '```', '']
+          Path('out/ORACLE_CODE_EVIDENCE.md').write_text('\n'.join(parts))
+          PY
+      - name: Upload exact Oracle code evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: ane-oracle-e-oracle-code-evidence
+          retention-days: 14
+          path: out/ORACLE_CODE_EVIDENCE.md
+          if-no-files-found: error
+      - name: Post exact Oracle code evidence to PR 35
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            let body = fs.readFileSync('out/ORACLE_CODE_EVIDENCE.md', 'utf8');
+            if (body.length > 62000) body = body.slice(0, 62000) + '\n\n_(truncated; full file is in the workflow artifact)_';
+            await github.rest.issues.createComment({owner: context.repo.owner, repo: context.repo.repo, issue_number: 35, body});
