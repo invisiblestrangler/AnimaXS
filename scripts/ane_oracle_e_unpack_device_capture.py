@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Unpack an AnimaXS `.oraclee` A12 capture into portable parity inputs.
 
-The Swift producer writes one bounded single-file bundle.  This tool validates
+The Swift producer writes one bounded single-file bundle. This tool validates
 all offsets before touching payload bytes, extracts the exact device initial
-latent, exact device cross-context, and 84 deterministic branch samples, and
-optionally converts the raw initial latent into the safetensors shape expected
-by the proven Oracle-V2 runner.
+latent, cross-context, step-0 prepared residual/embedding/AdaLN-LoRA state,
+and all 84 deterministic branch samples. It can optionally convert the raw
+initial latent into the safetensors shape expected by the proven V2 runner.
 """
 from __future__ import annotations
 
@@ -21,8 +21,13 @@ MAGIC = b"AXOECAP1"
 VERSION = 1
 HEADER_BYTES = 64
 EXPECTED_CHECKPOINTS = 84
-EXPECTED_CROSS_BYTES = 512 * 1024 * 4
-EXPECTED_LATENT_BYTES = 16 * 64 * 64 * 4
+EXPECTED_PAYLOAD_BYTES = {
+    "initial_latent": 16 * 64 * 64 * 4,
+    "cross_context": 512 * 1024 * 4,
+    "prepared_residual": 1024 * 2048 * 4,
+    "prepared_embedding": 2048 * 4,
+    "prepared_adaln_lora": 6144 * 4,
+}
 
 
 def _load_capture(path: Path) -> tuple[dict[str, Any], bytes]:
@@ -69,6 +74,8 @@ def unpack_capture(capture: Path, out_dir: Path) -> dict[str, Any]:
             raise ValueError(f"duplicate Oracle E payload name: {name}")
         names.add(name)
         byte_count = int(item["byteCount"])
+        element_count = int(item["elementCount"])
+        shape = [int(x) for x in item["shape"]]
         blob = _slice(
             raw,
             offset=int(item["offset"]),
@@ -76,22 +83,25 @@ def unpack_capture(capture: Path, out_dir: Path) -> dict[str, Any]:
             manifest_offset=manifest_offset,
             label=f"payload {name}",
         )
-        if item.get("dtype") != "float32-le" or byte_count % 4:
+        if item.get("dtype") != "float32-le" or byte_count != element_count * 4:
             raise ValueError(f"unsupported payload dtype/size for {name}")
+        if not shape or any(x <= 0 for x in shape) or int(np.prod(shape, dtype=np.int64)) != element_count:
+            raise ValueError(f"payload shape/element mismatch for {name}")
         filename = f"{name}.f32"
         (out_dir / filename).write_bytes(blob)
         record = dict(item)
         record["file"] = filename
         payload_records.append(record)
 
-    required = {"initial_latent", "cross_context"}
+    required = set(EXPECTED_PAYLOAD_BYTES)
     if not required.issubset(names):
         raise ValueError(f"missing device payloads: {sorted(required - names)}")
     by_name = {item["name"]: item for item in payload_records}
-    if int(by_name["initial_latent"]["byteCount"]) != EXPECTED_LATENT_BYTES:
-        raise ValueError("device initial latent has unexpected byte length")
-    if int(by_name["cross_context"]["byteCount"]) != EXPECTED_CROSS_BYTES:
-        raise ValueError("device cross-context has unexpected byte length")
+    for name, expected_bytes in EXPECTED_PAYLOAD_BYTES.items():
+        actual = int(by_name[name]["byteCount"])
+        if actual != expected_bytes:
+            raise ValueError(
+                f"device payload {name} has {actual} bytes; expected {expected_bytes}")
 
     checkpoint_records: list[dict[str, Any]] = []
     seen: set[tuple[int, int, str]] = set()
@@ -144,6 +154,7 @@ def unpack_capture(capture: Path, out_dir: Path) -> dict[str, Any]:
         "ping_pong_weight_streaming": bool(manifest["pingPongWeightStreaming"]),
         "conditioning_source": manifest["conditioningSource"],
         "initial_latent_source": manifest["initialLatentSource"],
+        "prepared_state_source": manifest.get("preparedStateSource"),
         "payloads": payload_records,
         "expected_step0_checkpoints": EXPECTED_CHECKPOINTS,
         "completed_step0_checkpoints": len(checkpoint_records),
@@ -195,6 +206,9 @@ def main() -> None:
         "device_manifest": str(args.out_dir / "device_manifest.json"),
         "noise_safetensors": str(noise_path) if noise_path else None,
         "cross_context": str(args.out_dir / "cross_context.f32"),
+        "prepared_residual": str(args.out_dir / "prepared_residual.f32"),
+        "prepared_embedding": str(args.out_dir / "prepared_embedding.f32"),
+        "prepared_adaln_lora": str(args.out_dir / "prepared_adaln_lora.f32"),
     }, indent=2))
 
 
