@@ -133,7 +133,7 @@ jobs:
       - name: Audit all 280 ANE-native projections against legacy W8
         run: |
           set -euo pipefail
-          if python scripts/ane_oracle_e_weight_audit.py \
+          if python -m scripts.ane_oracle_e_weight_audit \
             --source "$SOURCE" \
             --out-dir out \
             --row-chunk 128 \
