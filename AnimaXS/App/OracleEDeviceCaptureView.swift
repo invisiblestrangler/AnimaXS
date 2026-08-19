@@ -1,5 +1,22 @@
 import SwiftUI
 
+extension View {
+    /// Keeps DEBUG-only Oracle E UI out of production while giving AnimaXSApp
+    /// one unconditional modifier call that parses identically in every build.
+    @ViewBuilder
+    func oracleEDebugOverlay() -> some View {
+        #if DEBUG
+        self.overlay(alignment: .topLeading) {
+            OracleEDeviceCaptureLauncher()
+                .padding(.top, 8)
+                .padding(.leading, 12)
+        }
+        #else
+        self
+        #endif
+    }
+}
+
 #if DEBUG
 /// Debug-only launcher for the ANE Oracle E physical-device parity capture.
 /// It is intentionally separate from production Generate/Diagnostics state so
@@ -87,7 +104,7 @@ private struct OracleEDeviceCaptureSheet: View {
                 Text("Do not start this while a normal generation is running. The capture uses the same ANE/Metal resources and is deliberately a standalone diagnostic lane.")
                     .font(.caption2)
                     .foregroundStyle(.orange)
-                Text("The output contains only model-independent activations/conditioning/noise samples and metadata; it does not copy model weights.")
+                Text("The output contains only activations, conditioning, initial noise and metadata; it never copies model weights.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -158,7 +175,7 @@ private struct OracleEDeviceCaptureSheet: View {
                 models: models,
                 outputURL: destination)
             captureURL = url
-            captureStatus = "PASS: 84/84 step-0 branch checkpoints captured. Share the .oraclee file for comparison."
+            captureStatus = "PASS: prepared state + 84/84 step-0 branch checkpoints captured. Share the .oraclee file for comparison."
         } catch {
             captureStatus = "FAILED: \(error.localizedDescription)"
         }
