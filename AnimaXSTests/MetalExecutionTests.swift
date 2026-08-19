@@ -112,6 +112,61 @@ final class MetalExecutionTests: XCTestCase {
         print("W8_MATVEC_PARITY=PASS")
     }
 
+    func testW8DirectMatvecPreservesFP16SubnormalMetadata() throws {
+        let context = try requireContext()
+        let pipeline = try context.pipeline(named: "w8_matvec_f32")
+        let rows = 2, columns = 65, groupsPerRow = 2
+        let packed = (0..<(rows * columns)).map { UInt8(($0 * 29 + 17) & 255) }
+
+        // Exercise the exact A12 failure class: scale/zero entries that are valid
+        // IEEE-754 binary16 values but are below the minimum normal half (0x0400).
+        let scaleBits: [UInt16] = [0x0001, 0x03ff, 0x0011, 0x0200]
+        let zeroBits: [UInt16] = [0x8001, 0x0002, 0x8010, 0x03ff]
+        let input = (0..<columns).map { Float(($0 % 13) - 6) * 0.25 }
+
+        let packedBuffer = makeBuffer(packed, on: context.device)
+        let scaleBuffer = makeBuffer(scaleBits, on: context.device)
+        let zeroBuffer = makeBuffer(zeroBits, on: context.device)
+        let inputBuffer = makeBuffer(input, on: context.device)
+        let outputBuffer = try XCTUnwrap(
+            context.device.makeBuffer(length: rows * MemoryLayout<Float>.stride, options: .storageModeShared))
+        var k = UInt32(columns), rowCount = UInt32(rows), stride = UInt32(columns)
+
+        let commandBuffer = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        let encoder = try XCTUnwrap(commandBuffer.makeComputeCommandEncoder())
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(packedBuffer, offset: 0, index: 0)
+        encoder.setBuffer(scaleBuffer, offset: 0, index: 1)
+        encoder.setBuffer(zeroBuffer, offset: 0, index: 2)
+        encoder.setBuffer(inputBuffer, offset: 0, index: 3)
+        encoder.setBuffer(outputBuffer, offset: 0, index: 4)
+        encoder.setBytes(&k, length: 4, index: 5)
+        encoder.setBytes(&rowCount, length: 4, index: 6)
+        encoder.setBytes(&stride, length: 4, index: 7)
+        let threads = min(128, pipeline.maxTotalThreadsPerThreadgroup)
+        encoder.dispatchThreadgroups(
+            MTLSize(width: rows, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1))
+        encoder.endEncoding()
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+
+        XCTAssertNil(commandBuffer.error)
+        let actual = outputBuffer.contents().bindMemory(to: Float.self, capacity: rows)
+        for row in 0..<rows {
+            var expected: Float = 0
+            for column in 0..<columns {
+                let group = row * groupsPerRow + column / 64
+                let scale = Float(Float16(bitPattern: scaleBits[group]))
+                let zero = Float(Float16(bitPattern: zeroBits[group]))
+                let weight = Float(packed[row * columns + column]) * scale + zero
+                expected += input[column] * weight
+            }
+            XCTAssertEqual(actual[row], expected, accuracy: 2e-6, "W8 subnormal row \(row)")
+        }
+        print("W8_MATVEC_SUBNORMAL_PARITY=PASS")
+    }
+
     func testRowAwareDequantizationAndBounds() throws {
         let context = try requireContext()
         try checkW4Rows(context)
