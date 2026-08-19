@@ -1,0 +1,66 @@
+name: ANE Oracle E Evidence Mirror
+
+on:
+  push:
+    branches:
+      - agent/ane-oracle-e
+    paths:
+      - .github/workflows/ane-oracle-e-evidence.yml
+      - scripts/ane_oracle_e_collect_hf_evidence.py
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/ane-oracle-e-evidence.yml
+      - scripts/ane_oracle_e_collect_hf_evidence.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ORACLE_REPO: ScalingBiz/AnimaXS-bf16-oracle-v2
+  ORACLE_V2_PREFIX: animaxs-bf16-oracle-v2-2026-08-19
+  ORACLE_D_PREFIX: animaxs-bf16-oracle-v2-2026-08-19/runs/D_pack_fp16_boundaries
+
+jobs:
+  mirror-small-evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install Hugging Face client
+        run: python -m pip install --upgrade huggingface_hub
+
+      - name: Collect small Oracle V2/D evidence only
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "${HF_TOKEN:-}" ] || { echo "::error::HF_TOKEN secret is missing"; exit 1; }
+          python scripts/ane_oracle_e_collect_hf_evidence.py \
+            --repo "$ORACLE_REPO" \
+            --v2-prefix "$ORACLE_V2_PREFIX" \
+            --d-prefix "$ORACLE_D_PREFIX" \
+            --out-dir out \
+            --max-file-bytes 2000000 \
+            --max-total-bytes 20000000
+
+      - name: Print selected manifest and text dump
+        run: |
+          set -euo pipefail
+          cat out/SELECTED_MANIFEST.json
+          cat out/SELECTED_TEXT_DUMP.txt
+
+      - name: Upload evidence mirror
+        uses: actions/upload-artifact@v7
+        with:
+          name: ane-oracle-e-oracle-v2-small-evidence
+          retention-days: 14
+          path: out/
+          if-no-files-found: error
