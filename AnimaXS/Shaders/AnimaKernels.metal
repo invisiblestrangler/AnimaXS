@@ -838,16 +838,43 @@ kernel void w4_matvec_f32(
 
 // Direct packed W8 matrix-vector product. Keep the same thread assignment,
 // reduction order, and fp32 accumulation as w4_matvec_f32; only the packed
-// weight decode changes from nibbles to one byte per K element.
+// weight decode changes from nibbles to one byte per K element. The W8
+// group64 metadata is stored as IEEE-754 binary16 bits. Apple5/A12 may flush
+// half subnormals while loading/converting them, so W8 reads scale/zero as raw
+// ushort payloads and expands them explicitly to fp32 before arithmetic.
+inline float fp16_bits_to_f32_preserve_subnormals(ushort bits)
+{
+    uint raw = uint(bits);
+    uint sign = (raw & 0x8000u) << 16;
+    uint exponent = (raw >> 10) & 0x1fu;
+    uint mantissa = raw & 0x03ffu;
+
+    // A binary16 subnormal is mantissa * 2^-24. Evaluate that directly in
+    // fp32 so Apple5 never has to materialize a half subnormal. The smallest
+    // possible non-zero result (2^-24) is a perfectly normal fp32 value.
+    if (exponent == 0u) {
+        if (mantissa == 0u) return as_type<float>(sign);
+        float magnitude = float(mantissa) * 5.9604644775390625e-8f; // 2^-24
+        return sign != 0u ? -magnitude : magnitude;
+    }
+
+    // Normal binary16 values map exactly by rebiasing exponent 15 -> 127 and
+    // shifting the ten-bit mantissa into the fp32 field. exponent==31 maps to
+    // fp32 Inf/NaN while preserving sign/payload bits.
+    uint floatExponent = exponent == 0x1fu ? 0xffu : exponent + 112u;
+    uint floatBits = sign | (floatExponent << 23) | (mantissa << 13);
+    return as_type<float>(floatBits);
+}
+
 kernel void w8_matvec_f32(
-    device const uchar *packed     [[buffer(0)]],
-    device const half  *scale      [[buffer(1)]],
-    device const half  *zero       [[buffer(2)]],
-    device const float *input      [[buffer(3)]],
-    device float       *out        [[buffer(4)]],
-    constant uint      &K          [[buffer(5)]],
-    constant uint      &rows       [[buffer(6)]],
-    constant uint      &rowStride  [[buffer(7)]],
+    device const uchar  *packed     [[buffer(0)]],
+    device const ushort *scaleBits  [[buffer(1)]],
+    device const ushort *zeroBits   [[buffer(2)]],
+    device const float  *input      [[buffer(3)]],
+    device float        *out        [[buffer(4)]],
+    constant uint       &K          [[buffer(5)]],
+    constant uint       &rows       [[buffer(6)]],
+    constant uint       &rowStride  [[buffer(7)]],
     uint3 group [[threadgroup_position_in_grid]],
     uint tid [[thread_index_in_threadgroup]],
     uint3 threads [[threads_per_threadgroup]])
@@ -860,7 +887,9 @@ kernel void w8_matvec_f32(
     for (uint k = tid; k < K; k += threadCount) {
         uint q = uint(packed[row * rowStride + k]);
         uint quantGroup = row * groupsPerRow + k / W4_GROUP;
-        float value = float(q) * float(scale[quantGroup]) + float(zero[quantGroup]);
+        float sc = fp16_bits_to_f32_preserve_subnormals(scaleBits[quantGroup]);
+        float ze = fp16_bits_to_f32_preserve_subnormals(zeroBits[quantGroup]);
+        float value = float(q) * sc + ze;
         sum = fma(input[k], value, sum);
     }
     threadgroup float partial[256];
