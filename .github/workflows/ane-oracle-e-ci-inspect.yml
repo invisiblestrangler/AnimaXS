@@ -15,8 +15,7 @@ permissions:
   pull-requests: write
 
 env:
-  PHASE0_RUN_ID: '32241837235'
-  EVIDENCE_RUN_ID: '32241837172'
+  PHASE0_RUN_ID: '32242945301'
 
 jobs:
   inspect-artifacts:
@@ -25,16 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Download successful Oracle evidence mirror artifact
-        uses: actions/download-artifact@v5
-        with:
-          name: ane-oracle-e-oracle-v2-small-evidence
-          path: inspected/evidence
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ env.EVIDENCE_RUN_ID }}
-
-      - name: Download failed Phase 0 evidence artifact
+      - name: Download Phase 0 evidence artifact
         uses: actions/download-artifact@v5
         with:
           name: ane-oracle-e-phase0
@@ -50,26 +40,32 @@ jobs:
           mkdir -p inspector-out
           python - <<'PY'
           from pathlib import Path
-          import json
+          import json, os
 
+          run_id = int(os.environ['PHASE0_RUN_ID'])
           root = Path('inspected/phase0')
           files = sorted(p for p in root.rglob('*') if p.is_file())
           rel = [str(p.relative_to(root)) for p in files]
           sizes = {str(p.relative_to(root)): p.stat().st_size for p in files}
+          stage_files = [p for p in files if p.name.startswith('STAGE_')]
+          failures = [p for p in stage_files if '_FAILED' in p.name]
+          successes = [p for p in stage_files if '_OK' in p.name or p.name == 'STAGE_00_STARTED.txt']
 
           expected = {
               'oracle_v2_list': 'ORACLE_V2_FILE_LIST.txt',
               'oracle_d_list': 'ORACLE_D_FILE_LIST.txt',
-              'audit_json': 'ANE_ORACLE_E_WEIGHT_AUDIT.json',
-              'audit_csv': 'ANE_ORACLE_E_WEIGHT_AUDIT.csv',
+              'audit_json': 'ane_oracle_e_weight_audit.json',
+              'audit_csv': 'ane_oracle_e_weight_audit.csv',
               'audit_md': 'ANE_ORACLE_E_WEIGHT_AUDIT.md',
               'provenance': 'PROVENANCE.txt',
               'checksums': 'SHA256SUMS',
           }
           present = {k: (v in rel) for k, v in expected.items()}
 
-          if present['provenance'] and present['checksums']:
-              milestone = 'Phase 0 audit completed; failure occurred during or after publish/upload/finalization.'
+          if failures:
+              milestone = 'Explicit self-diagnostic failure marker: ' + ', '.join(p.name for p in failures)
+          elif present['provenance'] and present['checksums']:
+              milestone = 'Phase 0 audit and provenance completed; failure occurred during/after publish or artifact finalization.'
           elif present['audit_md'] or present['audit_json'] or present['audit_csv']:
               milestone = 'Weight audit completed; failure occurred before provenance/checksum completion.'
           elif present['oracle_v2_list'] and present['oracle_d_list']:
@@ -77,12 +73,19 @@ jobs:
           else:
               milestone = 'Failure occurred before Oracle evidence enumeration completed.'
 
+          failure_details = {}
+          for p in failures:
+              failure_details[p.name] = p.read_text(errors='replace')[:12000]
+
           summary = {
-              'phase0_run_id': 32241837235,
+              'phase0_run_id': run_id,
               'source': 'workflow artifacts only; no CI logs queried',
               'file_count': len(rel),
               'files': rel,
               'sizes': sizes,
+              'successful_stage_markers': [p.name for p in successes],
+              'failure_stage_markers': [p.name for p in failures],
+              'failure_details': failure_details,
               'expected_present': present,
               'inferred_last_milestone': milestone,
           }
@@ -92,17 +95,22 @@ jobs:
               '# ANE Oracle E Phase 0 artifact-only diagnosis',
               '',
               '- Source: workflow artifacts only; **no CI logs were downloaded or queried**.',
-              f'- Phase 0 run: `32241837235`',
+              f'- Phase 0 run: `{run_id}`',
               f'- Artifact file count: `{len(rel)}`',
-              f'- Inferred last milestone: **{milestone}**',
+              f'- Diagnosis: **{milestone}**',
               '',
-              '## Expected evidence presence',
+              '## Successful stages',
           ]
+          lines += [f'- `{p.name}`' for p in successes] or ['- none']
+          lines += ['', '## Failure stages']
+          if failures:
+              for p in failures:
+                  lines += [f'### `{p.name}`', '```text', failure_details[p.name], '```']
+          else:
+              lines.append('- no explicit failure marker found')
+          lines += ['', '## Expected evidence presence']
           for key, path in expected.items():
               lines.append(f'- `{path}`: {"present" if present[key] else "MISSING"}')
-          lines += ['', '## Files actually present']
-          for path in rel:
-              lines.append(f'- `{path}` — {sizes[path]} bytes')
           Path('inspector-out/SUMMARY.md').write_text('\n'.join(lines) + '\n')
           PY
 
