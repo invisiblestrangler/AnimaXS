@@ -184,8 +184,8 @@ python - "$RUN_DIR/oracle_e_checkpoints.json" "$RUN_DIR/STEP0_COMPLETE" <<'PY'
 import json, sys
 from pathlib import Path
 manifest=Path(sys.argv[1]); sentinel=Path(sys.argv[2])
-if not manifest.is_file(): raise SystemExit(f"missing checkpoint manifest: {manifest}
-")
+if not manifest.is_file():
+    raise SystemExit(f"missing checkpoint manifest: {manifest}")
 d=json.loads(manifest.read_text())
 if d.get("completed_step0_checkpoints") != 84 or not d.get("complete"):
     raise SystemExit(f"incomplete Oracle E checkpoints: {d.get('completed_step0_checkpoints')} / 84")
