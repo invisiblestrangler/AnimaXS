@@ -1,0 +1,162 @@
+name: ANE Oracle E Phase 0
+
+on:
+  push:
+    branches:
+      - agent/ane-oracle-e
+    paths:
+      - .github/workflows/ane-oracle-e-phase0.yml
+      - scripts/ane_oracle_e_weight_audit.py
+      - scripts/pack_anima.py
+      - scripts/tests/test_ane_pack_profile.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ANIMA_SOURCE_REPO: circlestone-labs/Anima
+  ANIMA_SOURCE_REVISION: f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b
+  ANIMA_SOURCE_FILE: split_files/diffusion_models/anima-turbo-v1.0.safetensors
+  ANIMA_SOURCE_SHA256: c0b905034510750a505d21aa96c81718f4ffcc500777318421f58a88636e2174
+  ORACLE_REPO: ScalingBiz/AnimaXS-bf16-oracle-v2
+  ORACLE_V2_PREFIX: animaxs-bf16-oracle-v2-2026-08-19
+  ORACLE_D_PREFIX: animaxs-bf16-oracle-v2-2026-08-19/runs/D_pack_fp16_boundaries
+  ORACLE_E_PREFIX: animaxs-ane-oracle-e-2026-08-19/phase0_weight_audit
+
+jobs:
+  weight-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install bounded-memory audit dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install numpy safetensors huggingface_hub
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Enumerate Oracle V2 and D evidence on Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "${HF_TOKEN:-}" ] || { echo "::error::HF_TOKEN secret is missing"; exit 1; }
+          mkdir -p out
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from huggingface_hub import HfApi
+
+          api = HfApi(token=os.environ['HF_TOKEN'])
+          repo = os.environ['ORACLE_REPO']
+          all_files = sorted(api.list_repo_files(repo_id=repo, repo_type='model'))
+          v2 = [p for p in all_files if p.startswith(os.environ['ORACLE_V2_PREFIX'] + '/')]
+          d = [p for p in all_files if p.startswith(os.environ['ORACLE_D_PREFIX'] + '/')]
+          Path('out/ORACLE_V2_FILE_LIST.txt').write_text('\n'.join(v2) + '\n')
+          Path('out/ORACLE_D_FILE_LIST.txt').write_text('\n'.join(d) + '\n')
+          print(f'Oracle V2 files under prefix: {len(v2)}')
+          print(f'Oracle D files: {len(d)}')
+          for p in d:
+              print(p)
+          if not d:
+              raise SystemExit('Oracle D prefix resolved to zero files')
+          PY
+
+      - name: Download exact pinned source weights
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/anima-source"
+          mkdir -p "$source_dir"
+          source="$source_dir/anima-turbo-v1.0.safetensors"
+          source_url="https://huggingface.co/${ANIMA_SOURCE_REPO}/resolve/${ANIMA_SOURCE_REVISION}/${ANIMA_SOURCE_FILE}?download=true"
+          curl --fail --location --retry 3 --retry-all-errors --progress-bar \
+            -H "Authorization: Bearer ${HF_TOKEN}" \
+            -o "$source" "$source_url"
+          echo "${ANIMA_SOURCE_SHA256}  ${source}" | sha256sum --check
+          echo "SOURCE=${source}" >> "$GITHUB_ENV"
+          df -h
+
+      - name: Verify ANE pack contract tests
+        run: |
+          set -euo pipefail
+          python -m unittest scripts.tests.test_ane_pack_profile -v
+
+      - name: Audit all 280 ANE-native projections against legacy W8
+        run: |
+          set -euo pipefail
+          python scripts/ane_oracle_e_weight_audit.py \
+            --source "$SOURCE" \
+            --out-dir out \
+            --row-chunk 128 \
+            --source-sha256 "$ANIMA_SOURCE_SHA256" \
+            --source-repo "$ANIMA_SOURCE_REPO" \
+            --source-revision "$ANIMA_SOURCE_REVISION"
+
+      - name: Write provenance and checksums
+        run: |
+          set -euo pipefail
+          {
+            echo "repo_head=$(git rev-parse HEAD)"
+            echo "source_repo=${ANIMA_SOURCE_REPO}"
+            echo "source_revision=${ANIMA_SOURCE_REVISION}"
+            echo "source_sha256=${ANIMA_SOURCE_SHA256}"
+            echo "oracle_repo=${ORACLE_REPO}"
+            echo "oracle_d_prefix=${ORACLE_D_PREFIX}"
+            echo "python=$(python --version 2>&1)"
+            python - <<'PY'
+          import numpy, safetensors, torch, huggingface_hub
+          print('numpy=' + numpy.__version__)
+          print('safetensors=' + safetensors.__version__)
+          print('torch=' + torch.__version__)
+          print('huggingface_hub=' + huggingface_hub.__version__)
+          PY
+          } > out/PROVENANCE.txt
+          (cd out && sha256sum * > SHA256SUMS)
+          cat out/ANE_ORACLE_E_WEIGHT_AUDIT.md
+
+      - name: Publish small Phase 0 evidence to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ['HF_TOKEN'])
+          api.upload_folder(
+              repo_id=os.environ['ORACLE_REPO'],
+              repo_type='model',
+              folder_path='out',
+              path_in_repo=os.environ['ORACLE_E_PREFIX'],
+              commit_message='Add ANE Oracle E phase 0 weight audit',
+          )
+          print('Published to ' + os.environ['ORACLE_REPO'] + '/' + os.environ['ORACLE_E_PREFIX'])
+          PY
+
+      - name: Upload Phase 0 evidence artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ane-oracle-e-phase0
+          retention-days: 14
+          path: |
+            out/*.json
+            out/*.csv
+            out/*.md
+            out/*.txt
+            out/SHA256SUMS
+          if-no-files-found: warn
+
+      - name: Final disk report
+        if: always()
+        run: df -h
