@@ -13,6 +13,8 @@ on:
 
 permissions:
   contents: read
+  issues: write
+  pull-requests: write
 
 env:
   ANIMA_SOURCE_REPO: circlestone-labs/Anima
@@ -23,6 +25,8 @@ env:
   ORACLE_V2_PREFIX: animaxs-bf16-oracle-v2-2026-08-19
   ORACLE_D_PREFIX: animaxs-bf16-oracle-v2-2026-08-19/runs/D_pack_fp16_boundaries
   ORACLE_E_PREFIX: animaxs-ane-oracle-e-2026-08-19/phase0_weight_audit
+  # Intentional one-shot rerun after fixing direct-script import -> module execution.
+  PHASE0_RERUN: '2026-08-19-exact-audit-v2'
 
 jobs:
   weight-audit:
@@ -35,8 +39,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p out
-          printf 'run_id=%s\nhead=%s\nevent=%s\n' \
-            "$GITHUB_RUN_ID" "$GITHUB_SHA" "$GITHUB_EVENT_NAME" > out/STAGE_00_STARTED.txt
+          printf 'run_id=%s\nhead=%s\nevent=%s\nrerun=%s\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_SHA" "$GITHUB_EVENT_NAME" "$PHASE0_RERUN" \
+            > out/STAGE_00_STARTED.txt
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -205,3 +210,44 @@ jobs:
           retention-days: 14
           path: out/
           if-no-files-found: error
+
+      - name: Post bounded Phase 0 result to PR 35
+        if: always()
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const files = fs.existsSync('out') ? fs.readdirSync('out').sort() : [];
+            const ok = files.filter(x => /^STAGE_.*_OK\.txt$/.test(x));
+            const failed = files.filter(x => /^STAGE_.*_FAILED\.txt$/.test(x));
+            const marker = `<!-- ane-oracle-e-phase0:${context.sha} -->`;
+            let body = `${marker}\n### ANE Oracle E Phase 0 — artifact result\n\n` +
+              `- Source: self-diagnostic artifact files only; **no CI log download**.\n` +
+              `- Successful stages: ${ok.length ? ok.map(x => `\`${x}\``).join(', ') : 'none'}\n` +
+              `- Failure stages: ${failed.length ? failed.map(x => `\`${x}\``).join(', ') : 'none'}\n`;
+            const auditPath = 'out/ane_oracle_e_weight_audit.json';
+            if (fs.existsSync(auditPath)) {
+              const d = JSON.parse(fs.readFileSync(auditPath, 'utf8'));
+              const a = d.global.ane_native;
+              const l = d.global.legacy_group64;
+              const worst = [...d.records]
+                .sort((x,y) => y.ane_native.relative_l2 - x.ane_native.relative_l2)
+                .slice(0,5);
+              body += `\n**280-matrix audit complete**\n\n` +
+                `| lane | cosine | relative L2 | saturation |\n|---|---:|---:|---:|\n` +
+                `| ANE per-row U8 / FP32 params | ${a.cosine.toPrecision(10)} | ${a.relative_l2.toPrecision(8)} | ${(100*a.q_saturation_fraction).toFixed(5)}% |\n` +
+                `| legacy group64 U8 / FP16 params | ${l.cosine.toPrecision(10)} | ${l.relative_l2.toPrecision(8)} | ${(100*l.q_saturation_fraction).toFixed(5)}% |\n\n` +
+                `Worst five ANE tensors by rel-L2:\n` +
+                worst.map((r,i) => `${i+1}. \`${r.name}\` — ${r.ane_native.relative_l2.toPrecision(8)}`).join('\n') + '\n';
+            }
+            for (const failure of failed) {
+              const text = fs.readFileSync(path.join('out', failure), 'utf8').slice(0,12000);
+              body += `\n#### ${failure}\n\n\`\`\`text\n${text}\n\`\`\`\n`;
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: 35,
+              body: body.slice(0,60000),
+            });
