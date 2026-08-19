@@ -8,7 +8,13 @@ on:
       - .github/workflows/ane-oracle-e-unit.yml
       - scripts/ane_oracle_e_pack_reference.py
       - scripts/ane_oracle_e_custom_node.py
+      - scripts/ane_oracle_e_package_init.py
+      - scripts/ane_oracle_e_patch_v2_runner.py
+      - scripts/run_ane_oracle_e.sh
+      - scripts/ane_oracle_e_unpack_device_capture.py
+      - scripts/ane_oracle_e_compare.py
       - scripts/tests/test_ane_oracle_e_pack_reference.py
+      - scripts/tests/test_ane_oracle_e_capture_compare.py
   workflow_dispatch:
 
 permissions:
@@ -25,7 +31,7 @@ jobs:
           python-version: '3.11'
       - name: Install unit dependencies
         run: python -m pip install --upgrade numpy
-      - name: Compile Oracle E Python sources
+      - name: Compile and shell-check Oracle E sources
         shell: bash
         run: |
           set -uo pipefail
@@ -33,25 +39,34 @@ jobs:
           if python -m py_compile \
             scripts/ane_oracle_e_pack_reference.py \
             scripts/ane_oracle_e_custom_node.py \
+            scripts/ane_oracle_e_package_init.py \
+            scripts/ane_oracle_e_patch_v2_runner.py \
+            scripts/ane_oracle_e_unpack_device_capture.py \
+            scripts/ane_oracle_e_compare.py \
             scripts/tests/test_ane_oracle_e_pack_reference.py \
-            > out/compile.txt 2>&1; then
+            scripts/tests/test_ane_oracle_e_capture_compare.py \
+            > out/compile.txt 2>&1 \
+            && bash -n scripts/run_ane_oracle_e.sh > out/shell.txt 2>&1; then
             echo PASS > out/COMPILE_STATUS.txt
           else
             rc=$?
             echo FAIL > out/COMPILE_STATUS.txt
-            tail -n 200 out/compile.txt > out/COMPILE_FAILURE.txt
+            { tail -n 200 out/compile.txt 2>/dev/null || true; tail -n 200 out/shell.txt 2>/dev/null || true; } > out/COMPILE_FAILURE.txt
             exit "$rc"
           fi
-      - name: Run Oracle E pack-reference tests
+      - name: Run Oracle E unit tests
         shell: bash
         run: |
           set -uo pipefail
-          if python -m unittest scripts.tests.test_ane_oracle_e_pack_reference -v > out/unit.txt 2>&1; then
+          if python -m unittest \
+            scripts.tests.test_ane_oracle_e_pack_reference \
+            scripts.tests.test_ane_oracle_e_capture_compare \
+            -v > out/unit.txt 2>&1; then
             echo PASS > out/STATUS.txt
           else
             rc=$?
             echo FAIL > out/STATUS.txt
-            tail -n 200 out/unit.txt > out/FAILURE.txt
+            tail -n 240 out/unit.txt > out/FAILURE.txt
             exit "$rc"
           fi
       - name: Upload unit evidence
