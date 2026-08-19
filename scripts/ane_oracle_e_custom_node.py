@@ -57,6 +57,8 @@ OUTPUT_ROW_CHUNK = int(os.environ.get("ANIMA_ORACLE_E_OUTPUT_ROW_CHUNK", "256"))
 PACK_PATH = Path(os.environ.get("ANIMA_ORACLE_E_PACK", ""))
 EXPECTED_PACK_SHA256 = os.environ.get("ANIMA_ORACLE_E_PACK_SHA256", PINNED_PACK_SHA256).lower()
 STOP_AFTER_STEP0 = os.environ.get("ANIMA_ORACLE_E_STOP_AFTER_STEP0", "0") == "1"
+CAPTURE_BLOCK0_STAGES = os.environ.get("ANIMA_ORACLE_E_CAPTURE_BLOCK0_STAGES", "0") == "1"
+DEVICE_LEGACY_ATTENTION = os.environ.get("ANIMA_ORACLE_E_DEVICE_LEGACY_ATTENTION", "0") == "1"
 NOISE_MODE = os.environ.get(
     "ANIMA_ORACLE_E_NOISE_MODE", os.environ.get("ANIMA_ORACLE_NOISE_MODE", "none"))
 NOISE_FILE = Path(os.environ.get(
@@ -214,6 +216,33 @@ def _device_gelu(x: torch.Tensor) -> torch.Tensor:
     return y.to(torch.float16)
 
 
+def _device_legacy_attention_op(
+    q_B_S_H_D: torch.Tensor,
+    k_B_S_H_D: torch.Tensor,
+    v_B_S_H_D: torch.Tensor,
+    transformer_options: dict[str, Any] | None = None,
+) -> torch.Tensor:
+    """Emulate the visible FP16 storage boundaries of A12 legacy MPS attention.
+
+    The physical path materializes QK scores as FP16, evaluates softmax from
+    those scores in FP32 but stores probabilities back to FP16, then runs PV
+    from FP16 probability/value inputs and materializes an FP16 attended result.
+    FP32 matmul accumulation here is a stable software reference; MPS reduction
+    order/private accumulator details are deliberately not claimed identical.
+    """
+    del transformer_options
+    q = q_B_S_H_D.to(torch.float16).permute(0, 2, 1, 3)
+    k = k_B_S_H_D.to(torch.float16).permute(0, 2, 1, 3)
+    v = v_B_S_H_D.to(torch.float16).permute(0, 2, 1, 3)
+    scale = q.shape[-1] ** -0.5
+    scores = (torch.matmul(q.to(torch.float32), k.to(torch.float32).transpose(-2, -1)) * scale).to(torch.float16)
+    probabilities = torch.softmax(scores.to(torch.float32), dim=-1).to(torch.float16)
+    attended = torch.matmul(probabilities.to(torch.float32), v.to(torch.float32)).to(torch.float16)
+    return attended.permute(0, 2, 1, 3).reshape(
+        attended.shape[0], attended.shape[2], attended.shape[1] * attended.shape[3]
+    )
+
+
 def _checkpoint_stats(x: torch.Tensor) -> dict[str, Any]:
     flat = x.detach().reshape(-1).to(torch.float32)
     finite = torch.isfinite(flat)
@@ -252,8 +281,11 @@ class _CaptureState:
         self.pack_sha256 = pack_sha256
         self.traversal = -1
         self.records: list[dict[str, Any]] = []
+        self.stage_records: list[dict[str, Any]] = []
         self.checkpoint_dir = RUN_DIR / "checkpoints"
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.stage_dir = RUN_DIR / "stages"
+        self.stage_dir.mkdir(parents=True, exist_ok=True)
 
     def begin_traversal(self) -> None:
         self.traversal += 1
@@ -289,6 +321,56 @@ class _CaptureState:
             self.records.append(record)
             self._write_manifest()
 
+    def capture_stage(self, stage: str, tensor: torch.Tensor, dtype: str) -> None:
+        if not CAPTURE_BLOCK0_STAGES or self.traversal != 0:
+            return
+        expected = {
+            "self.modulation": (6144, "float32-le", "f32"),
+            "self.projection_input": (1024 * 2048, "float16-le", "f16"),
+            "self.q_raw": (1024 * 2048, "float16-le", "f16"),
+            "self.k_raw": (1024 * 2048, "float16-le", "f16"),
+            "self.v_raw": (1024 * 2048, "float16-le", "f16"),
+            "self.q_post_rope": (1024 * 2048, "float16-le", "f16"),
+            "self.k_post_rope": (1024 * 2048, "float16-le", "f16"),
+            "self.attended": (1024 * 2048, "float16-le", "f16"),
+            "self.branch": (1024 * 2048, "float16-le", "f16"),
+        }
+        if stage not in expected:
+            raise RuntimeError(f"Oracle E unknown CUDA block0 stage: {stage}")
+        expected_numel, expected_dtype, extension = expected[stage]
+        flat = tensor.detach().reshape(-1)
+        if flat.numel() != expected_numel:
+            raise RuntimeError(
+                f"Oracle E CUDA stage {stage} has {flat.numel()} elements; expected {expected_numel}")
+        if any(r["stage"] == stage for r in self.stage_records):
+            raise RuntimeError(f"Oracle E duplicate CUDA block0 stage: {stage}")
+        canonical = "stage_b00_" + stage.replace(".", "_")
+        filename = f"{canonical}.{extension}"
+        if dtype != expected_dtype:
+            raise RuntimeError(f"Oracle E CUDA stage dtype contract mismatch for {stage}: {dtype}")
+        if expected_dtype == "float16-le":
+            work = flat.to(torch.float16).cpu().contiguous()
+            np.asarray(work.numpy(), dtype="<f2").tofile(self.stage_dir / filename)
+        else:
+            work = flat.to(torch.float32).cpu().contiguous()
+            np.asarray(work.numpy(), dtype="<f4").tofile(self.stage_dir / filename)
+        record = {
+            "schema": 1,
+            "step": 0,
+            "block": 0,
+            "stage": stage,
+            "name": canonical,
+            "shape": list(tensor.shape),
+            "source_dtype": str(tensor.dtype),
+            "dtype": expected_dtype,
+            "element_count": int(flat.numel()),
+            "file": f"stages/{filename}",
+            "stats": _checkpoint_stats(tensor),
+        }
+        with _LOCK:
+            self.stage_records.append(record)
+            self._write_manifest()
+
     def _write_manifest(self) -> None:
         manifest = {
             "schema": 1,
@@ -302,6 +384,9 @@ class _CaptureState:
             "completed_step0_checkpoints": len(self.records),
             "complete": len(self.records) == 84,
             "stop_after_step0": STOP_AFTER_STEP0,
+            "expected_block0_stage_payloads": 9 if CAPTURE_BLOCK0_STAGES else 0,
+            "completed_block0_stage_payloads": len(self.stage_records),
+            "block0_stage_records": self.stage_records,
             "records": self.records,
         }
         tmp = RUN_DIR / "oracle_e_checkpoints.json.tmp"
@@ -324,6 +409,12 @@ def _install_noise_control() -> None:
                 raise RuntimeError(f"Oracle E noise file missing: {NOISE_FILE}")
             data = load_file(str(NOISE_FILE), device="cpu")
             noise = data["noise"]
+            # Physical A12 capture stores [B,C,H,W]; Comfy Anima uses [B,C,1,H,W].
+            # This is reshape-only and preserves every captured value exactly.
+            if noise.ndim == 4 and latent_image.ndim == 5 and latent_image.shape[2] == 1:
+                expected4 = (latent_image.shape[0], latent_image.shape[1], latent_image.shape[3], latent_image.shape[4])
+                if tuple(noise.shape) == expected4:
+                    noise = noise.unsqueeze(2)
             if tuple(noise.shape) != tuple(latent_image.shape):
                 raise RuntimeError(
                     f"Oracle E noise shape {tuple(noise.shape)} != latent {tuple(latent_image.shape)}")
@@ -391,6 +482,7 @@ class AnimaOracleEArm:
                 f"Oracle E expected 280 ANE-native tensors, found {len(native_records)}")
 
         state = _CaptureState(mode, digest)
+        block0_stage_context: dict[str, torch.Tensor | None] = {"adaln": None}
         handles = []
         originals = []
         group64_count = 0
@@ -430,8 +522,25 @@ class AnimaOracleEArm:
                 original_forward = module.forward
                 originals.append((module, "forward", original_forward))
 
-                def modulation_forward(x, _name=name, _pack=pack):
-                    return _group64_matvec_torch(_pack, _name, x)
+                def modulation_forward(x, _name=name, _pack=pack, _orig=original_forward,
+                                       _block=block_index, _suffix=suffix):
+                    packed_out = _group64_matvec_torch(_pack, _name, x)
+                    if _block in (0, 1) and _suffix.startswith("adaln_modulation_mlp"):
+                        with torch.no_grad():
+                            original_out = _orig(x)
+                            po = packed_out.detach().to(torch.float32).reshape(-1)
+                            oo = original_out.detach().to(torch.float32).reshape(-1)
+                            delta = po - oo
+                            denom = torch.linalg.vector_norm(po) * torch.linalg.vector_norm(oo)
+                            cosine = float(torch.dot(po, oo) / denom) if float(denom) > 0 else 1.0
+                            print(
+                                f"ORACLE_E_MOD_COMPARE b{_block:02d} {_suffix} "
+                                f"packed_std={float(po.std(unbiased=False)):.9g} packed_maxAbs={float(po.abs().max()):.9g} "
+                                f"orig_std={float(oo.std(unbiased=False)):.9g} orig_maxAbs={float(oo.abs().max()):.9g} "
+                                f"delta_rms={float(torch.sqrt(torch.mean(delta*delta))):.9g} "
+                                f"delta_max={float(delta.abs().max()):.9g} cosine={cosine:.12g}",
+                                flush=True)
+                    return packed_out
 
                 module.forward = modulation_forward
                 group64_count += 1
@@ -447,15 +556,33 @@ class AnimaOracleEArm:
                 fp16_norm_count += 1
 
             # Q/K/V after the source norm/RoPE seam live in FP16 device buffers.
-            for attention in (block.self_attn, block.cross_attn):
+            for attention_label, attention in (("self", block.self_attn), ("cross", block.cross_attn)):
                 original_compute_qkv = attention.compute_qkv
                 originals.append((attention, "compute_qkv", original_compute_qkv))
 
-                def compute_qkv(*args, _orig=original_compute_qkv, **kwargs):
+                def compute_qkv(*args, _orig=original_compute_qkv, _b=block_index,
+                                _label=attention_label, **kwargs):
                     q, k, v = _orig(*args, **kwargs)
-                    return _fp16_rt(q), _fp16_rt(k), _fp16_rt(v)
+                    q, k, v = _fp16_rt(q), _fp16_rt(k), _fp16_rt(v)
+                    if CAPTURE_BLOCK0_STAGES and _b == 0 and _label == "self":
+                        state.capture_stage("self.q_post_rope", q, "float16-le")
+                        state.capture_stage("self.k_post_rope", k, "float16-le")
+                    return q, k, v
 
                 attention.compute_qkv = compute_qkv
+                if DEVICE_LEGACY_ATTENTION or (CAPTURE_BLOCK0_STAGES and block_index == 0 and attention_label == "self"):
+                    original_attn_op = attention.attn_op
+                    originals.append((attention, "attn_op", original_attn_op))
+                    selected_attn_op = _device_legacy_attention_op if DEVICE_LEGACY_ATTENTION else original_attn_op
+
+                    def attention_op(q, k, v, transformer_options=None, _impl=selected_attn_op,
+                                     _b=block_index, _label=attention_label):
+                        result = _impl(q, k, v, transformer_options=transformer_options)
+                        if CAPTURE_BLOCK0_STAGES and _b == 0 and _label == "self":
+                            state.capture_stage("self.attended", result.to(torch.float16), "float16-le")
+                        return result
+
+                    attention.attn_op = attention_op
 
             # Current ANE baseline has fused MLP activation OFF:
             # half -> float GELU -> half.
@@ -463,6 +590,36 @@ class AnimaOracleEArm:
             original_activation = activation.forward
             originals.append((activation, "forward", original_activation))
             activation.forward = lambda x: _device_gelu(x)
+
+            if CAPTURE_BLOCK0_STAGES and block_index == 0:
+                def _block0_stage_pre(_module, args, kwargs):
+                    adaln = kwargs.get("adaln_lora_B_T_3D")
+                    if adaln is None and len(args) > 4:
+                        adaln = args[4]
+                    block0_stage_context["adaln"] = adaln.detach() if adaln is not None else None
+
+                def _self_mod_stage(_module, _args, output):
+                    combined = output
+                    adaln = block0_stage_context.get("adaln")
+                    if adaln is not None:
+                        combined = combined + adaln
+                    state.capture_stage("self.modulation", combined, "float32-le")
+
+                def _self_input_stage(_module, args):
+                    state.capture_stage("self.projection_input", args[0].to(torch.float16), "float16-le")
+
+                def _projection_stage(stage):
+                    def hook(_module, _args, output):
+                        state.capture_stage(stage, output, "float16-le")
+                    return hook
+
+                handles.append(block.register_forward_pre_hook(_block0_stage_pre, with_kwargs=True))
+                handles.append(block.adaln_modulation_self_attn.register_forward_hook(_self_mod_stage))
+                handles.append(block.self_attn.register_forward_pre_hook(_self_input_stage))
+                handles.append(block.self_attn.q_proj.register_forward_hook(_projection_stage("self.q_raw")))
+                handles.append(block.self_attn.k_proj.register_forward_hook(_projection_stage("self.k_raw")))
+                handles.append(block.self_attn.v_proj.register_forward_hook(_projection_stage("self.v_raw")))
+                handles.append(block.self_attn.output_proj.register_forward_hook(_projection_stage("self.branch")))
 
             # Exact post-branch seams in pinned MiniTrainDIT:
             # cross-LN input == post-self; MLP-LN input == post-cross; block
@@ -486,6 +643,61 @@ class AnimaOracleEArm:
             handles.append(block.layer_norm_mlp.register_forward_pre_hook(
                 make_pre_capture(block_index, "cross")))
             handles.append(block.register_forward_hook(make_post_capture(block_index)))
+
+            # Temporary root-cause instrumentation for the reproduced block-1 MLP blow-up.
+            # Keep it bounded to blocks 0/1 and print aggregate stats only.
+            if block_index in (0, 1):
+                debug_state = {"adaln": None}
+
+                def _dbg_stats(label, value, _b=block_index):
+                    t = value.detach().to(torch.float32)
+                    finite = torch.isfinite(t)
+                    if bool(finite.all()):
+                        print(
+                            f"ORACLE_E_MLP_DEBUG b{_b:02d} {label} "
+                            f"shape={tuple(value.shape)} dtype={value.dtype} "
+                            f"mean={float(t.mean()):.9g} std={float(t.std(unbiased=False)):.9g} "
+                            f"min={float(t.min()):.9g} max={float(t.max()):.9g} "
+                            f"maxAbs={float(t.abs().max()):.9g} l2={float(torch.linalg.vector_norm(t)):.9g}",
+                            flush=True)
+                    else:
+                        print(f"ORACLE_E_MLP_DEBUG b{_b:02d} {label} NONFINITE", flush=True)
+
+                def _block_dbg_pre(_module, args, kwargs, _st=debug_state, _b=block_index):
+                    adaln = kwargs.get("adaln_lora_B_T_3D")
+                    if adaln is None and len(args) > 4:
+                        adaln = args[4]
+                    _st["adaln"] = adaln.detach() if adaln is not None else None
+                    if adaln is not None:
+                        _dbg_stats("adaln_lora", adaln, _b)
+                    _dbg_stats("block_input", args[0], _b)
+
+                def _mod_dbg(_module, _args, output, _st=debug_state, _b=block_index):
+                    _dbg_stats("mlp_mod_raw", output, _b)
+                    combined = output
+                    if _st.get("adaln") is not None:
+                        combined = combined + _st["adaln"]
+                    shift, scale, gate = combined.chunk(3, dim=-1)
+                    _dbg_stats("mlp_shift", shift, _b)
+                    _dbg_stats("mlp_scale", scale, _b)
+                    _dbg_stats("mlp_gate", gate, _b)
+
+                def _pre_dbg(label, _b=block_index):
+                    def hook(_module, args):
+                        _dbg_stats(label, args[0], _b)
+                    return hook
+
+                def _post_dbg(label, _b=block_index):
+                    def hook(_module, _args, output):
+                        _dbg_stats(label, output, _b)
+                    return hook
+
+                handles.append(block.register_forward_pre_hook(_block_dbg_pre, with_kwargs=True))
+                handles.append(block.adaln_modulation_mlp.register_forward_hook(_mod_dbg))
+                handles.append(block.mlp.register_forward_pre_hook(_pre_dbg("mlp_normalized_input")))
+                handles.append(block.mlp.layer1.register_forward_hook(_post_dbg("mlp_layer1_out")))
+                handles.append(block.mlp.activation.register_forward_hook(_post_dbg("mlp_gelu_out")))
+                handles.append(block.mlp.layer2.register_forward_hook(_post_dbg("mlp_layer2_out")))
 
         if group64_count != 28 * 6:
             pack.close()
@@ -532,6 +744,8 @@ class AnimaOracleEArm:
             "noise_mode": NOISE_MODE,
             "noise_file": str(NOISE_FILE),
             "stop_after_step0": STOP_AFTER_STEP0,
+            "capture_block0_stages": CAPTURE_BLOCK0_STAGES,
+            "device_legacy_attention_emulation": DEVICE_LEGACY_ATTENTION,
             "native_reference_accumulation": "FP32 torch.mm; not claimed instruction-identical to private ANE",
             "modulation_reference_accumulation": "FP32 torch.mm over exact group64 W8/FP16 metadata; reduction order not claimed identical to Metal",
             "gelu_reference": "FP16 input -> CUDA exact-erf FP32 GELU -> FP16 output",

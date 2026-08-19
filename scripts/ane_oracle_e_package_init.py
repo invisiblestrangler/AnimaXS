@@ -100,40 +100,57 @@ def _arm_with_optional_device_state(self, model, mode):
             cache[key] = replacement
         return replacement
 
-    def replace_global_block_inputs(args):
-        if len(args) < 5:
+    def replace_global_block_inputs(args, kwargs):
+        # The pinned MiniTrainDIT calls each block with residual, timestep
+        # embedding and cross-context positionally, but supplies rope/AdaLN via
+        # **block_kwargs.  Accept either form so the device override follows
+        # the actual block signature instead of assuming five positional args.
+        if len(args) < 3:
             raise RuntimeError(
-                "Oracle E block call must expose residual, embedding, cross context, rope, and AdaLN as positional args")
-        mutable = list(args)
-        mutable[1] = tensor_for("prepared_embedding", mutable[1])
-        mutable[2] = tensor_for("cross_context", mutable[2])
-        if mutable[4] is None:
-            raise RuntimeError("Oracle E expected non-nil AdaLN-LoRA block input")
-        mutable[4] = tensor_for("prepared_adaln_lora", mutable[4])
-        return mutable
+                "Oracle E block call must expose residual, embedding, and cross context as positional args")
+        mutable_args = list(args)
+        mutable_kwargs = dict(kwargs)
+        mutable_args[1] = tensor_for("prepared_embedding", mutable_args[1])
+        mutable_args[2] = tensor_for("cross_context", mutable_args[2])
 
-    def block0_device_hook(_module, args):
+        if len(mutable_args) > 4:
+            adaln = mutable_args[4]
+            if adaln is None:
+                raise RuntimeError("Oracle E expected non-nil AdaLN-LoRA block input")
+            mutable_args[4] = tensor_for("prepared_adaln_lora", adaln)
+        else:
+            adaln = mutable_kwargs.get("adaln_lora_B_T_3D")
+            if adaln is None:
+                raise RuntimeError("Oracle E expected non-nil AdaLN-LoRA block input")
+            mutable_kwargs["adaln_lora_B_T_3D"] = tensor_for("prepared_adaln_lora", adaln)
+        return mutable_args, mutable_kwargs
+
+    def block0_device_hook(_module, args, kwargs):
         nonlocal first_block0_pending
         if not first_block0_pending:
             return None
-        mutable = replace_global_block_inputs(args)
-        mutable[0] = tensor_for("prepared_residual", mutable[0])
+        mutable_args, mutable_kwargs = replace_global_block_inputs(args, kwargs)
+        mutable_args[0] = tensor_for("prepared_residual", mutable_args[0])
         first_block0_pending = False
-        return tuple(mutable)
+        return tuple(mutable_args), mutable_kwargs
 
-    def later_block_device_hook(_module, args):
+    def later_block_device_hook(_module, args, kwargs):
         # Core's block0 traversal hook has already incremented traversal to 0
         # when blocks 1...27 execute. Do not override any later diffusion step.
         if state.traversal != 0:
             return None
-        return tuple(replace_global_block_inputs(args))
+        mutable_args, mutable_kwargs = replace_global_block_inputs(args, kwargs)
+        return tuple(mutable_args), mutable_kwargs
 
     # Registered after the core hook with prepend=True, therefore this block0
     # hook executes first and replaces the prepared values before core advances
-    # traversal -1 -> 0.
-    handles.append(blocks[0].register_forward_pre_hook(block0_device_hook, prepend=True))
+    # traversal -1 -> 0. with_kwargs=True is required because the pinned source
+    # passes AdaLN (and rope) through **block_kwargs.
+    handles.append(blocks[0].register_forward_pre_hook(
+        block0_device_hook, prepend=True, with_kwargs=True))
     for block in blocks[1:]:
-        handles.append(block.register_forward_pre_hook(later_block_device_hook, prepend=True))
+        handles.append(block.register_forward_pre_hook(
+            later_block_device_hook, prepend=True, with_kwargs=True))
 
     arm_path = _core.RUN_DIR / "oracle_e_arm.json"
     if arm_path.is_file():

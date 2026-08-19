@@ -38,6 +38,21 @@ EXPECTED_PAYLOAD_BYTES = {
     name: int(np.prod(shape, dtype=np.int64)) * 4
     for name, shape in EXPECTED_PAYLOAD_SHAPES.items()
 }
+BLOCK0_STAGE_PAYLOADS = {
+    "stage_b00_self_modulation": ("float32-le", [6144]),
+    "stage_b00_self_projection_input": ("float16-le", [1024, 2048]),
+    "stage_b00_self_q_raw": ("float16-le", [1024, 2048]),
+    "stage_b00_self_k_raw": ("float16-le", [1024, 2048]),
+    "stage_b00_self_v_raw": ("float16-le", [1024, 2048]),
+    "stage_b00_self_q_post_rope": ("float16-le", [1024, 2048]),
+    "stage_b00_self_k_post_rope": ("float16-le", [1024, 2048]),
+    "stage_b00_self_attended": ("float16-le", [1024, 2048]),
+    "stage_b00_self_branch": ("float16-le", [1024, 2048]),
+}
+DTYPE_INFO = {
+    "float32-le": (4, "f32"),
+    "float16-le": (2, "f16"),
+}
 
 
 def _load_capture(path: Path) -> tuple[dict[str, Any], bytes]:
@@ -93,11 +108,15 @@ def unpack_capture(capture: Path, out_dir: Path) -> dict[str, Any]:
             manifest_offset=manifest_offset,
             label=f"payload {name}",
         )
-        if item.get("dtype") != "float32-le" or byte_count != element_count * 4:
+        dtype = str(item.get("dtype"))
+        if dtype not in DTYPE_INFO:
+            raise ValueError(f"unsupported payload dtype for {name}: {dtype}")
+        bytes_per_element, extension = DTYPE_INFO[dtype]
+        if byte_count != element_count * bytes_per_element:
             raise ValueError(f"unsupported payload dtype/size for {name}")
         if not shape or any(x <= 0 for x in shape) or int(np.prod(shape, dtype=np.int64)) != element_count:
             raise ValueError(f"payload shape/element mismatch for {name}")
-        filename = f"{name}.f32"
+        filename = f"{name}.{extension}"
         (out_dir / filename).write_bytes(blob)
         record = dict(item)
         record["file"] = filename
@@ -117,6 +136,21 @@ def unpack_capture(capture: Path, out_dir: Path) -> dict[str, Any]:
         if actual_shape != expected_shape:
             raise ValueError(
                 f"device payload {name} has shape {actual_shape}; expected {expected_shape}")
+
+    expected_stage_count = int(manifest.get("expectedBlock0StagePayloads", 0))
+    present_stage_names = set(BLOCK0_STAGE_PAYLOADS).intersection(names)
+    if expected_stage_count:
+        missing_stages = set(BLOCK0_STAGE_PAYLOADS) - present_stage_names
+        if expected_stage_count != len(BLOCK0_STAGE_PAYLOADS) or missing_stages:
+            raise ValueError(f"incomplete block-0 stage payloads: missing {sorted(missing_stages)}")
+    for name in present_stage_names:
+        expected_dtype, expected_shape = BLOCK0_STAGE_PAYLOADS[name]
+        item = by_name[name]
+        actual_dtype = str(item["dtype"])
+        actual_shape = [int(x) for x in item["shape"]]
+        expected_bytes = int(np.prod(expected_shape, dtype=np.int64)) * DTYPE_INFO[expected_dtype][0]
+        if actual_dtype != expected_dtype or actual_shape != expected_shape or int(item["byteCount"]) != expected_bytes:
+            raise ValueError(f"bad block-0 stage payload contract for {name}")
 
     checkpoint_records: list[dict[str, Any]] = []
     seen: set[tuple[int, int, str]] = set()
@@ -177,6 +211,9 @@ def unpack_capture(capture: Path, out_dir: Path) -> dict[str, Any]:
         "payloads": payload_records,
         "expected_step0_checkpoints": EXPECTED_CHECKPOINTS,
         "completed_step0_checkpoints": len(checkpoint_records),
+        "expected_block0_stage_payloads": expected_stage_count,
+        "completed_block0_stage_payloads": len(present_stage_names),
+        "block0_stage_payloads": [by_name[name] for name in sorted(present_stage_names)],
         "records": checkpoint_records,
     }
     (out_dir / "device_manifest.json").write_text(
@@ -225,6 +262,7 @@ def main() -> None:
         "generation_width": portable["generation_width"],
         "generation_height": portable["generation_height"],
         "dit_token_count": portable["dit_token_count"],
+        "block0_stage_payloads": portable["completed_block0_stage_payloads"],
         "device_manifest": str(args.out_dir / "device_manifest.json"),
         "noise_safetensors": str(noise_path) if noise_path else None,
         "cross_context": str(args.out_dir / "cross_context.f32"),

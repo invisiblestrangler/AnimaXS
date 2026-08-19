@@ -13,7 +13,10 @@ from scripts.ane_oracle_e_unpack_device_capture import MAGIC, HEADER_BYTES, unpa
 
 
 class OracleECaptureAndCompareTests(unittest.TestCase):
-    def _write_capture(self, path: Path, *, omit_payload: str | None = None) -> None:
+    def _write_capture(
+        self, path: Path, *, omit_payload: str | None = None,
+        include_stages: bool = False, omit_stage: str | None = None
+    ) -> None:
         payloads = []
         checkpoints = []
         raw = bytearray(b"\x00" * HEADER_BYTES)
@@ -35,11 +38,35 @@ class OracleECaptureAndCompareTests(unittest.TestCase):
                 "shape": shape,
             })
 
+        def append_half(name: str, values: np.ndarray, shape: list[int]):
+            if name == omit_stage:
+                return
+            offset = len(raw)
+            blob = np.asarray(values, dtype="<f2").tobytes()
+            raw.extend(blob)
+            payloads.append({
+                "name": name,
+                "offset": offset,
+                "byteCount": len(blob),
+                "elementCount": int(values.size),
+                "dtype": "float16-le",
+                "shape": shape,
+            })
+
         append("initial_latent", np.zeros(16 * 64 * 64, dtype=np.float32), [1, 16, 64, 64])
         append("cross_context", np.zeros(512 * 1024, dtype=np.float32), [1, 512, 1024])
         append("prepared_residual", np.zeros(1024 * 2048, dtype=np.float32), [1024, 2048])
         append("prepared_embedding", np.zeros(2048, dtype=np.float32), [2048])
         append("prepared_adaln_lora", np.zeros(6144, dtype=np.float32), [6144])
+        if include_stages:
+            if omit_stage != "stage_b00_self_modulation":
+                append("stage_b00_self_modulation", np.zeros(6144, dtype=np.float32), [6144])
+            for name in (
+                "stage_b00_self_projection_input", "stage_b00_self_q_raw", "stage_b00_self_k_raw",
+                "stage_b00_self_v_raw", "stage_b00_self_q_post_rope", "stage_b00_self_k_post_rope",
+                "stage_b00_self_attended", "stage_b00_self_branch",
+            ):
+                append_half(name, np.zeros(1024 * 2048, dtype=np.float16), [1024, 2048])
 
         for block in range(28):
             for branch_index, branch in enumerate(("self", "cross", "mlp")):
@@ -73,6 +100,7 @@ class OracleECaptureAndCompareTests(unittest.TestCase):
             "initialLatentSource": "synthetic",
             "preparedStateSource": "synthetic",
             "completedStep0Checkpoints": 84,
+            **({"expectedBlock0StagePayloads": 9, "completedBlock0StagePayloads": 9} if include_stages else {}),
             "payloads": payloads,
             "checkpoints": checkpoints,
         }
@@ -123,6 +151,39 @@ class OracleECaptureAndCompareTests(unittest.TestCase):
             self.assertEqual(manifest["latent_shape"], [1, 16, 64, 64])
             self.assertEqual(manifest["dit_token_count"], 1024)
             self.assertTrue((out / "step00_block27_mlp.f32").is_file())
+
+    def test_unpack_extracts_mixed_precision_block0_stages(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            capture = root / "stages.oraclee"
+            self._write_capture(capture, include_stages=True)
+            out = root / "out"
+            manifest = unpack_capture(capture, out)
+            self.assertEqual(manifest["expected_block0_stage_payloads"], 9)
+            self.assertEqual(manifest["completed_block0_stage_payloads"], 9)
+            self.assertEqual((out / "stage_b00_self_modulation.f32").stat().st_size, 6144 * 4)
+            self.assertEqual(
+                (out / "stage_b00_self_q_raw.f16").stat().st_size,
+                1024 * 2048 * 2,
+            )
+            self.assertEqual(
+                {item["name"] for item in manifest["block0_stage_payloads"]},
+                {
+                    "stage_b00_self_modulation", "stage_b00_self_projection_input",
+                    "stage_b00_self_q_raw", "stage_b00_self_k_raw", "stage_b00_self_v_raw",
+                    "stage_b00_self_q_post_rope", "stage_b00_self_k_post_rope",
+                    "stage_b00_self_attended", "stage_b00_self_branch",
+                },
+            )
+
+    def test_unpack_rejects_incomplete_declared_block0_stages(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            capture = root / "missing-stage.oraclee"
+            self._write_capture(
+                capture, include_stages=True, omit_stage="stage_b00_self_q_raw")
+            with self.assertRaisesRegex(ValueError, "incomplete block-0 stage payloads"):
+                unpack_capture(capture, root / "out")
 
     def test_unpack_rejects_missing_prepared_state(self):
         with tempfile.TemporaryDirectory() as td:

@@ -50,6 +50,9 @@ final class CrossKVCache {
 /// allocation is reused between operations and calls.
 final class DiTBlockExecutor {
     typealias DiagnosticBranchCompleted = (_ branch: String, _ residual: MTLBuffer) throws -> Void
+    /// Diagnostic-only block-internal tensor callback. Oracle E uses this only
+    /// for block 0; normal inference passes nil and pays no snapshot/readback cost.
+    typealias DiagnosticStageCompleted = (_ stage: String, _ tensor: MTLBuffer) throws -> Void
     static let tokens = 1_024
     static let contextTokens = 512
     static let dim = 2_048
@@ -162,7 +165,8 @@ final class DiTBlockExecutor {
         slot: Int = 0,
         prefetchIndex: Int? = nil,
         prefetchSlot: Int = 0,
-        diagnosticBranchCompleted: DiagnosticBranchCompleted? = nil
+        diagnosticBranchCompleted: DiagnosticBranchCompleted? = nil,
+        diagnosticStageCompleted: DiagnosticStageCompleted? = nil
     ) async throws {
         try validateInputs(residual: residual, emb: emb, adalnLora: adalnLora,
                            crossContext: crossContext, rope: rope)
@@ -171,7 +175,8 @@ final class DiTBlockExecutor {
                 blockIndex: blockIndex, residual: residual, emb: emb,
                 adalnLora: adalnLora, crossContext: crossContext, rope: rope,
                 slot: slot, prefetchIndex: prefetchIndex, prefetchSlot: prefetchSlot,
-                diagnosticBranchCompleted: diagnosticBranchCompleted)
+                diagnosticBranchCompleted: diagnosticBranchCompleted,
+                diagnosticStageCompleted: diagnosticStageCompleted)
             return
         }
         let range = try blockRange(blockIndex)
@@ -296,7 +301,8 @@ final class DiTBlockExecutor {
         slot: Int,
         prefetchIndex: Int?,
         prefetchSlot: Int,
-        diagnosticBranchCompleted: DiagnosticBranchCompleted?
+        diagnosticBranchCompleted: DiagnosticBranchCompleted?,
+        diagnosticStageCompleted: DiagnosticStageCompleted?
     ) async throws {
         guard let aneModelCache, let aneSurfaces else {
             throw AnimapkError.validation("ANE hybrid backend was selected without an initialized ANE runtime")
@@ -394,6 +400,11 @@ final class DiTBlockExecutor {
         recordCompletedCommand(
             s0, encodeSeconds: s0End - s0Start,
             hostWindowSeconds: ProcessInfo.processInfo.systemUptime - wait0Start)
+        let captureSelfStages = blockIndex == 0 && diagnosticStageCompleted != nil
+        if captureSelfStages, let diagnosticStageCompleted {
+            try diagnosticStageCompleted("self.modulation", selfInput.modulation)
+            try diagnosticStageCompleted("self.projection_input", selfInput.projectionInput)
+        }
 
         try evaluateANEQKV(
             models.selfQKV, input: aneSurfaces.tokenInput,
@@ -418,16 +429,33 @@ final class DiTBlockExecutor {
         try encodeANEToToken(s1, aneMajor: aneSurfaces.v.metalBuffer, tokenMajor: vToken,
                              rows: Self.tokens, channels: Self.dim,
                              planeStrideElements: aneSurfaces.v.planeStrideElements)
-        let selfAttended = try encodeANEAttentionMath(
+        let rawQSnapshot = captureSelfStages
+            ? try encodeSnapshotHalf(s1, source: qToken, key: "dit.diagnostic.self.qRaw.f16",
+                                     elements: Self.tokens * Self.dim) : nil
+        let rawKSnapshot = captureSelfStages
+            ? try encodeSnapshotHalf(s1, source: kToken, key: "dit.diagnostic.self.kRaw.f16",
+                                     elements: Self.tokens * Self.dim) : nil
+        let rawVSnapshot = captureSelfStages
+            ? try encodeSnapshotHalf(s1, source: vToken, key: "dit.diagnostic.self.vRaw.f16",
+                                     elements: Self.tokens * Self.dim) : nil
+        let selfAttention = try encodeANEAttentionMath(
             s1, qToken: qToken, kToken: kToken, vToken: vToken,
             cross: false, blockIndex: blockIndex, rope: rope, weights: weights, slot: slot,
-            projectedKVAvailable: true)
+            projectedKVAvailable: true, capturePostTransform: captureSelfStages)
         try encodeTokenToANE(
-            s1, tokenMajor: selfAttended, aneMajor: aneSurfaces.tokenInput.metalBuffer,
+            s1, tokenMajor: selfAttention.attended, aneMajor: aneSurfaces.tokenInput.metalBuffer,
             rows: Self.tokens, channels: Self.dim,
             planeStrideElements: aneSurfaces.tokenInput.planeStrideElements)
         let s1End = ProcessInfo.processInfo.systemUptime
         try await commitStandaloneCommand(s1, encodeSeconds: s1End - s1Start)
+        if captureSelfStages, let diagnosticStageCompleted {
+            try diagnosticStageCompleted("self.q_raw", rawQSnapshot!)
+            try diagnosticStageCompleted("self.k_raw", rawKSnapshot!)
+            try diagnosticStageCompleted("self.v_raw", rawVSnapshot!)
+            try diagnosticStageCompleted("self.q_post_rope", selfAttention.qPostTransform!)
+            try diagnosticStageCompleted("self.k_post_rope", selfAttention.kPostTransform!)
+            try diagnosticStageCompleted("self.attended", selfAttention.attended)
+        }
 
         try evaluateANEProjection(
             models.selfO, input: aneSurfaces.tokenInput, output: aneSurfaces.tokenOutput,
@@ -439,7 +467,7 @@ final class DiTBlockExecutor {
             throw AnimapkError.validation("failed to create ANE hybrid cross-input command buffer")
         }
         s2.label = "DiT block \(blockIndex) ANE cross input"
-        try encodeANEAttentionOutput(
+        let selfBranch = try encodeANEAttentionOutput(
             s2, aneOutput: aneSurfaces.tokenOutput, residual: residual,
             modulation: selfInput.modulation, cross: false)
         let selfSnapshot = try diagnosticBranchCompleted.map { _ in
@@ -462,6 +490,9 @@ final class DiTBlockExecutor {
         }
         let s2End = ProcessInfo.processInfo.systemUptime
         try await commitStandaloneCommand(s2, encodeSeconds: s2End - s2Start)
+        if captureSelfStages, let diagnosticStageCompleted {
+            try diagnosticStageCompleted("self.branch", selfBranch)
+        }
 
         try evaluateANEProjection(
             models.crossQ, input: aneSurfaces.tokenInput, output: aneSurfaces.q,
@@ -496,12 +527,12 @@ final class DiTBlockExecutor {
                                  rows: Self.contextTokens, channels: Self.dim,
                                  planeStrideElements: aneSurfaces.contextV.planeStrideElements)
         }
-        let crossAttended = try encodeANEAttentionMath(
+        let crossAttention = try encodeANEAttentionMath(
             s3, qToken: crossQToken, kToken: crossKToken, vToken: crossVToken,
             cross: true, blockIndex: blockIndex, rope: rope, weights: weights, slot: slot,
             projectedKVAvailable: !crossCacheHit)
         try encodeTokenToANE(
-            s3, tokenMajor: crossAttended, aneMajor: aneSurfaces.tokenInput.metalBuffer,
+            s3, tokenMajor: crossAttention.attended, aneMajor: aneSurfaces.tokenInput.metalBuffer,
             rows: Self.tokens, channels: Self.dim,
             planeStrideElements: aneSurfaces.tokenInput.planeStrideElements)
         let s3End = ProcessInfo.processInfo.systemUptime
@@ -517,7 +548,7 @@ final class DiTBlockExecutor {
             throw AnimapkError.validation("failed to create ANE hybrid MLP-input command buffer")
         }
         s4.label = "DiT block \(blockIndex) ANE MLP input"
-        try encodeANEAttentionOutput(
+        _ = try encodeANEAttentionOutput(
             s4, aneOutput: aneSurfaces.tokenOutput, residual: residual,
             modulation: crossInput.modulation, cross: true)
         let crossSnapshot = try diagnosticBranchCompleted.map { _ in
@@ -676,6 +707,12 @@ final class DiTBlockExecutor {
     /// reproduces the legacy numerical boundaries, learned RMSNorm/RoPE and
     /// attention path exactly. The returned buffer is token-major fp16 and is
     /// ready for the ANE output projection.
+    private struct ANEAttentionMathResult {
+        let attended: MTLBuffer
+        let qPostTransform: MTLBuffer?
+        let kPostTransform: MTLBuffer?
+    }
+
     private func encodeANEAttentionMath(
         _ command: MTLCommandBuffer,
         qToken: MTLBuffer,
@@ -686,8 +723,9 @@ final class DiTBlockExecutor {
         rope: MTLBuffer,
         weights: any DiTAuxWeights,
         slot: Int,
-        projectedKVAvailable: Bool
-    ) throws -> MTLBuffer {
+        projectedKVAvailable: Bool,
+        capturePostTransform: Bool = false
+    ) throws -> ANEAttentionMathResult {
         let keyRows = cross ? Self.contextTokens : Self.tokens
         let kTokenCount = keyRows * Self.dim
         let cacheEnabled = cross && crossKVCache != nil
@@ -754,6 +792,12 @@ final class DiTBlockExecutor {
                               rope: rope, output: qToken, slot: slot)
         }
         try encodeHalfComputeBoundary(command, qToken, count: Self.tokens * Self.dim)
+        let qPostSnapshot = capturePostTransform
+            ? try encodeSnapshotHalf(command, source: qToken, key: "dit.diagnostic.self.qPostRope.f16",
+                                     elements: Self.tokens * Self.dim) : nil
+        let kPostSnapshot = capturePostTransform
+            ? try encodeSnapshotHalf(command, source: kToken, key: "dit.diagnostic.self.kPostRope.f16",
+                                     elements: kTokenCount) : nil
 
         let strided = try resolvedStridedAttention()
         if strided {
@@ -769,7 +813,8 @@ final class DiTBlockExecutor {
                 try monitor.encodeProbe(command, values: attended, count: Self.tokens * Self.dim,
                                         probe: cross ? .crossAttended : .selfAttended)
             }
-            return attended
+            return ANEAttentionMathResult(
+                attended: attended, qPostTransform: qPostSnapshot, kPostTransform: kPostSnapshot)
         }
 
         let qHead = buffer("dit.q.head.f16", Self.tokens * Self.dim, Float16.self)
@@ -792,7 +837,8 @@ final class DiTBlockExecutor {
         let attended = buffer("dit.attended.token.f16", Self.tokens * Self.dim, Float16.self)
         try encodeTranspose(command, input: attendedHead, output: attended,
                             tokens: Self.tokens, toHeadMajor: false)
-        return attended
+        return ANEAttentionMathResult(
+            attended: attended, qPostTransform: qPostSnapshot, kPostTransform: kPostSnapshot)
     }
 
     private func encodeANEAttentionOutput(
@@ -801,7 +847,7 @@ final class DiTBlockExecutor {
         residual: MTLBuffer,
         modulation: MTLBuffer,
         cross: Bool
-    ) throws {
+    ) throws -> MTLBuffer {
         let branch = buffer("dit.branch.f16", Self.tokens * Self.dim, Float16.self)
         try encodeANEToToken(
             command, aneMajor: aneOutput.metalBuffer, tokenMajor: branch,
@@ -820,6 +866,7 @@ final class DiTBlockExecutor {
             try monitor.encodeProbeF32(command, values: residual, count: Self.tokens * Self.dim,
                                        probe: cross ? .crossResidual : .selfResidual)
         }
+        return branch
     }
 
     private func resolvedStridedAttention() throws -> Bool {
@@ -1017,6 +1064,19 @@ final class DiTBlockExecutor {
                 bytes: Int(range.length),
                 seconds: ProcessInfo.processInfo.systemUptime - copyStart)
         }
+    }
+
+    private func encodeSnapshotHalf(
+        _ command: MTLCommandBuffer, source: MTLBuffer, key: String, elements: Int
+    ) throws -> MTLBuffer {
+        let bytes = elements * MemoryLayout<Float16>.stride
+        let snapshot = buffers.buffer(key: key, bytes: bytes)
+        guard source.length >= bytes, let encoder = command.makeBlitCommandEncoder() else {
+            throw AnimapkError.validation("failed to create DiT FP16 diagnostic snapshot encoder")
+        }
+        encoder.copy(from: source, sourceOffset: 0, to: snapshot, destinationOffset: 0, size: bytes)
+        encoder.endEncoding()
+        return snapshot
     }
 
     private func encodeSnapshot(

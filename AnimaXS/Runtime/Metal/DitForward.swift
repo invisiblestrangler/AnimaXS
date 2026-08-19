@@ -83,7 +83,8 @@ final class DitForward {
         rope: MTLBuffer,
         blockCompleted: ((Int, MTLBuffer) throws -> Void)? = nil,
         diagnosticBranchFilter: ((Int) -> Bool)? = nil,
-        diagnosticBranchCompleted: ((Int, String, MTLBuffer) throws -> Void)? = nil
+        diagnosticBranchCompleted: ((Int, String, MTLBuffer) throws -> Void)? = nil,
+        diagnosticStageCompleted: ((Int, String, MTLBuffer) throws -> Void)? = nil
     ) async throws {
         let blockCount = DiTBlockLocator.blockCount
         let pingPong = block.slotCount > 1
@@ -101,12 +102,17 @@ final class DitForward {
             } else {
                 branchCallback = nil
             }
+            let stageCallback: DiTBlockExecutor.DiagnosticStageCompleted? =
+                diagnosticStageCompleted.map { callback in
+                    { stage, tensor in try callback(logicalIndex, stage, tensor) }
+                }
             try await block.execute(
                 blockIndex: logicalIndex, residual: residual, emb: emb,
                 adalnLora: adalnLora, crossContext: crossContext, rope: rope,
                 slot: step.slot, prefetchIndex: step.prefetchIndex,
                 prefetchSlot: step.prefetchSlot,
-                diagnosticBranchCompleted: branchCallback)
+                diagnosticBranchCompleted: branchCallback,
+                diagnosticStageCompleted: stageCallback)
             try blockCompleted?(logicalIndex, residual)
         }
     }

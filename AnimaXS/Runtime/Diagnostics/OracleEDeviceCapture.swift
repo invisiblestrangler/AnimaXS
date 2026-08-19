@@ -21,13 +21,25 @@ final class OracleEDeviceCaptureWriter {
     static let sampleCount = 65_536
     static let residualElements = 1_024 * 2_048
     static let headerBytes = 64
-    static let requiredCompletedPayloadNames: Set<String> = [
+    static let corePayloadNames: Set<String> = [
         "initial_latent",
         "cross_context",
         "prepared_residual",
         "prepared_embedding",
         "prepared_adaln_lora",
     ]
+    static let block0StagePayloadNames: Set<String> = [
+        "stage_b00_self_modulation",
+        "stage_b00_self_projection_input",
+        "stage_b00_self_q_raw",
+        "stage_b00_self_k_raw",
+        "stage_b00_self_v_raw",
+        "stage_b00_self_q_post_rope",
+        "stage_b00_self_k_post_rope",
+        "stage_b00_self_attended",
+        "stage_b00_self_branch",
+    ]
+    static let requiredCompletedPayloadNames = corePayloadNames.union(block0StagePayloadNames)
 
     struct PayloadRecord: Codable {
         let name: String
@@ -82,6 +94,8 @@ final class OracleEDeviceCaptureWriter {
         let sampling: String
         let expectedStep0Checkpoints: Int
         let completedStep0Checkpoints: Int
+        let expectedBlock0StagePayloads: Int
+        let completedBlock0StagePayloads: Int
         let payloads: [PayloadRecord]
         let checkpoints: [CheckpointRecord]
     }
@@ -133,21 +147,24 @@ final class OracleEDeviceCaptureWriter {
         }
     }
 
-    func appendPayload(
+    private func appendRawPayload(
         name: String,
         buffer: MTLBuffer,
         elementCount: Int,
-        shape: [Int]
+        shape: [Int],
+        dtype: String,
+        bytesPerElement: Int
     ) throws {
         guard !payloads.contains(where: { $0.name == name }) else {
             throw AnimapkError.validation("duplicate Oracle E payload \(name)")
         }
         guard elementCount > 0,
+              bytesPerElement > 0,
               shape.allSatisfy({ $0 > 0 }),
               shape.reduce(1, *) == elementCount else {
             throw AnimapkError.validation("Oracle E payload \(name) has invalid shape")
         }
-        let byteCount = elementCount * MemoryLayout<Float>.stride
+        let byteCount = elementCount * bytesPerElement
         guard buffer.length >= byteCount else {
             throw AnimapkError.validation("Oracle E payload \(name) buffer is too small")
         }
@@ -158,8 +175,50 @@ final class OracleEDeviceCaptureWriter {
             offset: offset,
             byteCount: byteCount,
             elementCount: elementCount,
-            dtype: "float32-le",
+            dtype: dtype,
             shape: shape))
+    }
+
+    func appendPayload(
+        name: String,
+        buffer: MTLBuffer,
+        elementCount: Int,
+        shape: [Int]
+    ) throws {
+        try appendRawPayload(
+            name: name, buffer: buffer, elementCount: elementCount, shape: shape,
+            dtype: "float32-le", bytesPerElement: MemoryLayout<Float>.stride)
+    }
+
+    func appendHalfPayload(
+        name: String,
+        buffer: MTLBuffer,
+        elementCount: Int,
+        shape: [Int]
+    ) throws {
+        try appendRawPayload(
+            name: name, buffer: buffer, elementCount: elementCount, shape: shape,
+            dtype: "float16-le", bytesPerElement: MemoryLayout<Float16>.stride)
+    }
+
+    /// Capture the fixed block-0 self-attention seam used by Oracle E2. All
+    /// large tensors are token-major [1024,2048]. The modulation vector is FP32;
+    /// projection/ANE/attention surfaces are FP16 exactly as on the A12 path.
+    func captureStage(step: Int, block: Int, stage: String, tensor: MTLBuffer) throws {
+        guard step == 0, block == 0 else { return }
+        let name = "stage_b00_" + stage.replacingOccurrences(of: ".", with: "_")
+        switch stage {
+        case "self.modulation":
+            try appendPayload(
+                name: name, buffer: tensor, elementCount: 6_144, shape: [6_144])
+        case "self.projection_input", "self.q_raw", "self.k_raw", "self.v_raw",
+             "self.q_post_rope", "self.k_post_rope", "self.attended", "self.branch":
+            try appendHalfPayload(
+                name: name, buffer: tensor,
+                elementCount: Self.residualElements, shape: [1_024, 2_048])
+        default:
+            throw AnimapkError.validation("unknown Oracle E block-0 stage \(stage)")
+        }
     }
 
     func captureBranch(step: Int, block: Int, branch: String, residual: MTLBuffer) throws {
@@ -294,6 +353,8 @@ final class OracleEDeviceCaptureWriter {
             sampling: "flatten token-major FP32 residual; stride=max(1,numel//65536); first 65536 values",
             expectedStep0Checkpoints: 84,
             completedStep0Checkpoints: checkpoints.count,
+            expectedBlock0StagePayloads: Self.block0StagePayloadNames.count,
+            completedBlock0StagePayloads: payloads.filter { Self.block0StagePayloadNames.contains($0.name) }.count,
             payloads: payloads,
             checkpoints: checkpoints)
 
@@ -464,6 +525,9 @@ struct OracleEDeviceCaptureRunner {
                         if step == 0 && block == 27 && branch == "mlp" {
                             throw OracleEDeviceCaptureControl.step0Complete
                         }
+                    },
+                    diagnosticStageCompleted: { step, block, stage, tensor in
+                        try writer.captureStage(step: step, block: block, stage: stage, tensor: tensor)
                     })
                 throw AnimapkError.validation(
                     "Oracle E diagnostic unexpectedly completed full diffusion")

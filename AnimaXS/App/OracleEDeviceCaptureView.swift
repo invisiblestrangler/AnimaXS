@@ -175,7 +175,7 @@ private struct OracleEDeviceCaptureSheet: View {
                 models: models,
                 outputURL: destination)
             captureURL = url
-            captureStatus = "PASS: prepared state + 84/84 step-0 branch checkpoints captured. Share the .oraclee file for comparison."
+            captureStatus = "PASS: prepared state + 9/9 block-0 self substages + 84/84 step-0 branch checkpoints captured. Share the .oraclee file for comparison."
         } catch {
             captureStatus = "FAILED: \(error.localizedDescription)"
         }

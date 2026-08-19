@@ -13,8 +13,11 @@ on:
       - scripts/run_ane_oracle_e.sh
       - scripts/ane_oracle_e_unpack_device_capture.py
       - scripts/ane_oracle_e_compare.py
+      - scripts/ane_oracle_e_compare_stages.py
+      - scripts/run_ane_oracle_e_512_sourceprep_control.sh
       - scripts/tests/test_ane_oracle_e_pack_reference.py
       - scripts/tests/test_ane_oracle_e_capture_compare.py
+      - scripts/tests/test_ane_oracle_e_compare_stages.py
   workflow_dispatch:
 
 permissions:
@@ -45,10 +48,13 @@ jobs:
             scripts/ane_oracle_e_patch_v2_runner.py \
             scripts/ane_oracle_e_unpack_device_capture.py \
             scripts/ane_oracle_e_compare.py \
+            scripts/ane_oracle_e_compare_stages.py \
             scripts/tests/test_ane_oracle_e_pack_reference.py \
             scripts/tests/test_ane_oracle_e_capture_compare.py \
+            scripts/tests/test_ane_oracle_e_compare_stages.py \
             > out/compile.txt 2>&1 \
-            && bash -n scripts/run_ane_oracle_e.sh > out/shell.txt 2>&1; then
+            && bash -n scripts/run_ane_oracle_e.sh \
+               scripts/run_ane_oracle_e_512_sourceprep_control.sh > out/shell.txt 2>&1; then
             echo PASS > out/COMPILE_STATUS.txt
           else
             rc=$?
@@ -63,6 +69,7 @@ jobs:
           if python -m unittest \
             scripts.tests.test_ane_oracle_e_pack_reference \
             scripts.tests.test_ane_oracle_e_capture_compare \
+            scripts.tests.test_ane_oracle_e_compare_stages \
             -v > out/unit.txt 2>&1; then
             echo PASS > out/STATUS.txt
           else
