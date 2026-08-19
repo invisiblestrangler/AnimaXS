@@ -6,9 +6,11 @@ set -euo pipefail
 #   run_ane_oracle_e.sh WORK_ROOT E1_native_ane /path/to/exact.animapk [run_id]
 #   run_ane_oracle_e.sh WORK_ROOT E2_device_residual /path/to/exact.animapk [run_id]
 #
-# WORK_ROOT must contain the successful Oracle-V2 02_run_source.py, ComfyUI,
-# reconstructed checkpoint, and A1 initial_noise.safetensors.  This script does
-# not redownload/rebuild those assets and never edits the original V2 runner.
+# Optional device-parity override:
+#   ANIMA_ORACLE_E_DEVICE_DIR=/path/to/prepared-device-inputs ...
+# where that directory contains `initial_noise.safetensors` and
+# `cross_context.f32`. Without it, the successful V2 A1 noise/conditioning are
+# retained for the clean D -> E1 -> E2 scientific controls.
 
 if [[ $# -lt 3 || $# -gt 4 ]]; then
   echo "usage: $0 WORK_ROOT MODE PACK_PATH [RUN_ID]" >&2
@@ -20,6 +22,7 @@ MODE="$2"
 PACK_PATH="$(realpath "$3")"
 RUN_ID="${4:-${MODE}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEVICE_DIR="${ANIMA_ORACLE_E_DEVICE_DIR:-}"
 
 case "$MODE" in
   E1_native_ane|E2_device_residual) ;;
@@ -28,11 +31,26 @@ esac
 
 V2_RUNNER="$WORK_ROOT/02_run_source.py"
 COMFY="$WORK_ROOT/ComfyUI"
-NOISE="$WORK_ROOT/runs/A1_gold_capture/initial_noise.safetensors"
+A1_NOISE="$WORK_ROOT/runs/A1_gold_capture/initial_noise.safetensors"
 [[ -f "$V2_RUNNER" ]] || { echo "missing V2 runner: $V2_RUNNER" >&2; exit 1; }
 [[ -d "$COMFY/custom_nodes" ]] || { echo "missing ComfyUI custom_nodes: $COMFY/custom_nodes" >&2; exit 1; }
-[[ -f "$NOISE" ]] || { echo "missing exact A1 noise: $NOISE" >&2; exit 1; }
+[[ -f "$A1_NOISE" ]] || { echo "missing exact A1 noise: $A1_NOISE" >&2; exit 1; }
 [[ -f "$PACK_PATH" ]] || { echo "missing ANIMAPK: $PACK_PATH" >&2; exit 1; }
+
+NOISE="$A1_NOISE"
+CROSS_CONTEXT=""
+INPUT_MODE="oracle_v2_a1"
+if [[ -n "$DEVICE_DIR" ]]; then
+  DEVICE_DIR="$(cd "$DEVICE_DIR" && pwd)"
+  NOISE="$DEVICE_DIR/initial_noise.safetensors"
+  CROSS_CONTEXT="$DEVICE_DIR/cross_context.f32"
+  [[ -f "$NOISE" ]] || { echo "missing prepared device noise: $NOISE" >&2; exit 1; }
+  [[ -f "$CROSS_CONTEXT" ]] || { echo "missing device cross context: $CROSS_CONTEXT" >&2; exit 1; }
+  [[ "$(stat -c %s "$CROSS_CONTEXT")" == "2097152" ]] || {
+    echo "device cross context must be exactly 512*1024*4 bytes" >&2; exit 1;
+  }
+  INPUT_MODE="device_override"
+fi
 
 EXPECTED_PACK_SHA="f5c80a25114b62a6807996180d439c5d12828d7392c604e1eee15acb28977dc4"
 EXPECTED_PACK_BYTES="2128838656"
@@ -45,9 +63,9 @@ ACTUAL_SHA="$(sha256sum "$PACK_PATH" | awk '{print $1}')"
   echo "pack sha256 mismatch: $ACTUAL_SHA != $EXPECTED_PACK_SHA" >&2; exit 1;
 }
 
-# Avoid loading the V2 arm node alongside E.  It globally wraps sampler noise
-# and VAE hooks at import time even when its graph node is not selected.  Move
-# only packages that actually advertise AnimaOracleArm; restore them on exit.
+# Avoid loading the V2 arm node alongside E. It installs global wrappers at
+# import time. Move only packages that actually advertise AnimaOracleArm and
+# restore them on exit.
 DISABLED="$WORK_ROOT/.oracle_e_disabled_custom_nodes"
 mkdir -p "$DISABLED"
 RESTORE_LIST="$DISABLED/restore.tsv"
@@ -77,7 +95,8 @@ trap restore_nodes EXIT
 E_NODE="$COMFY/custom_nodes/anima_oracle_e"
 rm -rf "$E_NODE"
 mkdir -p "$E_NODE"
-cp "$SCRIPT_DIR/ane_oracle_e_custom_node.py" "$E_NODE/__init__.py"
+cp "$SCRIPT_DIR/ane_oracle_e_package_init.py" "$E_NODE/__init__.py"
+cp "$SCRIPT_DIR/ane_oracle_e_custom_node.py" "$E_NODE/ane_oracle_e_custom_node.py"
 cp "$SCRIPT_DIR/ane_oracle_e_pack_reference.py" "$E_NODE/ane_oracle_e_pack_reference.py"
 
 PATCHED_RUNNER="$WORK_ROOT/02_run_oracle_e.py"
@@ -92,10 +111,16 @@ export ANIMA_ORACLE_E_NOISE_MODE="load"
 export ANIMA_ORACLE_E_NOISE_FILE="$NOISE"
 export ANIMA_ORACLE_E_SAMPLE_COUNT="65536"
 export ANIMA_ORACLE_E_OUTPUT_ROW_CHUNK="256"
+if [[ -n "$CROSS_CONTEXT" ]]; then
+  export ANIMA_ORACLE_E_CROSS_CONTEXT="$CROSS_CONTEXT"
+else
+  unset ANIMA_ORACLE_E_CROSS_CONTEXT || true
+fi
 
 {
   echo "mode=$MODE"
   echo "run_id=$RUN_ID"
+  echo "input_mode=$INPUT_MODE"
   echo "work_root=$WORK_ROOT"
   echo "v2_runner=$V2_RUNNER"
   echo "patched_runner=$PATCHED_RUNNER"
@@ -103,10 +128,11 @@ export ANIMA_ORACLE_E_OUTPUT_ROW_CHUNK="256"
   echo "pack_bytes=$ACTUAL_BYTES"
   echo "pack_sha256=$ACTUAL_SHA"
   echo "noise=$NOISE"
+  echo "cross_context=${CROSS_CONTEXT:-oracle_v2_pipeline}"
   echo "repo_or_bundle_script_dir=$SCRIPT_DIR"
 } > "$RUN_DIR/ORACLE_E_PROVENANCE.txt"
 
-# The V2 runner's reconstructed-model branch is deliberately retained.  Its
+# The V2 runner's reconstructed-model branch is deliberately retained. Its
 # proven graph/prompt/sampler/download logic is unchanged apart from the two
 # guarded patch anchors.
 python "$PATCHED_RUNNER" \
