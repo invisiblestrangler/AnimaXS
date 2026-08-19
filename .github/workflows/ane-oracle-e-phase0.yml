@@ -9,14 +9,6 @@ on:
       - scripts/ane_oracle_e_weight_audit.py
       - scripts/pack_anima.py
       - scripts/tests/test_ane_pack_profile.py
-  pull_request:
-    branches:
-      - main
-    paths:
-      - .github/workflows/ane-oracle-e-phase0.yml
-      - scripts/ane_oracle_e_weight_audit.py
-      - scripts/pack_anima.py
-      - scripts/tests/test_ane_pack_profile.py
   workflow_dispatch:
 
 permissions:
@@ -178,7 +170,6 @@ jobs:
           echo 'provenance and checksums completed' > out/STAGE_06_PROVENANCE_OK.txt
 
       - name: Publish small Phase 0 evidence to Hugging Face
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -202,6 +193,10 @@ jobs:
             exit 1
           fi
 
+      - name: Record final disk state
+        if: always()
+        run: df -h > out/FINAL_DISK.txt
+
       - name: Upload Phase 0 evidence artifact
         if: always()
         uses: actions/upload-artifact@v7
@@ -210,7 +205,3 @@ jobs:
           retention-days: 14
           path: out/
           if-no-files-found: error
-
-      - name: Final disk report artifact
-        if: always()
-        run: df -h > out/FINAL_DISK.txt
