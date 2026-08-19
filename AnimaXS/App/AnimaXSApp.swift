@@ -7,13 +7,7 @@ struct AnimaXSApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
-                #if DEBUG
-                .overlay(alignment: .topLeading) {
-                    OracleEDeviceCaptureLauncher()
-                        .padding(.top, 8)
-                        .padding(.leading, 12)
-                }
-                #endif
+                .oracleEDebugOverlay()
                 .onChange(of: scenePhase) { _, phase in
                     switch phase {
                     case .background, .inactive:
