@@ -8,16 +8,17 @@ set -euo pipefail
 #
 # Optional physical-device parity override:
 #   ANIMA_ORACLE_E_DEVICE_DIR=/path/to/unpacked-device-capture ...
-# The directory must contain:
+# The directory must come from `ane_oracle_e_unpack_device_capture.py` and contain:
+#   device_manifest.json
+#   initial_noise.safetensors
 #   cross_context.f32
 #   prepared_residual.f32
 #   prepared_embedding.f32
 #   prepared_adaln_lora.f32
 #
-# The exact A1 noise remains the V2 runner input even in device mode because
-# E2 replaces the complete step-0 block-entry state before block 0. The raw A12
-# initial latent remains in the `.oraclee` bundle for provenance/preparation
-# analysis, but it is not needed to localize the 28 hybrid blocks.
+# Device mode is deliberately 512x512 / 1024 DiT tokens, matching the physical
+# AnimaXS XS Max lane. Ordinary D->E controls retain Oracle V2's 1024x1024
+# geometry because the width/height override is exported only in device mode.
 
 if [[ $# -lt 3 || $# -gt 4 ]]; then
   echo "usage: $0 WORK_ROOT MODE PACK_PATH [RUN_ID]" >&2
@@ -38,10 +39,11 @@ esac
 
 V2_RUNNER="$WORK_ROOT/02_run_source.py"
 COMFY="$WORK_ROOT/ComfyUI"
+VENV_PY="$WORK_ROOT/venv/bin/python"
 A1_NOISE="$WORK_ROOT/runs/A1_gold_capture/initial_noise.safetensors"
 [[ -f "$V2_RUNNER" ]] || { echo "missing V2 runner: $V2_RUNNER" >&2; exit 1; }
 [[ -d "$COMFY/custom_nodes" ]] || { echo "missing ComfyUI custom_nodes: $COMFY/custom_nodes" >&2; exit 1; }
-[[ -f "$A1_NOISE" ]] || { echo "missing exact A1 noise: $A1_NOISE" >&2; exit 1; }
+[[ -x "$VENV_PY" ]] || { echo "missing Oracle V2 Python environment: $VENV_PY" >&2; exit 1; }
 [[ -f "$PACK_PATH" ]] || { echo "missing ANIMAPK: $PACK_PATH" >&2; exit 1; }
 
 NOISE="$A1_NOISE"
@@ -49,13 +51,23 @@ CROSS_CONTEXT=""
 PREPARED_RESIDUAL=""
 PREPARED_EMBEDDING=""
 PREPARED_ADALN=""
+DEVICE_WIDTH=""
+DEVICE_HEIGHT=""
+DEVICE_TOKENS=""
 INPUT_MODE="oracle_v2_a1"
 if [[ -n "$DEVICE_DIR" ]]; then
   DEVICE_DIR="$(cd "$DEVICE_DIR" && pwd)"
+  DEVICE_MANIFEST="$DEVICE_DIR/device_manifest.json"
+  NOISE="$DEVICE_DIR/initial_noise.safetensors"
   CROSS_CONTEXT="$DEVICE_DIR/cross_context.f32"
   PREPARED_RESIDUAL="$DEVICE_DIR/prepared_residual.f32"
   PREPARED_EMBEDDING="$DEVICE_DIR/prepared_embedding.f32"
   PREPARED_ADALN="$DEVICE_DIR/prepared_adaln_lora.f32"
+
+  for path in "$DEVICE_MANIFEST" "$NOISE" "$CROSS_CONTEXT" "$PREPARED_RESIDUAL" "$PREPARED_EMBEDDING" "$PREPARED_ADALN"; do
+    [[ -f "$path" ]] || { echo "missing Oracle E device parity input: $path" >&2; exit 1; }
+  done
+
   declare -A EXPECTED_BYTES=(
     ["$CROSS_CONTEXT"]="2097152"
     ["$PREPARED_RESIDUAL"]="8388608"
@@ -63,7 +75,6 @@ if [[ -n "$DEVICE_DIR" ]]; then
     ["$PREPARED_ADALN"]="24576"
   )
   for path in "$CROSS_CONTEXT" "$PREPARED_RESIDUAL" "$PREPARED_EMBEDDING" "$PREPARED_ADALN"; do
-    [[ -f "$path" ]] || { echo "missing Oracle E device payload: $path" >&2; exit 1; }
     actual="$(stat -c %s "$path")"
     expected="${EXPECTED_BYTES[$path]}"
     [[ "$actual" == "$expected" ]] || {
@@ -71,7 +82,32 @@ if [[ -n "$DEVICE_DIR" ]]; then
       exit 1
     }
   done
+
+  read -r DEVICE_WIDTH DEVICE_HEIGHT DEVICE_TOKENS < <(
+    "$VENV_PY" - "$DEVICE_MANIFEST" <<'PY'
+import json, sys
+from pathlib import Path
+m=json.loads(Path(sys.argv[1]).read_text())
+print(int(m['generation_width']), int(m['generation_height']), int(m['dit_token_count']))
+PY
+  )
+  [[ "$DEVICE_WIDTH" == "512" && "$DEVICE_HEIGHT" == "512" && "$DEVICE_TOKENS" == "1024" ]] || {
+    echo "unexpected device geometry: ${DEVICE_WIDTH}x${DEVICE_HEIGHT}, tokens=${DEVICE_TOKENS}" >&2
+    exit 1
+  }
+  "$VENV_PY" - "$NOISE" <<'PY'
+import sys
+from safetensors.torch import load_file
+noise=load_file(sys.argv[1], device='cpu').get('noise')
+if noise is None:
+    raise SystemExit('device initial_noise.safetensors is missing tensor noise')
+if tuple(noise.shape) != (1,16,64,64):
+    raise SystemExit(f'device noise shape mismatch: {tuple(noise.shape)} != (1,16,64,64)')
+print('device noise gate PASS shape=(1,16,64,64)')
+PY
   INPUT_MODE="device_step0_override"
+else
+  [[ -f "$A1_NOISE" ]] || { echo "missing exact A1 noise: $A1_NOISE" >&2; exit 1; }
 fi
 
 EXPECTED_PACK_SHA="f5c80a25114b62a6807996180d439c5d12828d7392c604e1eee15acb28977dc4"
@@ -140,11 +176,15 @@ if [[ -n "$CROSS_CONTEXT" ]]; then
   export ANIMA_ORACLE_E_PREPARED_RESIDUAL="$PREPARED_RESIDUAL"
   export ANIMA_ORACLE_E_PREPARED_EMBEDDING="$PREPARED_EMBEDDING"
   export ANIMA_ORACLE_E_PREPARED_ADALN_LORA="$PREPARED_ADALN"
+  export ANIMA_ORACLE_E_WIDTH="$DEVICE_WIDTH"
+  export ANIMA_ORACLE_E_HEIGHT="$DEVICE_HEIGHT"
 else
   unset ANIMA_ORACLE_E_CROSS_CONTEXT || true
   unset ANIMA_ORACLE_E_PREPARED_RESIDUAL || true
   unset ANIMA_ORACLE_E_PREPARED_EMBEDDING || true
   unset ANIMA_ORACLE_E_PREPARED_ADALN_LORA || true
+  unset ANIMA_ORACLE_E_WIDTH || true
+  unset ANIMA_ORACLE_E_HEIGHT || true
 fi
 
 {
@@ -158,6 +198,9 @@ fi
   echo "pack_bytes=$ACTUAL_BYTES"
   echo "pack_sha256=$ACTUAL_SHA"
   echo "noise=$NOISE"
+  echo "generation_width=${DEVICE_WIDTH:-oracle_v2_config}"
+  echo "generation_height=${DEVICE_HEIGHT:-oracle_v2_config}"
+  echo "dit_tokens=${DEVICE_TOKENS:-oracle_v2_config}"
   echo "cross_context=${CROSS_CONTEXT:-oracle_v2_pipeline}"
   echo "prepared_residual=${PREPARED_RESIDUAL:-oracle_v2_pipeline}"
   echo "prepared_embedding=${PREPARED_EMBEDDING:-oracle_v2_pipeline}"
@@ -166,10 +209,10 @@ fi
   echo "repo_or_bundle_script_dir=$SCRIPT_DIR"
 } > "$RUN_DIR/ORACLE_E_PROVENANCE.txt"
 
-# The two-anchor patched V2 runner intentionally receives a model exception
-# after block 27 MLP. A nonzero runner code is therefore expected. We accept it
-# ONLY when the custom node atomically produced both the complete 84-checkpoint
-# manifest and the explicit STEP0_COMPLETE sentinel file.
+# The patched V2 runner intentionally receives a model exception after block 27
+# MLP. A nonzero runner code is therefore expected. We accept it ONLY when the
+# custom node atomically produced both the complete 84-checkpoint manifest and
+# the explicit STEP0_COMPLETE sentinel file.
 set +e
 python "$PATCHED_RUNNER" \
   --run-id "$RUN_ID" \
