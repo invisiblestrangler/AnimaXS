@@ -12,14 +12,22 @@ import Metal
 /// - JSON manifest at the recorded tail offset
 ///
 /// Payloads include the exact device initial latent, exact device adapter cross
-/// context, and a deterministic 65,536-value FP32 sample after self/cross/MLP
-/// for all 28 DiT blocks at diffusion step 0.  The diagnostic deliberately
-/// stops immediately after block 27 MLP: no final layer, Euler update, later
-/// diffusion steps, or VAE are needed to localize A12-vs-Oracle-E divergence.
+/// context, the exact step-0 prepared residual/embedding/AdaLN-LoRA state, and
+/// a deterministic 65,536-value FP32 sample after self/cross/MLP for all 28 DiT
+/// blocks at diffusion step 0. The diagnostic deliberately stops immediately
+/// after block 27 MLP: no final layer, Euler update, later diffusion steps, or
+/// VAE are needed to localize A12-vs-Oracle-E divergence.
 final class OracleEDeviceCaptureWriter {
     static let sampleCount = 65_536
     static let residualElements = 1_024 * 2_048
     static let headerBytes = 64
+    static let requiredCompletedPayloadNames: Set<String> = [
+        "initial_latent",
+        "cross_context",
+        "prepared_residual",
+        "prepared_embedding",
+        "prepared_adaln_lora",
+    ]
 
     struct PayloadRecord: Codable {
         let name: String
@@ -69,6 +77,7 @@ final class OracleEDeviceCaptureWriter {
         let numericalMonitoring: Bool
         let conditioningSource: String
         let initialLatentSource: String
+        let preparedStateSource: String
         let sampleCountTarget: Int
         let sampling: String
         let expectedStep0Checkpoints: Int
@@ -130,6 +139,14 @@ final class OracleEDeviceCaptureWriter {
         elementCount: Int,
         shape: [Int]
     ) throws {
+        guard !payloads.contains(where: { $0.name == name }) else {
+            throw AnimapkError.validation("duplicate Oracle E payload \(name)")
+        }
+        guard elementCount > 0,
+              shape.allSatisfy({ $0 > 0 }),
+              shape.reduce(1, *) == elementCount else {
+            throw AnimapkError.validation("Oracle E payload \(name) has invalid shape")
+        }
         let byteCount = elementCount * MemoryLayout<Float>.stride
         guard buffer.length >= byteCount else {
             throw AnimapkError.validation("Oracle E payload \(name) buffer is too small")
@@ -247,9 +264,17 @@ final class OracleEDeviceCaptureWriter {
     @discardableResult
     func finish(status: String, error: String? = nil) throws -> URL {
         guard !didFinish else { return url }
-        if status == "completed" && checkpoints.count != 84 {
-            throw AnimapkError.validation(
-                "Oracle E capture incomplete: \(checkpoints.count)/84 checkpoints")
+        if status == "completed" {
+            guard checkpoints.count == 84 else {
+                throw AnimapkError.validation(
+                    "Oracle E capture incomplete: \(checkpoints.count)/84 checkpoints")
+            }
+            let payloadNames = Set(payloads.map(\.name))
+            let missing = Self.requiredCompletedPayloadNames.subtracting(payloadNames)
+            guard missing.isEmpty else {
+                throw AnimapkError.validation(
+                    "Oracle E capture missing payloads: \(missing.sorted().joined(separator: ", "))")
+            }
         }
         let manifest = Manifest(
             schema: 1,
@@ -264,6 +289,7 @@ final class OracleEDeviceCaptureWriter {
             numericalMonitoring: optimization.numericalMonitoring,
             conditioningSource: "device Qwen + device LLM adapter FP32 cross-context",
             initialLatentSource: "device SeededRNG(seed:)",
+            preparedStateSource: "device DiTPreparationExecutor at diffusion step 0",
             sampleCountTarget: Self.sampleCount,
             sampling: "flatten token-major FP32 residual; stride=max(1,numel//65536); first 65536 values",
             expectedStep0Checkpoints: 84,
@@ -413,6 +439,24 @@ struct OracleEDeviceCaptureRunner {
                     crossContext: cross,
                     outputLatent: unusedOutput,
                     startStep: 0,
+                    diagnosticStepPrepared: { step, residual, embedding, adalnLora, _, _ in
+                        guard step == 0 else { return }
+                        try writer.appendPayload(
+                            name: "prepared_residual",
+                            buffer: residual,
+                            elementCount: DiTPreparationExecutor.tokens * DiTPreparationExecutor.hidden,
+                            shape: [DiTPreparationExecutor.tokens, DiTPreparationExecutor.hidden])
+                        try writer.appendPayload(
+                            name: "prepared_embedding",
+                            buffer: embedding,
+                            elementCount: DiTPreparationExecutor.hidden,
+                            shape: [DiTPreparationExecutor.hidden])
+                        try writer.appendPayload(
+                            name: "prepared_adaln_lora",
+                            buffer: adalnLora,
+                            elementCount: DiTPreparationExecutor.adaln,
+                            shape: [DiTPreparationExecutor.adaln])
+                    },
                     diagnosticBranchFilter: { step, _ in step == 0 },
                     diagnosticBranchCompleted: { step, block, branch, residual in
                         try writer.captureBranch(
