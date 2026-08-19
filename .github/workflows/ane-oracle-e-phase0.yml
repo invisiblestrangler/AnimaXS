@@ -39,6 +39,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Initialize artifact diagnostics
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          printf 'run_id=%s\nhead=%s\nevent=%s\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_SHA" "$GITHUB_EVENT_NAME" > out/STAGE_00_STARTED.txt
+
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -48,16 +55,22 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          python -m pip install numpy safetensors huggingface_hub
+          python -m pip install numpy safetensors huggingface_hub hf_xet
           python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python - <<'PY' > out/STAGE_01_DEPS_OK.txt
+          import numpy, safetensors, torch, huggingface_hub
+          print('numpy=' + numpy.__version__)
+          print('safetensors=' + safetensors.__version__)
+          print('torch=' + torch.__version__)
+          print('huggingface_hub=' + huggingface_hub.__version__)
+          PY
 
       - name: Enumerate Oracle V2 and D evidence on Hugging Face
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
-          [ -n "${HF_TOKEN:-}" ] || { echo "::error::HF_TOKEN secret is missing"; exit 1; }
-          mkdir -p out
+          [ -n "${HF_TOKEN:-}" ] || { echo 'HF_TOKEN secret is missing' > out/STAGE_02_ENUM_FAILED.txt; exit 1; }
           python - <<'PY'
           import os
           from pathlib import Path
@@ -70,45 +83,77 @@ jobs:
           d = [p for p in all_files if p.startswith(os.environ['ORACLE_D_PREFIX'] + '/')]
           Path('out/ORACLE_V2_FILE_LIST.txt').write_text('\n'.join(v2) + '\n')
           Path('out/ORACLE_D_FILE_LIST.txt').write_text('\n'.join(d) + '\n')
-          print(f'Oracle V2 files under prefix: {len(v2)}')
-          print(f'Oracle D files: {len(d)}')
-          for p in d:
-              print(p)
           if not d:
-              raise SystemExit('Oracle D prefix resolved to zero files')
+              Path('out/STAGE_02_ENUM_FAILED.txt').write_text('Oracle D prefix resolved to zero files\n')
+              raise SystemExit(1)
+          Path('out/STAGE_02_ENUM_OK.txt').write_text(
+              f'oracle_v2_files={len(v2)}\noracle_d_files={len(d)}\n')
           PY
 
-      - name: Download exact pinned source weights
+      - name: Download and verify exact pinned source weights
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
           source_dir="$RUNNER_TEMP/anima-source"
           mkdir -p "$source_dir"
-          source="$source_dir/anima-turbo-v1.0.safetensors"
-          source_url="https://huggingface.co/${ANIMA_SOURCE_REPO}/resolve/${ANIMA_SOURCE_REVISION}/${ANIMA_SOURCE_FILE}?download=true"
-          curl --fail --location --retry 3 --retry-all-errors --progress-bar \
-            -H "Authorization: Bearer ${HF_TOKEN}" \
-            -o "$source" "$source_url"
-          echo "${ANIMA_SOURCE_SHA256}  ${source}" | sha256sum --check
-          echo "SOURCE=${source}" >> "$GITHUB_ENV"
-          df -h
+          export SOURCE_DIR="$source_dir"
+          if ! python - <<'PY' > out/source_download.txt 2>&1
+          import os
+          from pathlib import Path
+          from huggingface_hub import hf_hub_download
+
+          path = hf_hub_download(
+              repo_id=os.environ['ANIMA_SOURCE_REPO'],
+              filename=os.environ['ANIMA_SOURCE_FILE'],
+              revision=os.environ['ANIMA_SOURCE_REVISION'],
+              repo_type='model',
+              token=os.environ.get('HF_TOKEN'),
+              local_dir=os.environ['SOURCE_DIR'],
+          )
+          Path('out/SOURCE_PATH.txt').write_text(str(Path(path).resolve()) + '\n')
+          print(path)
+          PY
+          then
+            { echo 'hf_hub_download failed'; tail -n 120 out/source_download.txt; } > out/STAGE_03_SOURCE_FAILED.txt
+            exit 1
+          fi
+          source="$(cat out/SOURCE_PATH.txt)"
+          actual="$(sha256sum "$source" | awk '{print $1}')"
+          if [ "$actual" != "$ANIMA_SOURCE_SHA256" ]; then
+            printf 'sha256 mismatch\nexpected=%s\nactual=%s\n' "$ANIMA_SOURCE_SHA256" "$actual" > out/STAGE_03_SOURCE_FAILED.txt
+            exit 1
+          fi
+          printf 'source=%s\nbytes=%s\nsha256=%s\n' \
+            "$source" "$(stat -c %s "$source")" "$actual" > out/STAGE_03_SOURCE_OK.txt
+          echo "SOURCE=$source" >> "$GITHUB_ENV"
 
       - name: Verify ANE pack contract tests
         run: |
           set -euo pipefail
-          python -m unittest scripts.tests.test_ane_pack_profile -v
+          if python -m unittest scripts.tests.test_ane_pack_profile -v > out/contract_tests.txt 2>&1; then
+            echo 'contract tests passed' > out/STAGE_04_CONTRACT_OK.txt
+          else
+            { echo 'contract tests failed'; tail -n 160 out/contract_tests.txt; } > out/STAGE_04_CONTRACT_FAILED.txt
+            exit 1
+          fi
 
       - name: Audit all 280 ANE-native projections against legacy W8
         run: |
           set -euo pipefail
-          python scripts/ane_oracle_e_weight_audit.py \
+          if python scripts/ane_oracle_e_weight_audit.py \
             --source "$SOURCE" \
             --out-dir out \
             --row-chunk 128 \
             --source-sha256 "$ANIMA_SOURCE_SHA256" \
             --source-repo "$ANIMA_SOURCE_REPO" \
-            --source-revision "$ANIMA_SOURCE_REVISION"
+            --source-revision "$ANIMA_SOURCE_REVISION" \
+            > out/audit_stdout.txt 2>&1; then
+            echo '280-tensor audit completed' > out/STAGE_05_AUDIT_OK.txt
+          else
+            { echo 'weight audit failed'; tail -n 200 out/audit_stdout.txt; } > out/STAGE_05_AUDIT_FAILED.txt
+            exit 1
+          fi
 
       - name: Write provenance and checksums
         run: |
@@ -130,7 +175,7 @@ jobs:
           PY
           } > out/PROVENANCE.txt
           (cd out && sha256sum * > SHA256SUMS)
-          cat out/ANE_ORACLE_E_WEIGHT_AUDIT.md
+          echo 'provenance and checksums completed' > out/STAGE_06_PROVENANCE_OK.txt
 
       - name: Publish small Phase 0 evidence to Hugging Face
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -138,7 +183,7 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
-          python - <<'PY'
+          if python - <<'PY' > out/publish_stdout.txt 2>&1
           import os
           from huggingface_hub import HfApi
           api = HfApi(token=os.environ['HF_TOKEN'])
@@ -149,8 +194,13 @@ jobs:
               path_in_repo=os.environ['ORACLE_E_PREFIX'],
               commit_message='Add ANE Oracle E phase 0 weight audit',
           )
-          print('Published to ' + os.environ['ORACLE_REPO'] + '/' + os.environ['ORACLE_E_PREFIX'])
           PY
+          then
+            echo 'published Phase 0 evidence to Hugging Face' > out/STAGE_07_PUBLISH_OK.txt
+          else
+            { echo 'Hugging Face publish failed'; tail -n 120 out/publish_stdout.txt; } > out/STAGE_07_PUBLISH_FAILED.txt
+            exit 1
+          fi
 
       - name: Upload Phase 0 evidence artifact
         if: always()
@@ -158,14 +208,9 @@ jobs:
         with:
           name: ane-oracle-e-phase0
           retention-days: 14
-          path: |
-            out/*.json
-            out/*.csv
-            out/*.md
-            out/*.txt
-            out/SHA256SUMS
-          if-no-files-found: warn
+          path: out/
+          if-no-files-found: error
 
-      - name: Final disk report
+      - name: Final disk report artifact
         if: always()
-        run: df -h
+        run: df -h > out/FINAL_DISK.txt
