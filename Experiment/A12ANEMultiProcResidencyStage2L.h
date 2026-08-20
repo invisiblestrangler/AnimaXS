@@ -145,8 +145,76 @@ static inline id A12S2LLoadTenProcedureModel(
 
     BOOL cacheHit = [memoryModel respondsToSelector:NSSelectorFromString(@"compiledModelExists")]
         ? ((BOOL(*)(id,SEL))objc_msgSend)(memoryModel, NSSelectorFromString(@"compiledModelExists")) : NO;
+    NSString *localPath = [memoryModel respondsToSelector:NSSelectorFromString(@"localModelPath")]
+        ? ((id(*)(id,SEL))objc_msgSend)(memoryModel, NSSelectorFromString(@"localModelPath")) : nil;
     double compileMS = 0.0;
     if (!cacheHit) {
+        if (![localPath isKindOfClass:NSString.class] || localPath.length == 0) {
+            [lines addObject:[NSString stringWithFormat:
+                @"%@ materialize=FAIL stage=localModelPath", label]];
+            return nil;
+        }
+
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSError *ioError = nil;
+        if (![fm createDirectoryAtPath:localPath
+            withIntermediateDirectories:YES attributes:nil error:&ioError]) {
+            [lines addObject:[NSString stringWithFormat:
+                @"%@ materialize=FAIL stage=create-dir error=%@ path=%@",
+                label, A12S2Error(ioError), localPath]];
+            return nil;
+        }
+
+        NSString *netPath = [localPath stringByAppendingPathComponent:@"net.plist"];
+        if (![netData writeToFile:netPath options:NSDataWritingAtomic error:&ioError]) {
+            [lines addObject:[NSString stringWithFormat:
+                @"%@ materialize=FAIL stage=net-plist error=%@ path=%@",
+                label, A12S2Error(ioError), netPath]];
+            return nil;
+        }
+
+        NSUInteger writtenFiles = 0;
+        uint64_t writtenBytes = 0;
+        for (NSString *name in weights) {
+            NSDictionary *entry = [weights[name] isKindOfClass:NSDictionary.class]
+                ? weights[name] : nil;
+            NSData *data = [entry[@"data"] isKindOfClass:NSData.class]
+                ? entry[@"data"] : nil;
+            if (!data) {
+                [lines addObject:[NSString stringWithFormat:
+                    @"%@ materialize=FAIL stage=weight-data weight=%@", label, name]];
+                return nil;
+            }
+
+            NSString *weightPath = [localPath stringByAppendingPathComponent:name];
+            ioError = nil;
+            if (![data writeToFile:weightPath options:NSDataWritingAtomic error:&ioError]) {
+                [lines addObject:[NSString stringWithFormat:
+                    @"%@ materialize=FAIL stage=weight-write weight=%@ error=%@ path=%@",
+                    label, name, A12S2Error(ioError), weightPath]];
+                return nil;
+            }
+
+            ioError = nil;
+            NSDictionary *attributes = [fm attributesOfItemAtPath:weightPath error:&ioError];
+            NSNumber *size = [attributes[NSFileSize] isKindOfClass:NSNumber.class]
+                ? attributes[NSFileSize] : nil;
+            if (!size || size.unsignedLongLongValue != (uint64_t)data.length) {
+                [lines addObject:[NSString stringWithFormat:
+                    @"%@ materialize=FAIL stage=weight-verify weight=%@ expected=%llu actual=%@ error=%@",
+                    label, name, (unsigned long long)data.length,
+                    size ?: @"missing", A12S2Error(ioError)]];
+                return nil;
+            }
+            ++writtenFiles;
+            writtenBytes += data.length;
+        }
+
+        [lines addObject:[NSString stringWithFormat:
+            @"%@ materialize=PASS cacheHit=no files=%lu bytes=%llu localPath=%@",
+            label, (unsigned long)writtenFiles,
+            (unsigned long long)writtenBytes, localPath]];
+
         NSError *compileError = nil;
         NSTimeInterval start = NSDate.timeIntervalSinceReferenceDate;
         BOOL compiled = ((BOOL(*)(id,SEL,unsigned int,id,NSError **))objc_msgSend)(
@@ -158,6 +226,10 @@ static inline id A12S2LLoadTenProcedureModel(
                 label, compileMS, A12S2Error(compileError)]];
             return nil;
         }
+    } else {
+        [lines addObject:[NSString stringWithFormat:
+            @"%@ materialize=SKIP cacheHit=yes localPath=%@",
+            label, localPath ?: @"(nil)"]];
     }
 
     NSError *loadError = nil;
