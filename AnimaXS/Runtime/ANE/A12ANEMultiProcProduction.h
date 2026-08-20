@@ -35,7 +35,7 @@ static inline BOOL A12MPBuildBlock(
     NSMutableDictionary *full10 = canonical ? A12S2JSplitQKV(canonical, detail) : nil;
     NSMutableDictionary *plist = full10 ? A12S2HSubset(
         full10, @[@0,@1,@2,@3,@4,@5,@6,@7,@8,@9], detail,
-        [NSString stringWithFormat:@"prod-mp-b%02lu-full10", (unsigned long)block]) : nil;
+        [NSString stringWithFormat:@"s2n-b%02lu-full10", (unsigned long)block]) : nil;
     NSArray<NSDictionary *> *donorMap = donors ? A12S2JDonorMap(donors) : nil;
     NSMutableDictionary *weights = [NSMutableDictionary dictionary];
     BOOL ok = plist && donorMap.count == 10 &&
