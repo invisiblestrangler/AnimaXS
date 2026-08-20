@@ -1,17 +1,14 @@
 name: Apply cache and 1024 patch
 
 on:
-  push:
-    branches: [experiment/ane-multiproc-production-ab]
-    paths:
-      - scripts/apply_cache_resolution_patch.py
-      - .github/workflows/apply-cache-resolution-patch.yml
+  pull_request:
 
 permissions:
   contents: write
 
 jobs:
   apply:
+    if: github.head_ref == 'experiment/ane-multiproc-production-ab'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
