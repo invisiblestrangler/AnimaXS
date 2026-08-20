@@ -11,7 +11,7 @@ struct AnimaXSApp: App {
         // ProcedureList, then test one real procedure and a two-procedure pair.
         // No prompt, diffusion, VAE, or image generation is involved.
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = A12ANETargetedRuntimeProbe() ?? "Stage 2F block0 probe returned nil"
+            let result = A12ANEStage2FProbe() ?? "Stage 2F block0 probe returned nil"
             print("\n========== ANIMAXS_ANE_BLOCK0_MULTIPROC_STAGE2F ==========\n\(result)\n===========================================================\n")
         }
         #endif
