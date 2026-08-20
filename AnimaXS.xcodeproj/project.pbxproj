@@ -34,6 +34,7 @@
 		2C3B1F704B3B393A65A60E8B /* Conv2048W8Template.bundle in Resources */ = {isa = PBXBuildFile; fileRef = 4434CD2A8D6583879C2F67BC /* Conv2048W8Template.bundle */; };
 		2F02983AD55700559562DA54 /* qwen_tokenizer.json in Resources */ = {isa = PBXBuildFile; fileRef = F28A65A79E0706DF0F0D5AB2 /* qwen_tokenizer.json */; };
 		30116E9CBC6BF3DBEA66C41E /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4C8E968875980A2C9ACC94E5 /* ContentView.swift */; };
+		31686B991108B7E509A351F7 /* OracleEDeviceCapture.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0D2B89E7913A0BA8BE3424B /* OracleEDeviceCapture.swift */; };
 		36CD88A5B125EC98797E0F65 /* case1_cond_context.f32 in Resources */ = {isa = PBXBuildFile; fileRef = FA91D9A84879D3562284E548 /* case1_cond_context.f32 */; };
 		36DCBB069B8AE8C6D90A5115 /* LinearExecutorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E00F7AC0D57A13E91CB5F434 /* LinearExecutorTests.swift */; };
 		39E8DABEEFA3A6A90A676118 /* VAENumerics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 81791F763E08B204F5010697 /* VAENumerics.swift */; };
@@ -81,6 +82,7 @@
 		96A3E7AC0E8DAFE6CAF9490A /* case1_decoded_rgb8.bin in Resources */ = {isa = PBXBuildFile; fileRef = 5679855EA2DD29C171356B8B /* case1_decoded_rgb8.bin */; };
 		9BB95C99C0CE9E2E635AB3D8 /* InferenceOptimizationConfigTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 00B768CB432E290374A2CB8A /* InferenceOptimizationConfigTests.swift */; };
 		9FFBC0EBD2D6A5BEE293A722 /* NumericalMonitorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F0FBCFD0D5556ED4202A14E /* NumericalMonitorTests.swift */; };
+		A14E984C6EFC4C11BE3DBC6A /* OracleEDeviceCaptureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DF91BCA3D5642931FDCE8BA /* OracleEDeviceCaptureView.swift */; };
 		A81536E00900A77262672E65 /* A12ANEBridge.m in Sources */ = {isa = PBXBuildFile; fileRef = 6775F1821B1EC813A10138D5 /* A12ANEBridge.m */; };
 		ABDB45E6553263148CA027AB /* Wan21LatentFormatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6223C8A55E7E942B28480E48 /* Wan21LatentFormatTests.swift */; };
 		ACF5E6ADE5026984036BFFEC /* QwenEncoderMetalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63A581535AFB0BECB025A73F /* QwenEncoderMetalTests.swift */; };
@@ -213,10 +215,12 @@
 		99DD442C7A3CCB6E47D0F488 /* EulerSampler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EulerSampler.swift; sourceTree = "<group>"; };
 		9D7829F4398EB3A23033ECD8 /* DiTFinalLayerExecutorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiTFinalLayerExecutorTests.swift; sourceTree = "<group>"; };
 		9DA452A409BF52C73769318E /* MappedFile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MappedFile.swift; sourceTree = "<group>"; };
+		9DF91BCA3D5642931FDCE8BA /* OracleEDeviceCaptureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OracleEDeviceCaptureView.swift; sourceTree = "<group>"; };
 		A109D17B6E3524E405A9B85B /* QwenEncoderMetal.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenEncoderMetal.swift; sourceTree = "<group>"; };
 		A6F117CCE3CBBF4E5ECAF4B1 /* GenerationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationCoordinator.swift; sourceTree = "<group>"; };
 		A7E9F272444BEB44115AC498 /* DiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsTests.swift; sourceTree = "<group>"; };
 		A9346A85EC2056315DFCE66D /* LinearExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LinearExecutor.swift; sourceTree = "<group>"; };
+		B0D2B89E7913A0BA8BE3424B /* OracleEDeviceCapture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OracleEDeviceCapture.swift; sourceTree = "<group>"; };
 		B55416DCCBC54FD863B0137D /* case1_noise.f32 */ = {isa = PBXFileReference; path = case1_noise.f32; sourceTree = "<group>"; };
 		B89A09F592DAF689C8D75745 /* GenerationMetricsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationMetricsTests.swift; sourceTree = "<group>"; };
 		BAA4F55FCC168791651401D2 /* DiagnosticsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagnosticsView.swift; sourceTree = "<group>"; };
@@ -318,6 +322,7 @@
 				4C8E968875980A2C9ACC94E5 /* ContentView.swift */,
 				BAA4F55FCC168791651401D2 /* DiagnosticsView.swift */,
 				2714360C288EDBEA95701D41 /* InferenceOptimizationSettings.swift */,
+				9DF91BCA3D5642931FDCE8BA /* OracleEDeviceCaptureView.swift */,
 			);
 			path = App;
 			sourceTree = "<group>";
@@ -493,6 +498,7 @@
 				D8D449E301EA6883835AE7CC /* DiagnosticsEngine.swift */,
 				4CAEA04E0522568EBC384E5A /* GenerationMetrics.swift */,
 				FFE9533852B9860844811FA0 /* NumericalMonitor.swift */,
+				B0D2B89E7913A0BA8BE3424B /* OracleEDeviceCapture.swift */,
 			);
 			path = Diagnostics;
 			sourceTree = "<group>";
@@ -766,6 +772,8 @@
 				CC5F144445E89AD37FF24021 /* Modulation.swift in Sources */,
 				210604DAFAC40536E7AAE5A6 /* NumericalFailure.swift in Sources */,
 				6E874BDB4B01378F8783A218 /* NumericalMonitor.swift in Sources */,
+				31686B991108B7E509A351F7 /* OracleEDeviceCapture.swift in Sources */,
+				A14E984C6EFC4C11BE3DBC6A /* OracleEDeviceCaptureView.swift in Sources */,
 				5506617DD3116BF72E8154BD /* QuantDecoders.swift in Sources */,
 				E8B287C14227EAB23ED6D5DB /* QwenEncoderCPU.swift in Sources */,
 				616ED86BCC3FCAA28CC25561 /* QwenEncoderMetal.swift in Sources */,

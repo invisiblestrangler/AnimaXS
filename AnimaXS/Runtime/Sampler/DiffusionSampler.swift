@@ -23,6 +23,9 @@ final class DiffusionSampler {
     typealias DiagnosticBranchCompleted = (
         _ step: Int, _ block: Int, _ branch: String, _ residual: MTLBuffer
     ) throws -> Void
+    typealias DiagnosticStageCompleted = (
+        _ step: Int, _ block: Int, _ stage: String, _ tensor: MTLBuffer
+    ) throws -> Void
 
     private let context: MetalContext
     private let preparation: DiTPreparationExecutor
@@ -160,7 +163,8 @@ final class DiffusionSampler {
         diagnosticStepPrepared: DiagnosticStepPrepared? = nil,
         diagnosticBlockCompleted: DiagnosticBlockCompleted? = nil,
         diagnosticBranchFilter: ((_ step: Int, _ block: Int) -> Bool)? = nil,
-        diagnosticBranchCompleted: DiagnosticBranchCompleted? = nil
+        diagnosticBranchCompleted: DiagnosticBranchCompleted? = nil,
+        diagnosticStageCompleted: DiagnosticStageCompleted? = nil
     ) async throws {
         try beginRun()
         defer { endRun() }
@@ -239,6 +243,8 @@ final class DiffusionSampler {
                 diagnosticBranchFilter?(step, block) ?? true
             }, diagnosticBranchCompleted: { block, branch, current in
                 try diagnosticBranchCompleted?(step, block, branch, current)
+            }, diagnosticStageCompleted: { block, stage, tensor in
+                try diagnosticStageCompleted?(step, block, stage, tensor)
             })
             try await forward.executeVelocityFinalLayer(
                 residual: residual, emb: embedding, adalnLora: adaln,

@@ -1,0 +1,253 @@
+name: ANE Oracle E Phase 0
+
+on:
+  push:
+    branches:
+      - agent/ane-oracle-e
+    paths:
+      - .github/workflows/ane-oracle-e-phase0.yml
+      - scripts/ane_oracle_e_weight_audit.py
+      - scripts/pack_anima.py
+      - scripts/tests/test_ane_pack_profile.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+env:
+  ANIMA_SOURCE_REPO: circlestone-labs/Anima
+  ANIMA_SOURCE_REVISION: f7382c4bf9d7ffe4ceea593a0adbb470c56dd79b
+  ANIMA_SOURCE_FILE: split_files/diffusion_models/anima-turbo-v1.0.safetensors
+  ANIMA_SOURCE_SHA256: c0b905034510750a505d21aa96c81718f4ffcc500777318421f58a88636e2174
+  ORACLE_REPO: ScalingBiz/AnimaXS-bf16-oracle-v2
+  ORACLE_V2_PREFIX: animaxs-bf16-oracle-v2-2026-08-19
+  ORACLE_D_PREFIX: animaxs-bf16-oracle-v2-2026-08-19/runs/D_pack_fp16_boundaries
+  ORACLE_E_PREFIX: animaxs-ane-oracle-e-2026-08-19/phase0_weight_audit
+  # Intentional one-shot rerun after fixing direct-script import -> module execution.
+  PHASE0_RERUN: '2026-08-19-exact-audit-v2'
+
+jobs:
+  weight-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Initialize artifact diagnostics
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          printf 'run_id=%s\nhead=%s\nevent=%s\nrerun=%s\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_SHA" "$GITHUB_EVENT_NAME" "$PHASE0_RERUN" \
+            > out/STAGE_00_STARTED.txt
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install bounded-memory audit dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install numpy safetensors huggingface_hub hf_xet
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python - <<'PY' > out/STAGE_01_DEPS_OK.txt
+          import numpy, safetensors, torch, huggingface_hub
+          print('numpy=' + numpy.__version__)
+          print('safetensors=' + safetensors.__version__)
+          print('torch=' + torch.__version__)
+          print('huggingface_hub=' + huggingface_hub.__version__)
+          PY
+
+      - name: Enumerate Oracle V2 and D evidence on Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          [ -n "${HF_TOKEN:-}" ] || { echo 'HF_TOKEN secret is missing' > out/STAGE_02_ENUM_FAILED.txt; exit 1; }
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from huggingface_hub import HfApi
+
+          api = HfApi(token=os.environ['HF_TOKEN'])
+          repo = os.environ['ORACLE_REPO']
+          all_files = sorted(api.list_repo_files(repo_id=repo, repo_type='model'))
+          v2 = [p for p in all_files if p.startswith(os.environ['ORACLE_V2_PREFIX'] + '/')]
+          d = [p for p in all_files if p.startswith(os.environ['ORACLE_D_PREFIX'] + '/')]
+          Path('out/ORACLE_V2_FILE_LIST.txt').write_text('\n'.join(v2) + '\n')
+          Path('out/ORACLE_D_FILE_LIST.txt').write_text('\n'.join(d) + '\n')
+          if not d:
+              Path('out/STAGE_02_ENUM_FAILED.txt').write_text('Oracle D prefix resolved to zero files\n')
+              raise SystemExit(1)
+          Path('out/STAGE_02_ENUM_OK.txt').write_text(
+              f'oracle_v2_files={len(v2)}\noracle_d_files={len(d)}\n')
+          PY
+
+      - name: Download and verify exact pinned source weights
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/anima-source"
+          mkdir -p "$source_dir"
+          export SOURCE_DIR="$source_dir"
+          if ! python - <<'PY' > out/source_download.txt 2>&1
+          import os
+          from pathlib import Path
+          from huggingface_hub import hf_hub_download
+
+          path = hf_hub_download(
+              repo_id=os.environ['ANIMA_SOURCE_REPO'],
+              filename=os.environ['ANIMA_SOURCE_FILE'],
+              revision=os.environ['ANIMA_SOURCE_REVISION'],
+              repo_type='model',
+              token=os.environ.get('HF_TOKEN'),
+              local_dir=os.environ['SOURCE_DIR'],
+          )
+          Path('out/SOURCE_PATH.txt').write_text(str(Path(path).resolve()) + '\n')
+          print(path)
+          PY
+          then
+            { echo 'hf_hub_download failed'; tail -n 120 out/source_download.txt; } > out/STAGE_03_SOURCE_FAILED.txt
+            exit 1
+          fi
+          source="$(cat out/SOURCE_PATH.txt)"
+          actual="$(sha256sum "$source" | awk '{print $1}')"
+          if [ "$actual" != "$ANIMA_SOURCE_SHA256" ]; then
+            printf 'sha256 mismatch\nexpected=%s\nactual=%s\n' "$ANIMA_SOURCE_SHA256" "$actual" > out/STAGE_03_SOURCE_FAILED.txt
+            exit 1
+          fi
+          printf 'source=%s\nbytes=%s\nsha256=%s\n' \
+            "$source" "$(stat -c %s "$source")" "$actual" > out/STAGE_03_SOURCE_OK.txt
+          echo "SOURCE=$source" >> "$GITHUB_ENV"
+
+      - name: Verify ANE pack contract tests
+        run: |
+          set -euo pipefail
+          if python -m unittest scripts.tests.test_ane_pack_profile -v > out/contract_tests.txt 2>&1; then
+            echo 'contract tests passed' > out/STAGE_04_CONTRACT_OK.txt
+          else
+            { echo 'contract tests failed'; tail -n 160 out/contract_tests.txt; } > out/STAGE_04_CONTRACT_FAILED.txt
+            exit 1
+          fi
+
+      - name: Audit all 280 ANE-native projections against legacy W8
+        run: |
+          set -euo pipefail
+          if python -m scripts.ane_oracle_e_weight_audit \
+            --source "$SOURCE" \
+            --out-dir out \
+            --row-chunk 128 \
+            --source-sha256 "$ANIMA_SOURCE_SHA256" \
+            --source-repo "$ANIMA_SOURCE_REPO" \
+            --source-revision "$ANIMA_SOURCE_REVISION" \
+            > out/audit_stdout.txt 2>&1; then
+            echo '280-tensor audit completed' > out/STAGE_05_AUDIT_OK.txt
+          else
+            { echo 'weight audit failed'; tail -n 200 out/audit_stdout.txt; } > out/STAGE_05_AUDIT_FAILED.txt
+            exit 1
+          fi
+
+      - name: Write provenance and checksums
+        run: |
+          set -euo pipefail
+          {
+            echo "repo_head=$(git rev-parse HEAD)"
+            echo "source_repo=${ANIMA_SOURCE_REPO}"
+            echo "source_revision=${ANIMA_SOURCE_REVISION}"
+            echo "source_sha256=${ANIMA_SOURCE_SHA256}"
+            echo "oracle_repo=${ORACLE_REPO}"
+            echo "oracle_d_prefix=${ORACLE_D_PREFIX}"
+            echo "python=$(python --version 2>&1)"
+            python - <<'PY'
+          import numpy, safetensors, torch, huggingface_hub
+          print('numpy=' + numpy.__version__)
+          print('safetensors=' + safetensors.__version__)
+          print('torch=' + torch.__version__)
+          print('huggingface_hub=' + huggingface_hub.__version__)
+          PY
+          } > out/PROVENANCE.txt
+          (cd out && sha256sum * > SHA256SUMS)
+          echo 'provenance and checksums completed' > out/STAGE_06_PROVENANCE_OK.txt
+
+      - name: Publish small Phase 0 evidence to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          if python - <<'PY' > out/publish_stdout.txt 2>&1
+          import os
+          from huggingface_hub import HfApi
+          api = HfApi(token=os.environ['HF_TOKEN'])
+          api.upload_folder(
+              repo_id=os.environ['ORACLE_REPO'],
+              repo_type='model',
+              folder_path='out',
+              path_in_repo=os.environ['ORACLE_E_PREFIX'],
+              commit_message='Add ANE Oracle E phase 0 weight audit',
+          )
+          PY
+          then
+            echo 'published Phase 0 evidence to Hugging Face' > out/STAGE_07_PUBLISH_OK.txt
+          else
+            { echo 'Hugging Face publish failed'; tail -n 120 out/publish_stdout.txt; } > out/STAGE_07_PUBLISH_FAILED.txt
+            exit 1
+          fi
+
+      - name: Record final disk state
+        if: always()
+        run: df -h > out/FINAL_DISK.txt
+
+      - name: Upload Phase 0 evidence artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ane-oracle-e-phase0
+          retention-days: 14
+          path: out/
+          if-no-files-found: error
+
+      - name: Post bounded Phase 0 result to PR 35
+        if: always()
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const files = fs.existsSync('out') ? fs.readdirSync('out').sort() : [];
+            const ok = files.filter(x => /^STAGE_.*_OK\.txt$/.test(x));
+            const failed = files.filter(x => /^STAGE_.*_FAILED\.txt$/.test(x));
+            const marker = `<!-- ane-oracle-e-phase0:${context.sha} -->`;
+            let body = `${marker}\n### ANE Oracle E Phase 0 — artifact result\n\n` +
+              `- Source: self-diagnostic artifact files only; **no CI log download**.\n` +
+              `- Successful stages: ${ok.length ? ok.map(x => `\`${x}\``).join(', ') : 'none'}\n` +
+              `- Failure stages: ${failed.length ? failed.map(x => `\`${x}\``).join(', ') : 'none'}\n`;
+            const auditPath = 'out/ane_oracle_e_weight_audit.json';
+            if (fs.existsSync(auditPath)) {
+              const d = JSON.parse(fs.readFileSync(auditPath, 'utf8'));
+              const a = d.global.ane_native;
+              const l = d.global.legacy_group64;
+              const worst = [...d.records]
+                .sort((x,y) => y.ane_native.relative_l2 - x.ane_native.relative_l2)
+                .slice(0,5);
+              body += `\n**280-matrix audit complete**\n\n` +
+                `| lane | cosine | relative L2 | saturation |\n|---|---:|---:|---:|\n` +
+                `| ANE per-row U8 / FP32 params | ${a.cosine.toPrecision(10)} | ${a.relative_l2.toPrecision(8)} | ${(100*a.q_saturation_fraction).toFixed(5)}% |\n` +
+                `| legacy group64 U8 / FP16 params | ${l.cosine.toPrecision(10)} | ${l.relative_l2.toPrecision(8)} | ${(100*l.q_saturation_fraction).toFixed(5)}% |\n\n` +
+                `Worst five ANE tensors by rel-L2:\n` +
+                worst.map((r,i) => `${i+1}. \`${r.name}\` — ${r.ane_native.relative_l2.toPrecision(8)}`).join('\n') + '\n';
+            }
+            for (const failure of failed) {
+              const text = fs.readFileSync(path.join('out', failure), 'utf8').slice(0,12000);
+              body += `\n#### ${failure}\n\n\`\`\`text\n${text}\n\`\`\`\n`;
+            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: 35,
+              body: body.slice(0,60000),
+            });

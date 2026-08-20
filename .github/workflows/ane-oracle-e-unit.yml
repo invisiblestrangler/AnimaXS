@@ -1,0 +1,110 @@
+name: ANE Oracle E Unit Checks
+
+on:
+  push:
+    branches:
+      - agent/ane-oracle-e
+    paths:
+      - .github/workflows/ane-oracle-e-unit.yml
+      - scripts/ane_oracle_e_pack_reference.py
+      - scripts/ane_oracle_e_custom_node.py
+      - scripts/ane_oracle_e_package_init.py
+      - scripts/ane_oracle_e_patch_v2_runner.py
+      - scripts/run_ane_oracle_e.sh
+      - scripts/ane_oracle_e_unpack_device_capture.py
+      - scripts/ane_oracle_e_compare.py
+      - scripts/ane_oracle_e_compare_stages.py
+      - scripts/run_ane_oracle_e_512_sourceprep_control.sh
+      - scripts/tests/test_ane_oracle_e_pack_reference.py
+      - scripts/tests/test_ane_oracle_e_capture_compare.py
+      - scripts/tests/test_ane_oracle_e_compare_stages.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Install unit dependencies
+        run: python -m pip install --upgrade numpy
+      - name: Compile and shell-check Oracle E sources
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p out
+          if python -m py_compile \
+            scripts/ane_oracle_e_pack_reference.py \
+            scripts/ane_oracle_e_custom_node.py \
+            scripts/ane_oracle_e_package_init.py \
+            scripts/ane_oracle_e_patch_v2_runner.py \
+            scripts/ane_oracle_e_unpack_device_capture.py \
+            scripts/ane_oracle_e_compare.py \
+            scripts/ane_oracle_e_compare_stages.py \
+            scripts/tests/test_ane_oracle_e_pack_reference.py \
+            scripts/tests/test_ane_oracle_e_capture_compare.py \
+            scripts/tests/test_ane_oracle_e_compare_stages.py \
+            > out/compile.txt 2>&1 \
+            && bash -n scripts/run_ane_oracle_e.sh \
+               scripts/run_ane_oracle_e_512_sourceprep_control.sh > out/shell.txt 2>&1; then
+            echo PASS > out/COMPILE_STATUS.txt
+          else
+            rc=$?
+            echo FAIL > out/COMPILE_STATUS.txt
+            { tail -n 200 out/compile.txt 2>/dev/null || true; tail -n 200 out/shell.txt 2>/dev/null || true; } > out/COMPILE_FAILURE.txt
+            exit "$rc"
+          fi
+      - name: Run Oracle E unit tests
+        shell: bash
+        run: |
+          set -uo pipefail
+          if python -m unittest \
+            scripts.tests.test_ane_oracle_e_pack_reference \
+            scripts.tests.test_ane_oracle_e_capture_compare \
+            scripts.tests.test_ane_oracle_e_compare_stages \
+            -v > out/unit.txt 2>&1; then
+            echo PASS > out/STATUS.txt
+          else
+            rc=$?
+            echo FAIL > out/STATUS.txt
+            tail -n 240 out/unit.txt > out/FAILURE.txt
+            exit "$rc"
+          fi
+      - name: Upload unit evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ane-oracle-e-unit
+          retention-days: 14
+          path: out/
+          if-no-files-found: error
+      - name: Post bounded unit result to PR 35
+        if: always()
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const read = p => fs.existsSync(p) ? fs.readFileSync(p, 'utf8').trim() : '';
+            const compile = read('out/COMPILE_STATUS.txt') || 'NOT_RUN';
+            const tests = read('out/STATUS.txt') || 'NOT_RUN';
+            const failure = read('out/COMPILE_FAILURE.txt') || read('out/FAILURE.txt');
+            const marker = `<!-- ane-oracle-e-unit:${context.sha} -->`;
+            let body = `${marker}\n### ANE Oracle E lightweight checks\n\n` +
+              `- Python/shell compile: **${compile}**\n` +
+              `- Unit tests: **${tests}**\n` +
+              `- Source: bounded workflow artifact/output only; no CI log download.\n`;
+            if (failure) body += `\n\`\`\`text\n${failure.slice(0, 12000)}\n\`\`\`\n`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: 35,
+              body,
+            });
