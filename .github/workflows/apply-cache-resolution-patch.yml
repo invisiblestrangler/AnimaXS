@@ -5,6 +5,8 @@ on:
 
 permissions:
   contents: write
+  issues: write
+  pull-requests: write
 
 jobs:
   apply:
@@ -24,8 +26,27 @@ jobs:
           s = s.replace('let ropeTable = DitRoPE.generate(H: grid, W: grid)', 'let values = DitRoPE.generate(H: grid, W: grid)')
           p.write_text(s)
           PY
-      - name: Apply deterministic patch
-        run: python3 scripts/apply_cache_resolution_patch.py
+      - name: Apply deterministic patch with compact diagnostic
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          python3 scripts/apply_cache_resolution_patch.py > "$RUNNER_TEMP/patch.log" 2>&1
+          STATUS=$?
+          if [ "$STATUS" -ne 0 ]; then
+            {
+              echo '<!-- animaxs-source-patch-diagnostic -->'
+              echo '### Source patch helper failure'
+              echo
+              echo '```text'
+              tail -40 "$RUNNER_TEMP/patch.log"
+              echo '```'
+              echo
+              echo "**PR head:** \`${GITHUB_SHA}\`"
+            } > "$RUNNER_TEMP/comment.md"
+            gh pr comment 38 --repo invisiblestrangler/AnimaXS --body-file "$RUNNER_TEMP/comment.md"
+            exit "$STATUS"
+          fi
       - name: Commit patched sources
         run: |
           set -euo pipefail
