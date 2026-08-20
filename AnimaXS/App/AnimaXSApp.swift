@@ -6,13 +6,12 @@ struct AnimaXSApp: App {
 
     init() {
         #if !targetEnvironment(simulator)
-        // Experiment branch only: run the tiny private-ANE multi-procedure
-        // compiler probe explicitly. Do not rely on Objective-C constructors;
-        // the result must be emitted deterministically on every physical-device
-        // launch of this branch.
+        // Experiment branch only: dump the private AppleNeuralEngine/Espresso
+        // Objective-C runtime API surface. This is read-only and deliberately
+        // performs no model compilation, loading, evaluation, or inference.
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = A12MPV2Run()
-            print("\n========== ANIMAXS_ANE_MULTIPROC_POC_V2 ==========\n\(result)\n====================================================\n")
+            let result = A12ANEPrivateRuntimeInventory() ?? "runtime inventory returned nil"
+            print("\n========== ANIMAXS_ANE_RUNTIME_INVENTORY_V1 ==========\n\(result)\n========================================================\n")
         }
         #endif
     }
