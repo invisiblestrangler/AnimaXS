@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: experiment/ane-multiproc-production-ab
-      - name: Correct current-source marker
+      - name: Correct current-source markers
         run: |
           python3 - <<'PY'
           from pathlib import Path
@@ -24,6 +24,12 @@ jobs:
           s = p.read_text()
           s = s.replace('let ropeTable = DitRoPE.generate()', 'let values = DitRoPE.generate()')
           s = s.replace('let ropeTable = DitRoPE.generate(H: grid, W: grid)', 'let values = DitRoPE.generate(H: grid, W: grid)')
+          s = s.replace(
+              '    private static let latentSize = 64\\n    private static let outputSize = 512\\n',
+              '    private static let latentSize = 64\\n    private static let outputChannels = 3\\n    private static let outputSize = 512\\n')
+          s = s.replace(
+              '    private static var latentSize: Int { GenerationGeometryRuntime.current.latentSize }\\n    private static var outputSize: Int { GenerationGeometryRuntime.current.imageSize }\\n',
+              '    private static var latentSize: Int { GenerationGeometryRuntime.current.latentSize }\\n    private static let outputChannels = 3\\n    private static var outputSize: Int { GenerationGeometryRuntime.current.imageSize }\\n')
           p.write_text(s)
           PY
       - name: Apply deterministic patch with compact diagnostic
@@ -42,7 +48,7 @@ jobs:
               tail -40 "$RUNNER_TEMP/patch.log"
               echo '```'
               echo
-              echo "**PR head:** \`${GITHUB_SHA}\`"
+              echo "**PR merge SHA:** \`${GITHUB_SHA}\`"
             } > "$RUNNER_TEMP/comment.md"
             gh pr comment 38 --repo invisiblestrangler/AnimaXS --body-file "$RUNNER_TEMP/comment.md"
             exit "$STATUS"
