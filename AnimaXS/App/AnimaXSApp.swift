@@ -6,13 +6,14 @@ struct AnimaXSApp: App {
 
     init() {
         #if !targetEnvironment(simulator)
-        // Experiment branch only: Stage 2G proved one canonical real W8
-        // procedure compiles. Stage 2H tests a real canonical two-procedure
-        // pair, then all eight block-0 W8 procedures in one loaded ANE model.
+        // Experiment branch only: Stage 2H proved a canonical real W8
+        // self_o+cross_q pair compiles and loads as two procedures, while the
+        // all-eight container is rejected as InvalidProcedure. Stage 2I
+        // isolates count, heterogeneous I/O geometry, and QKV multi-output.
         // No prompt, diffusion, VAE, or image generation is involved.
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = A12ANEStage2HProbe() ?? "Stage 2H block0 probe returned nil"
-            print("\n========== ANIMAXS_ANE_BLOCK0_MULTIPROC_STAGE2H ==========\n\(result)\n===========================================================\n")
+            let result = A12ANEStage2IProbe() ?? "Stage 2I block0 probe returned nil"
+            print("\n========== ANIMAXS_ANE_BLOCK0_MULTIPROC_STAGE2I ==========\n\(result)\n===========================================================\n")
         }
         #endif
     }
