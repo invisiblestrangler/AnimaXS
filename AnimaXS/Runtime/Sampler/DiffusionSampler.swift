@@ -6,7 +6,7 @@ import Metal
 /// Model output is FLOW velocity. It is materialized as fp32 denoised output
 /// before the fp32 Euler update to preserve the pinned ComfyUI operation order.
 final class DiffusionSampler {
-    static let latentElements = 16 * 64 * 64
+    static var latentElements: Int { GenerationGeometryRuntime.current.latentElements }
 
     typealias BlockProgress = (_ step: Int, _ block: Int) throws -> Void
     typealias StepCompleted = (
@@ -87,7 +87,8 @@ final class DiffusionSampler {
         euler = EulerSampler(context: context, monitor: monitor)
         buffers = BufferPool(device: context.device)
 
-        let values = DitRoPE.generate()
+        let grid = GenerationGeometryRuntime.current.patchGrid
+        let values = DitRoPE.generate(H: grid, W: grid)
         guard let rope = context.device.makeBuffer(
             length: values.count * MemoryLayout<Float>.stride,
             options: .storageModeShared

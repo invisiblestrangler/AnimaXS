@@ -22,9 +22,9 @@ import UIKit
 /// tensors are never executed at T=1.
 final class VAEDecoder {
     private static let latentChannels = 16
-    private static let latentSize = 64
+    private static var latentSize: Int { GenerationGeometryRuntime.current.latentSize }
     private static let outputChannels = 3
-    private static let outputSize = 512
+    private static var outputSize: Int { GenerationGeometryRuntime.current.imageSize }
 
     private let context: MetalContext
     private let file: AnimapkFile

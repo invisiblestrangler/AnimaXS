@@ -19,12 +19,12 @@ enum FinalResidualBoundary: String, Equatable {
 
 /// Streamed MiniTrainDIT FinalLayer + unpatchify for the fixed image model shape.
 final class DiTFinalLayerExecutor {
-    private static let tokens = 1_024
+    private static var tokens: Int { GenerationGeometryRuntime.current.ditTokens }
     private static let dim = 2_048
     private static let modulationHidden = 256
     private static let modulationSize = 4_096
     private static let projected = 64
-    private static let outputElements = 16 * 64 * 64
+    private static var outputElements: Int { GenerationGeometryRuntime.current.latentElements }
     private static let eps: Float = 1e-6
 
     private let context: MetalContext
@@ -348,7 +348,7 @@ final class DiTFinalLayerExecutor {
         guard let encoder = command.makeComputeCommandEncoder() else {
             throw AnimapkError.validation("failed to create final unpatchify encoder")
         }
-        var height: UInt32 = 64, width: UInt32 = 64
+        var height = UInt32(GenerationGeometryRuntime.current.latentSize), width = height
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(input, offset: 0, index: 0)
         encoder.setBuffer(output, offset: 0, index: 1)

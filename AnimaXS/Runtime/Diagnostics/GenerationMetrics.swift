@@ -153,6 +153,7 @@ struct GenerationMetrics: Equatable {
 
     // Immutable per-run configuration snapshot (captured at Generate time).
     var optimizationConfig: InferenceOptimizationConfig?
+    var resolution: GenerationResolution = .square512
 
     /// Filename of the DiT pack actually used by this run (e.g.
     /// `anima-turbo-v1.0-xsmax-w4.animapk` or the W8-v2 pack), so the summary
@@ -288,6 +289,7 @@ struct GenerationMetrics: Equatable {
         }
         lines.append("")
         lines.append("Inference configuration")
+        lines.append("Resolution: \(resolution.label)")
         lines.append("DiT pack: \(ditPackFilename ?? "unknown")"
             + (ditPackVariantID.map { " (\($0))" } ?? "")
             + (ditPackSHA256.map { " \($0.prefix(12))…" } ?? "")
@@ -303,7 +305,7 @@ struct GenerationMetrics: Equatable {
             lines.append("Direct MPS linear I/O: \(config.directLinearMPSIO ? "on" : "off")")
             lines.append("Ping-pong weight streaming: \(config.pingPongWeightStreaming ? "on" : "off")")
             lines.append("Numerical monitor: \(config.numericalMonitoring ? "on" : "off")")
-            if config.linearBackend == .aneHybridW8 && !config.crossKVCache {
+            if config.linearBackend.isANEW8 && !config.crossKVCache {
                 lines.append("Cross-attention K/V cache: auto (ANE)")
             } else {
                 lines.append("Cross-attention K/V cache: \(config.crossKVCache ? "on" : "off")")
@@ -596,6 +598,10 @@ final class MetricsCollector {
     func recordOptimizationConfig(_ config: InferenceOptimizationConfig) {
         metrics.optimizationConfig = config
         metrics.numericalMonitoringDisabled = !config.numericalMonitoring
+    }
+
+    func recordResolution(_ resolution: GenerationResolution) {
+        metrics.resolution = resolution
     }
 
     /// Records which DiT pack variant this run actually used, including the

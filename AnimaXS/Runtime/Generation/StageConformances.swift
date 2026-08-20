@@ -165,27 +165,55 @@ final class ANEW8MultiProcModelCache: @unchecked Sendable {
     static let streamingSlots = 2
     static let maxResidentBlocks = pinnedBlocks + streamingSlots
 
-    private let loaderQueue = DispatchQueue(
-        label: "com.invisiblestrangler.AnimaXS.ane-multiproc-loader",
-        qos: .userInitiated)
+    /// The expensive synthesized 10-procedure handles are process/pack state,
+    /// not generation state. A Generate owns only traversal sequencing. This
+    /// mirrors the stable backend's deterministic prepared cache while also
+    /// avoiding donor->combined reconstruction on the second Generate.
+    private final class SharedState: @unchecked Sendable {
+        let loaderQueue = DispatchQueue(
+            label: "com.invisiblestrangler.AnimaXS.ane-multiproc-loader",
+            qos: .userInitiated)
+        var namespace: String?
+        var models: [Int: ANEW8MultiProcBlockModel] = [:]
+        var streamSlots: [Int?] = Array(repeating: nil, count: streamingSlots)
+        var residentHighWater = 0
+    }
 
-    // Loader-queue confined state.
-    private var models: [Int: ANEW8MultiProcBlockModel] = [:]
-    private var streamSlots: [Int?] = Array(repeating: nil, count: streamingSlots)
-    private var residentHighWater = 0
+    private static let sharedState = SharedState()
 
-    // Inference-thread state. The production DiT loop is serial 0...27.
+    /// Called after the actual ANE-native pack is resolved and before diffusion.
+    /// Re-selecting the same namespace is a no-op. A changed pack destroys the
+    /// old combined handles only when no generation is active.
+    static func selectNamespace(_ namespace: String) {
+        let shared = sharedState
+        shared.loaderQueue.sync {
+            guard shared.namespace != namespace else { return }
+            for model in shared.models.values where model.isLoaded {
+                _ = try? model.unload()
+            }
+            shared.models.removeAll()
+            shared.streamSlots = Array(repeating: nil, count: streamingSlots)
+            shared.residentHighWater = 0
+            shared.namespace = namespace
+            print("ANE multiprocedure process cache namespace selected: \(namespace.prefix(12))…")
+        }
+    }
+
+    private let shared = sharedState
+
+    // Per-generation traversal state only. The production DiT loop is serial
+    // 0...27; the underlying combined handles survive this facade's deinit.
     private var expectedBlock = 0
     private var nextFuture: ANEW8MultiProcLoadFuture?
 
     init() {
-        print("ANE multiprocedure scheduler: pinned=6 streaming=2 maxResident=8")
+        print("ANE multiprocedure scheduler: pinned=6 streaming=2 maxResident=8 processCache=on")
     }
 
-    /// Returns the block model required by the ordered production traversal.
-    /// At block 5 we start loading streaming block 6 while block 5 executes;
-    /// every streamed block then starts the next alternating-slot admission.
     func scheduledModel(for block: Int) throws -> ANEW8MultiProcScheduledModel {
+        guard shared.loaderQueue.sync(execute: { shared.namespace != nil }) else {
+            throw AnimapkError.validation("ANE multiprocedure process cache was not configured for the resolved pack")
+        }
         guard block == expectedBlock else {
             throw AnimapkError.validation(
                 "ANE multiprocedure scheduler expected block \(expectedBlock), received \(block)")
@@ -202,21 +230,16 @@ final class ANEW8MultiProcModelCache: @unchecked Sendable {
             nextFuture = nil
         } else {
             if let future = nextFuture {
-                // A stale future means traversal sequencing changed. Drain it
-                // before touching loader state, then fail loudly rather than
-                // silently admitting an extra stream model.
                 _ = try? future.wait()
                 nextFuture = nil
             }
-            work = try loaderQueue.sync { try loadBlock(block) }
+            work = try shared.loaderQueue.sync {
+                try Self.loadBlock(block, shared: shared)
+            }
         }
 
         expectedBlock = block == ModelConstants.ditBlocks - 1 ? 0 : block + 1
 
-        // The first streaming admission can overlap the final pinned block.
-        // Thereafter each current stream block overlaps admission of the next
-        // model into the opposite slot. The queue is serial, so ANE load calls
-        // are never issued concurrently with one another.
         let next: Int?
         if block == Self.pinnedBlocks - 1 {
             next = Self.pinnedBlocks
@@ -225,9 +248,7 @@ final class ANEW8MultiProcModelCache: @unchecked Sendable {
         } else {
             next = nil
         }
-        if let next {
-            nextFuture = launchPrefetch(block: next)
-        }
+        if let next { nextFuture = launchPrefetch(block: next) }
 
         return ANEW8MultiProcScheduledModel(
             model: work.model,
@@ -238,61 +259,57 @@ final class ANEW8MultiProcModelCache: @unchecked Sendable {
             residentBlocks: work.residentBlocks)
     }
 
-    /// The block executor calls this only after every ANE/Metal consumer of the
-    /// current block is finished. Streaming retirement is intentionally delayed
-    /// until that slot is reused, so the two-slot invariant exactly matches the
-    /// old measured ping-pong scheduler.
     func complete(block: Int) throws {
         guard (0..<ModelConstants.ditBlocks).contains(block) else {
             throw AnimapkError.validation("ANE multiprocedure completion block is out of range")
         }
     }
 
-    /// Failure/cancellation recovery. Waits for any in-flight loader work, then
-    /// unloads all resident handles. Lightweight handles stay cached only until
-    /// this scheduler object is released by the failed generation.
+    /// Cancellation/failure unloads residency for safety, but deliberately
+    /// retains the synthesized handles so the next Generate can reload them.
     func abortTraversal() {
         if let future = nextFuture {
             _ = try? future.wait()
             nextFuture = nil
         }
-        loaderQueue.sync {
-            for model in models.values where model.isLoaded {
+        shared.loaderQueue.sync {
+            for model in shared.models.values where model.isLoaded {
                 _ = try? model.unload()
             }
-            streamSlots = Array(repeating: nil, count: Self.streamingSlots)
+            shared.streamSlots = Array(repeating: nil, count: Self.streamingSlots)
         }
         expectedBlock = 0
     }
 
     private func launchPrefetch(block: Int) -> ANEW8MultiProcLoadFuture {
         let future = ANEW8MultiProcLoadFuture(block: block)
-        loaderQueue.async { [weak self, weak future] in
-            guard let self, let future else { return }
-            do { future.finish(.success(try self.loadBlock(block))) }
+        let shared = self.shared
+        shared.loaderQueue.async {
+            do { future.finish(.success(try Self.loadBlock(block, shared: shared))) }
             catch { future.finish(.failure(error)) }
         }
         return future
     }
 
-    /// Loader-queue only. For a streaming block the old occupant is unloaded
-    /// before the new model is admitted, making >8 resident block models
-    /// structurally impossible.
-    private func loadBlock(_ block: Int) throws -> ANEW8MultiProcLoadWork {
+    /// Loader-queue only. Streaming slots remain bounded to two while the six
+    /// pinned blocks remain resident across successful generations. The final
+    /// b26/b27 slot occupants may also remain resident, so the steady process
+    /// cache still obeys the proven eight-model ceiling.
+    private static func loadBlock(_ block: Int, shared: SharedState) throws -> ANEW8MultiProcLoadWork {
         var unloadMS = 0.0
-        if block >= Self.pinnedBlocks {
-            let slot = (block - Self.pinnedBlocks) % Self.streamingSlots
-            if let occupant = streamSlots[slot], occupant != block,
-               let old = models[occupant], old.isLoaded {
+        if block >= pinnedBlocks {
+            let slot = (block - pinnedBlocks) % streamingSlots
+            if let occupant = shared.streamSlots[slot], occupant != block,
+               let old = shared.models[occupant], old.isLoaded {
                 unloadMS += try old.unload()
             }
-            streamSlots[slot] = nil
+            shared.streamSlots[slot] = nil
         }
 
         var compileMS = 0.0
         var loadMS = 0.0
         let model: ANEW8MultiProcBlockModel
-        if let existing = models[block] {
+        if let existing = shared.models[block] {
             model = existing
             if !existing.isLoaded { loadMS = try existing.load() }
         } else {
@@ -300,21 +317,21 @@ final class ANEW8MultiProcModelCache: @unchecked Sendable {
                 block: block,
                 compileMilliseconds: &compileMS,
                 loadMilliseconds: &loadMS)
-            models[block] = model
+            shared.models[block] = model
         }
 
-        if block >= Self.pinnedBlocks {
-            let slot = (block - Self.pinnedBlocks) % Self.streamingSlots
-            streamSlots[slot] = block
+        if block >= pinnedBlocks {
+            let slot = (block - pinnedBlocks) % streamingSlots
+            shared.streamSlots[slot] = block
         }
 
-        let resident = models.values.reduce(into: 0) { count, value in
+        let resident = shared.models.values.reduce(into: 0) { count, value in
             if value.isLoaded { count += 1 }
         }
-        residentHighWater = max(residentHighWater, resident)
-        guard resident <= Self.maxResidentBlocks else {
+        shared.residentHighWater = max(shared.residentHighWater, resident)
+        guard resident <= maxResidentBlocks else {
             throw AnimapkError.validation(
-                "ANE multiprocedure scheduler residency invariant violated: \(resident) > \(Self.maxResidentBlocks)")
+                "ANE multiprocedure scheduler residency invariant violated: \(resident) > \(maxResidentBlocks)")
         }
         return ANEW8MultiProcLoadWork(
             model: model,
@@ -325,11 +342,8 @@ final class ANEW8MultiProcModelCache: @unchecked Sendable {
     }
 
     deinit {
+        // Drain only this generation's outstanding admission. Shared combined
+        // handles and the safe eight-model resident set intentionally survive.
         if let future = nextFuture { _ = try? future.wait() }
-        loaderQueue.sync {
-            for model in models.values where model.isLoaded { _ = try? model.unload() }
-            models.removeAll()
-            streamSlots = Array(repeating: nil, count: Self.streamingSlots)
-        }
     }
 }

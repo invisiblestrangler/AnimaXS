@@ -2,6 +2,26 @@ import Foundation
 
 /// Canonical model constants from PHASE0_2_HANDOFF/RUNTIME_CONSTANTS.json + model_info.json.
 /// These are the source of truth for the numerical pipeline.
+enum GenerationResolution: Int, Codable, CaseIterable, Identifiable, Sendable {
+    case square512 = 512
+    case square1024 = 1024
+
+    var id: Int { rawValue }
+    var imageSize: Int { rawValue }
+    var latentSize: Int { rawValue / 8 }
+    var patchGrid: Int { latentSize / ModelConstants.ditPatchSpatial }
+    var ditTokens: Int { patchGrid * patchGrid }
+    var latentElements: Int { ModelConstants.ditLatentChannels * latentSize * latentSize }
+    var label: String { "\(rawValue)×\(rawValue)" }
+}
+
+/// Per-generation geometry without process-global mutable shape state. Direct
+/// executor/tests that do not install a value continue to run the historical
+/// 512x512 geometry.
+enum GenerationGeometryRuntime {
+    @TaskLocal static var current: GenerationResolution = .square512
+}
+
 enum ModelConstants {
     // DiT
     static let ditBlocks = 28

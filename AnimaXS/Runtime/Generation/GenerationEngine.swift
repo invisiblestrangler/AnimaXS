@@ -121,6 +121,9 @@ struct ProductionStageFactory: GenerationStageFactory {
         // existing preparer here makes the old and new paths directly A/B-able.
         guard optimization.linearBackend.isANEW8 else { return }
         let file = try AnimapkFile(url: fileURL)
+        if optimization.linearBackend == .aneMultiProcW8 {
+            ANEW8MultiProcModelCache.selectNamespace(try ANEW8NativePack.namespace(file: file))
+        }
         let result = try ANEW8ModelPreparer.ensurePrepared(file: file)
         metrics.recordANECachePreparation(result)
     }
@@ -166,10 +169,28 @@ struct GenerationEngine {
         noise: MTLBuffer? = nil,
         progress: ProgressCallback? = nil,
         metrics metricsIn: MetricsCollector? = nil,
-        optimization: InferenceOptimizationConfig = .currentBaseline
+        optimization: InferenceOptimizationConfig = .currentBaseline,
+        resolution: GenerationResolution = .square512
+    ) async throws -> DecodedRGBA8 {
+        try await GenerationGeometryRuntime.$current.withValue(resolution) {
+            try await generateConfigured(
+                prompt: prompt, seed: seed, models: models, noise: noise,
+                progress: progress, metrics: metricsIn, optimization: optimization)
+        }
+    }
+
+    private func generateConfigured(
+        prompt: String,
+        seed: UInt64,
+        models: ResolvedModels,
+        noise: MTLBuffer?,
+        progress: ProgressCallback?,
+        metrics metricsIn: MetricsCollector?,
+        optimization: InferenceOptimizationConfig
     ) async throws -> DecodedRGBA8 {
         let metrics = metricsIn ?? MetricsCollector()
         metrics.recordOptimizationConfig(optimization)
+        metrics.recordResolution(GenerationGeometryRuntime.current)
         let numerics = DiTNumericsPolicy.fromVariantID(models.dit.variant.id)
         if let reason = InferenceOptimizationConfig.blockingReason(
             for: optimization, numerics: numerics, ditVariantID: models.dit.variant.id) {

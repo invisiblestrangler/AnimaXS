@@ -129,7 +129,8 @@ final class GenerationCoordinator: ObservableObject {
         seed: UInt64,
         models: ResolvedModels,
         noise: MTLBuffer? = nil,
-        optimization: InferenceOptimizationConfig = .currentBaseline
+        optimization: InferenceOptimizationConfig = .currentBaseline,
+        resolution: GenerationResolution = .square512
     ) {
         guard !isGenerating else { return }
         guard !metalContextPoisoned else {
@@ -154,7 +155,7 @@ final class GenerationCoordinator: ObservableObject {
         state = .tokenizing
         run(engine: GenerationEngine(context: context, factory: factory),
             prompt: prompt, seed: seed, models: models,
-            noise: noise, optimization: optimization)
+            noise: noise, optimization: optimization, resolution: resolution)
     }
 
     /// Cooperative cancellation (K003 core): the engine stops at the next safe
@@ -200,7 +201,8 @@ final class GenerationCoordinator: ObservableObject {
         seed: UInt64,
         models: ResolvedModels,
         noise: MTLBuffer?,
-        optimization: InferenceOptimizationConfig
+        optimization: InferenceOptimizationConfig,
+        resolution: GenerationResolution
     ) {
         let metrics = MetricsCollector()
         metrics.recordOptimizationConfig(optimization)
@@ -235,7 +237,8 @@ final class GenerationCoordinator: ObservableObject {
                         }
                     },
                     metrics: metrics,
-                    optimization: optimization)
+                    optimization: optimization,
+                    resolution: resolution)
                 guard !Task.isCancelled else {
                     self.state = .cancelled
                     return
