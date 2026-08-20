@@ -6,13 +6,14 @@ struct AnimaXSApp: App {
 
     init() {
         #if !targetEnvironment(simulator)
-        // Experiment branch only: lower the eight already-prepared block-0
-        // W8 Espresso programs into one native ANE container, compile/load it
-        // once, and verify that ANEF exposes eight private procedures.
+        // Experiment branch only: lower each of the eight already-prepared
+        // block-0 W8 Espresso programs individually, combine Apple's exact
+        // native network bodies into one ANE container, compile/load it once,
+        // and verify that ANEF exposes eight private procedures.
         // No prompt, diffusion, VAE, or image generation is involved.
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = A12ANETargetedRuntimeProbe() ?? "Stage 2A block0 probe returned nil"
-            print("\n========== ANIMAXS_ANE_BLOCK0_MULTIPROC_STAGE2A ==========\n\(result)\n===========================================================\n")
+            let result = A12ANETargetedRuntimeProbe() ?? "Stage 2B block0 probe returned nil"
+            print("\n========== ANIMAXS_ANE_BLOCK0_MULTIPROC_STAGE2B ==========\n\(result)\n===========================================================\n")
         }
         #endif
     }
