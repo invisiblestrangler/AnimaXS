@@ -6,12 +6,13 @@ struct AnimaXSApp: App {
 
     init() {
         #if !targetEnvironment(simulator)
-        // Experiment branch only: isolate the first ANEC failure boundary with
-        // one real block-0 self_o W8 network: raw Espresso dump v1.0.9, then
-        // Version 1.0.10, then one synthesized procedure. No generation runs.
+        // Experiment branch only: match Apple's private ANEC procedure grammar
+        // for real block-0 W8 networks. First compile one self_o procedure with
+        // network_* naming and full shape-derived live-input metadata, then the
+        // self_o+cross_q pair, then verify one load exposes two procedures.
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = A12ANETargetedRuntimeProbe() ?? "Stage 2D block0 probe returned nil"
-            print("\n========== ANIMAXS_ANE_BLOCK0_MULTIPROC_STAGE2D ==========\n\(result)\n===========================================================\n")
+            let result = A12ANETargetedRuntimeProbe() ?? "Stage 2E block0 probe returned nil"
+            print("\n========== ANIMAXS_ANE_BLOCK0_MULTIPROC_STAGE2E ==========\n\(result)\n===========================================================\n")
         }
         #endif
     }
