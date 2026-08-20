@@ -12,7 +12,7 @@ struct AnimaXSApp: App {
         // launch of this branch.
         DispatchQueue.global(qos: .userInitiated).async {
             let result = A12MPV2Run()
-            NSLog("\n========== ANIMAXS_ANE_MULTIPROC_POC_V2 ==========\n%@\n====================================================\n", result)
+            print("\n========== ANIMAXS_ANE_MULTIPROC_POC_V2 ==========\n\(result)\n====================================================\n")
         }
         #endif
     }
