@@ -2,7 +2,6 @@
 #import <TargetConditionals.h>
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
-#import <stdatomic.h>
 #import "A12ANEBlock0Stage2K.h"
 
 // Stage 2L: measure the real residency ceiling of the proven 10-procedure/block
@@ -21,10 +20,6 @@ static inline NSString *A12ANEStage2LProbe(void) {
     return @"ANE multiprocedure progressive residency Stage 2L\nRESULT=SKIP simulator";
 }
 #else
-
-static _Atomic unsigned int A12S2LUIKitWarnings;
-static _Atomic unsigned int A12S2LDispatchWarnings;
-static _Atomic unsigned long A12S2LDispatchFlags;
 
 static inline NSArray<NSMutableDictionary *> *A12S2LFindDonors(
     NSUInteger block,
@@ -229,14 +224,14 @@ static inline NSString *A12ANEStage2LProbe(void) {
             @"sentinel=evaluate newest self_o + block0 self_o after every admission",
             nil];
 
-        atomic_store(&A12S2LUIKitWarnings, 0);
-        atomic_store(&A12S2LDispatchWarnings, 0);
-        atomic_store(&A12S2LDispatchFlags, 0);
+        __block volatile unsigned int uiWarnings = 0;
+        __block volatile unsigned int dispatchWarnings = 0;
+        __block volatile unsigned long dispatchFlags = 0;
 
         id warningToken = [NSNotificationCenter.defaultCenter
             addObserverForName:UIApplicationDidReceiveMemoryWarningNotification
             object:nil queue:nil usingBlock:^(__unused NSNotification *note) {
-                atomic_fetch_add(&A12S2LUIKitWarnings, 1);
+                uiWarnings += 1;
             }];
         dispatch_queue_t pressureQueue = dispatch_queue_create(
             "com.invisiblestrangler.AnimaXS.s2l-pressure", DISPATCH_QUEUE_SERIAL);
@@ -246,9 +241,8 @@ static inline NSString *A12ANEStage2LProbe(void) {
             pressureQueue);
         if (pressureSource) {
             dispatch_source_set_event_handler(pressureSource, ^{
-                unsigned long flags = dispatch_source_get_data(pressureSource);
-                atomic_store(&A12S2LDispatchFlags, flags);
-                atomic_fetch_add(&A12S2LDispatchWarnings, 1);
+                dispatchFlags = dispatch_source_get_data(pressureSource);
+                dispatchWarnings += 1;
             });
             dispatch_resume(pressureSource);
         }
@@ -368,9 +362,9 @@ static inline NSString *A12ANEStage2LProbe(void) {
                     sentinelMS = (NSDate.timeIntervalSinceReferenceDate - sentinelStart) * 1000.0;
                 }
 
-                unsigned int uiWarnings = atomic_load(&A12S2LUIKitWarnings);
-                unsigned int dispatchWarnings = atomic_load(&A12S2LDispatchWarnings);
-                unsigned long dispatchFlags = atomic_load(&A12S2LDispatchFlags);
+                unsigned int uiSnapshot = uiWarnings;
+                unsigned int dispatchSnapshot = dispatchWarnings;
+                unsigned long flagsSnapshot = dispatchFlags;
 
                 double baselineLoad = A12S2LMedian(healthyLoads);
                 double baselineEval = A12S2LMedian(healthyEvals);
@@ -379,7 +373,7 @@ static inline NSString *A12ANEStage2LProbe(void) {
                 BOOL loadPathology = healthyLoads.count >= 3 && loadMS > loadThreshold;
                 BOOL evalPathology = healthyEvals.count >= 3 &&
                     (evalWallMS > evalThreshold || (block > 0 && sentinelMS > evalThreshold));
-                BOOL pressure = uiWarnings > 0 || dispatchWarnings > 0;
+                BOOL pressure = uiSnapshot > 0 || dispatchSnapshot > 0;
 
                 [lines addObject:[NSString stringWithFormat:
                     @"b%02lu resident=%lu donor=%.1fMB cumulativeDonor=%.1fMB tempMaterialized=%.1fMB cacheHit=%@ compile=%.1fms load=%.2fms eval=%.2fms sentinel=%.2fms pressure(ui=%u dispatch=%u flags=0x%lx) thresholds(load=%.1f eval=%.1f)",
@@ -388,8 +382,8 @@ static inline NSString *A12ANEStage2LProbe(void) {
                     (double)cumulativeDonorBytes / (1024.0 * 1024.0),
                     (double)materializedBytes / (1024.0 * 1024.0),
                     cacheHit ? @"yes" : @"no", compileMS, loadMS,
-                    evalWallMS, sentinelMS, uiWarnings, dispatchWarnings,
-                    dispatchFlags, loadThreshold, evalThreshold]];
+                    evalWallMS, sentinelMS, uiSnapshot, dispatchSnapshot,
+                    flagsSnapshot, loadThreshold, evalThreshold]];
 
                 [NSFileManager.defaultManager removeItemAtURL:blockRoot error:nil];
 
@@ -425,8 +419,8 @@ static inline NSString *A12ANEStage2LProbe(void) {
             onsetBlock == NSNotFound ? @"none" : [NSString stringWithFormat:@"%lu", (unsigned long)onsetBlock],
             onsetReason ?: @"none",
             (double)cumulativeDonorBytes / (1024.0 * 1024.0),
-            atomic_load(&A12S2LUIKitWarnings), atomic_load(&A12S2LDispatchWarnings),
-            atomic_load(&A12S2LDispatchFlags)]];
+            (unsigned int)uiWarnings, (unsigned int)dispatchWarnings,
+            (unsigned long)dispatchFlags]];
 
         double unloadTotal = 0.0;
         NSUInteger unloadFailures = 0;
