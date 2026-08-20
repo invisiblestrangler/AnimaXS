@@ -6,20 +6,9 @@
 #include <stdint.h>
 #include <string.h>
 
-// Experiment branch only.
-//
-// Physical-A12 proof for the architecture we actually want:
-//   one native ANE netplist network -> two callable private ANE procedures.
-//
-// The netplist schema is the same low-level compiler representation used by
-// Apple's private MLCompute plist builder / direct ANE tooling: Version,
-// Networks, ProcedureList, Units, InputList, OperationList and OutputList.
-// Procedure 0 runs ReLU(x), procedure 1 runs Add(a,b). All inputs are +1 FP16,
-// so exact expected outputs are 1 and 2. The tensor shape is 64x1x128 FP16 =
-// exactly 16 KiB, avoiding the A12 IOSurface page-size trap from the old V5 POC.
-//
-// This probe compiles once, loads once, dispatches both procedure indices from
-// the same loaded _ANEInMemoryModel, then unloads once. It does not touch DiT.
+// Experiment branch only. One native netplist network, two ANE procedures:
+// identity = ReLU(+1) -> +1, double = Add(+1,+1) -> +2.
+// Shape is 64x1x128 FP16 = exactly one 16 KiB A12 page per surface.
 
 #if TARGET_OS_SIMULATOR
 static inline NSString *A12ANETargetedRuntimeProbe(void) {
@@ -95,8 +84,7 @@ static inline A12MPNetSurfaceAPI A12MPNetSurfaceRuntime(void) {
     return api;
 }
 
-static inline A12MPNetSurfaceRef A12MPNetMakeSurface(A12MPNetSurfaceAPI api,
-                                                       NSUInteger bytes) {
+static inline A12MPNetSurfaceRef A12MPNetMakeSurface(A12MPNetSurfaceAPI api, NSUInteger bytes) {
     if (!api.ok || bytes == 0) return NULL;
     NSDictionary *properties = @{
         (__bridge id)(*api.widthKey): @(bytes),
@@ -119,6 +107,14 @@ static inline void A12MPNetFill(A12MPNetSurfaceAPI api,
     api.unlock(surface, 0, NULL);
 }
 
+static inline void A12MPNetReleaseSurfaces(A12MPNetSurfaceRef inputs[2],
+                                            A12MPNetSurfaceRef output) {
+    for (NSUInteger i = 0; i < 2; ++i) {
+        if (inputs[i]) CFRelease(inputs[i]);
+    }
+    if (output) CFRelease(output);
+}
+
 static inline NSDictionary *A12MPNetInput(NSString *symbol,
                                            NSString *unit,
                                            NSUInteger channels,
@@ -137,8 +133,7 @@ static inline NSDictionary *A12MPNetInput(NSString *symbol,
     };
 }
 
-static inline NSDictionary *A12MPNetOutput(NSString *symbol,
-                                            NSString *unit) {
+static inline NSDictionary *A12MPNetOutput(NSString *symbol, NSString *unit) {
     return @{
         @"Name": unit,
         @"OperationName": @"op0",
@@ -173,7 +168,6 @@ static inline NSData *A12MPNetBuildDescription(NSError **error) {
         @"Params": @{@"Type": @"Add"},
         @"Type": @"ElementWise"
     };
-
     NSDictionary *network = @{
         identityUnit: identity,
         doubleUnit: doubler,
@@ -192,7 +186,6 @@ static inline NSData *A12MPNetBuildDescription(NSError **error) {
             @"OutputType": @"Float16"
         }
     };
-
     NSDictionary *identityProcedure = @{
         @"Name": @"identity",
         @"InputList": @[A12MPNetInput(@"x", identityUnit, channels, width)],
@@ -208,7 +201,6 @@ static inline NSData *A12MPNetBuildDescription(NSError **error) {
         @"OperationList": @[@{@"NetworkName": networkName, @"OperationName": @"op0"}],
         @"OutputList": @[A12MPNetOutput(@"y_double", doubleUnit)]
     };
-
     NSDictionary *plist = @{
         @"Version": @"1.0.10",
         @"Networks": @[networkName],
@@ -278,7 +270,7 @@ static inline NSString *A12MPNetDispatchProcedure(id memoryModel,
     }
 
     const NSUInteger elements = 64u * 128u;
-    const NSUInteger bytes = elements * sizeof(uint16_t); // exactly 16 KiB
+    const NSUInteger bytes = elements * sizeof(uint16_t);
     A12MPNetSurfaceRef inputSurfaces[2] = {NULL, NULL};
     A12MPNetSurfaceRef outputSurface = NULL;
     NSMutableArray *inputObjects = [NSMutableArray arrayWithCapacity:inputIndices.count];
@@ -286,29 +278,60 @@ static inline NSString *A12MPNetDispatchProcedure(id memoryModel,
 
     for (NSUInteger i = 0; i < inputIndices.count; ++i) {
         inputSurfaces[i] = A12MPNetMakeSurface(io, bytes);
-        if (!inputSurfaces[i]) goto surface_fail;
-        A12MPNetFill(io, inputSurfaces[i], 0x3C00u, elements); // +1.0 fp16
+        if (!inputSurfaces[i]) {
+            [lines addObject:[NSString stringWithFormat:
+                @"procedure%lu RESULT=FAIL stage=surface-create", (unsigned long)procedureIndex]];
+            A12MPNetReleaseSurfaces(inputSurfaces, outputSurface);
+            return @"fail";
+        }
+        A12MPNetFill(io, inputSurfaces[i], 0x3C00u, elements);
         id wrapped = ((id(*)(Class,SEL,void *))objc_msgSend)(
             surfaceClass, NSSelectorFromString(@"objectWithIOSurface:"),
             (void *)inputSurfaces[i]);
-        if (!wrapped) goto surface_fail;
+        if (!wrapped) {
+            [lines addObject:[NSString stringWithFormat:
+                @"procedure%lu RESULT=FAIL stage=surface-wrap-input", (unsigned long)procedureIndex]];
+            A12MPNetReleaseSurfaces(inputSurfaces, outputSurface);
+            return @"fail";
+        }
         [inputObjects addObject:wrapped];
     }
+
     outputSurface = A12MPNetMakeSurface(io, bytes);
-    if (!outputSurface) goto surface_fail;
+    if (!outputSurface) {
+        [lines addObject:[NSString stringWithFormat:
+            @"procedure%lu RESULT=FAIL stage=surface-create-output", (unsigned long)procedureIndex]];
+        A12MPNetReleaseSurfaces(inputSurfaces, outputSurface);
+        return @"fail";
+    }
     A12MPNetFill(io, outputSurface, 0x0000u, elements);
     id wrappedOutput = ((id(*)(Class,SEL,void *))objc_msgSend)(
         surfaceClass, NSSelectorFromString(@"objectWithIOSurface:"), (void *)outputSurface);
-    if (!wrappedOutput) goto surface_fail;
+    if (!wrappedOutput) {
+        [lines addObject:[NSString stringWithFormat:
+            @"procedure%lu RESULT=FAIL stage=surface-wrap-output", (unsigned long)procedureIndex]];
+        A12MPNetReleaseSurfaces(inputSurfaces, outputSurface);
+        return @"fail";
+    }
     [outputObjects addObject:wrappedOutput];
 
     SEL requestSel = NSSelectorFromString(
         @"requestWithInputs:inputIndices:outputs:outputIndices:procedureIndex:");
-    if (![requestClass respondsToSelector:requestSel]) goto request_fail;
+    if (![requestClass respondsToSelector:requestSel]) {
+        [lines addObject:[NSString stringWithFormat:
+            @"procedure%lu RESULT=FAIL stage=request-selector", (unsigned long)procedureIndex]];
+        A12MPNetReleaseSurfaces(inputSurfaces, outputSurface);
+        return @"fail";
+    }
     id request = ((id(*)(Class,SEL,id,id,id,id,id))objc_msgSend)(
         requestClass, requestSel,
         inputObjects, inputIndices, outputObjects, outputIndices, @(procedureIndex));
-    if (!request) goto request_fail;
+    if (!request) {
+        [lines addObject:[NSString stringWithFormat:
+            @"procedure%lu RESULT=FAIL stage=request", (unsigned long)procedureIndex]];
+        A12MPNetReleaseSurfaces(inputSurfaces, outputSurface);
+        return @"fail";
+    }
 
     NSError *mapError = nil;
     BOOL mapped = ((BOOL(*)(id,SEL,id,BOOL,NSError **))objc_msgSend)(
@@ -318,7 +341,8 @@ static inline NSString *A12MPNetDispatchProcedure(id memoryModel,
         [lines addObject:[NSString stringWithFormat:
             @"procedure%lu RESULT=FAIL stage=map error=%@",
             (unsigned long)procedureIndex, A12MPNetError(mapError)]];
-        goto cleanup_fail;
+        A12MPNetReleaseSurfaces(inputSurfaces, outputSurface);
+        return @"fail";
     }
 
     NSError *evalError = nil;
@@ -327,7 +351,6 @@ static inline NSString *A12MPNetDispatchProcedure(id memoryModel,
         memoryModel, NSSelectorFromString(@"evaluateWithQoS:options:request:error:"),
         25u, @{}, request, &evalError);
     double evalMS = (NSDate.timeIntervalSinceReferenceDate - evalStart) * 1000.0;
-
     if ([memoryModel respondsToSelector:NSSelectorFromString(@"unmapIOSurfacesWithRequest:")]) {
         ((void(*)(id,SEL,id))objc_msgSend)(
             memoryModel, NSSelectorFromString(@"unmapIOSurfacesWithRequest:"), request);
@@ -336,7 +359,8 @@ static inline NSString *A12MPNetDispatchProcedure(id memoryModel,
         [lines addObject:[NSString stringWithFormat:
             @"procedure%lu RESULT=FAIL stage=evaluate evalMs=%.2f error=%@",
             (unsigned long)procedureIndex, evalMS, A12MPNetError(evalError)]];
-        goto cleanup_fail;
+        A12MPNetReleaseSurfaces(inputSurfaces, outputSurface);
+        return @"fail";
     }
 
     io.lock(outputSurface, 0, NULL);
@@ -358,22 +382,8 @@ static inline NSString *A12MPNetDispatchProcedure(id memoryModel,
         (unsigned long)procedureIndex, evalMS, kind,
         (unsigned long)ones, (unsigned long)twos, (unsigned long)other,
         (unsigned long)elements, first]];
-
-    for (NSUInteger i = 0; i < 2; ++i) if (inputSurfaces[i]) CFRelease(inputSurfaces[i]);
-    if (outputSurface) CFRelease(outputSurface);
+    A12MPNetReleaseSurfaces(inputSurfaces, outputSurface);
     return kind;
-
-surface_fail:
-    [lines addObject:[NSString stringWithFormat:
-        @"procedure%lu RESULT=FAIL stage=surface-create-wrap", (unsigned long)procedureIndex]];
-    goto cleanup_fail;
-request_fail:
-    [lines addObject:[NSString stringWithFormat:
-        @"procedure%lu RESULT=FAIL stage=request", (unsigned long)procedureIndex]];
-cleanup_fail:
-    for (NSUInteger i = 0; i < 2; ++i) if (inputSurfaces[i]) CFRelease(inputSurfaces[i]);
-    if (outputSurface) CFRelease(outputSurface);
-    return @"fail";
 }
 
 static inline NSString *A12ANETargetedRuntimeProbe(void) {
@@ -429,12 +439,8 @@ static inline NSString *A12ANETargetedRuntimeProbe(void) {
             cacheHit = ((BOOL(*)(id,SEL))objc_msgSend)(
                 memoryModel, NSSelectorFromString(@"compiledModelExists"));
         }
-
-        NSString *localPath = nil;
-        if ([memoryModel respondsToSelector:NSSelectorFromString(@"localModelPath")]) {
-            localPath = ((id(*)(id,SEL))objc_msgSend)(
-                memoryModel, NSSelectorFromString(@"localModelPath"));
-        }
+        NSString *localPath = [memoryModel respondsToSelector:NSSelectorFromString(@"localModelPath")]
+            ? ((id(*)(id,SEL))objc_msgSend)(memoryModel, NSSelectorFromString(@"localModelPath")) : nil;
         if (!cacheHit) {
             if (![localPath isKindOfClass:NSString.class] || localPath.length == 0) {
                 [lines addObject:@"RESULT=FAIL stage=local-model-path"];
@@ -442,12 +448,13 @@ static inline NSString *A12ANETargetedRuntimeProbe(void) {
             }
             NSError *ioError = nil;
             NSFileManager *fm = NSFileManager.defaultManager;
-            if (![fm createDirectoryAtPath:localPath
-                withIntermediateDirectories:YES attributes:nil error:&ioError] ||
-                ![net writeToFile:[localPath stringByAppendingPathComponent:@"net.plist"]
-                         options:NSDataWritingAtomic error:&ioError] ||
-                ![dummyWeight writeToFile:[localPath stringByAppendingPathComponent:@"weights.0"]
-                                 options:NSDataWritingAtomic error:&ioError]) {
+            BOOL materialized = [fm createDirectoryAtPath:localPath
+                                withIntermediateDirectories:YES attributes:nil error:&ioError] &&
+                [net writeToFile:[localPath stringByAppendingPathComponent:@"net.plist"]
+                         options:NSDataWritingAtomic error:&ioError] &&
+                [dummyWeight writeToFile:[localPath stringByAppendingPathComponent:@"weights.0"]
+                                 options:NSDataWritingAtomic error:&ioError];
+            if (!materialized) {
                 [lines addObject:[NSString stringWithFormat:@"RESULT=FAIL stage=materialize error=%@",
                     A12MPNetError(ioError)]];
                 return [lines componentsJoinedByString:@"\n"];
@@ -511,8 +518,7 @@ static inline NSString *A12ANETargetedRuntimeProbe(void) {
                 [classes addObject:kind ?: @"fail"];
             }
         } else {
-            [lines addObject:[NSString stringWithFormat:
-                @"dispatch=SKIP reason=%@",
+            [lines addObject:[NSString stringWithFormat:@"dispatch=SKIP reason=%@",
                 !loweredModel ? @"lowered-model-missing" : @"procedureCount!=2"]];
         }
 
