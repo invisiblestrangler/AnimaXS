@@ -6,15 +6,14 @@ struct AnimaXSApp: App {
 
     init() {
         #if !targetEnvironment(simulator)
-        // Experiment branch only: Stage 2J proved one real block-0 W8 model
-        // loads once with 10 legal procedures. Stage 2K keeps that model loaded
-        // and compares each procedure against the current production prepared
-        // donor on identical deterministic FP16 IOSurface input. Q/K/V compare
-        // against the fused production QKV model; the other seven against the
-        // corresponding production projection model. No diffusion is involved.
+        // Experiment branch only: Stage 2K proved block-0's 10 procedures are
+        // bit-exact against production. Stage 2L now measures the actual A12
+        // residency ceiling of that architecture by progressively loading real
+        // block containers, keeping admitted blocks resident, and stopping on
+        // the first fresh pressure/pathology signal. No diffusion is involved.
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = A12ANEStage2KProbe() ?? "Stage 2K block0 probe returned nil"
-            print("\n========== ANIMAXS_ANE_BLOCK0_MULTIPROC_STAGE2K ==========\n\(result)\n===========================================================\n")
+            let result = A12ANEStage2LProbe() ?? "Stage 2L residency probe returned nil"
+            print("\n========== ANIMAXS_ANE_MULTIPROC_RESIDENCY_STAGE2L ==========\n\(result)\n================================================================\n")
         }
         #endif
     }
