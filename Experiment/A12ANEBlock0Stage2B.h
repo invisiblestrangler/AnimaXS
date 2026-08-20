@@ -7,9 +7,19 @@
 // production donor is lowered independently, preserving Apple's exact native
 // W8 Conv/GOC representation, and the eight resulting native network bodies are
 // combined under unique names in one procedure-capable netplist.
+//
+// When included by a later experiment stage, preserve the outer launch-symbol
+// alias across the Stage-2A import. Standalone Stage 2B behavior is unchanged.
+#ifdef A12ANETargetedRuntimeProbe
+#define A12S2B_NESTED_LAUNCH_ALIAS 1
+#undef A12ANETargetedRuntimeProbe
+#endif
 #define A12ANETargetedRuntimeProbe A12ANETargetedRuntimeProbe_Stage2A
 #import "../AnimaXS/Runtime/ANE/A12ANEMultiProcProbeV2.h"
 #undef A12ANETargetedRuntimeProbe
+#ifdef A12S2B_NESTED_LAUNCH_ALIAS
+#define A12ANETargetedRuntimeProbe A12ANETargetedRuntimeProbe_Stage2B
+#endif
 
 #if TARGET_OS_SIMULATOR
 static inline NSString *A12ANETargetedRuntimeProbe(void) {
