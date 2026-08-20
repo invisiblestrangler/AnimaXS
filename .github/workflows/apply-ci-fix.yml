@@ -1,0 +1,42 @@
+name: Apply one-shot Swift CI fix
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.head_ref == 'experiment/ane-multiproc-production-ab'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: experiment/ane-multiproc-production-ab
+      - name: Apply exact compiler fix
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('AnimaXS/Runtime/Metal/DiTBlockExecutor.swift')
+          s = p.read_text()
+          old_sig = '        _ command: MTLCommandBuffer, hiddenHalf: MTLBuffer, rows: Int = Self.tokens\n'
+          new_sig = '        _ command: MTLCommandBuffer, hiddenHalf: MTLBuffer, rows: Int\n'
+          old_call = '            try encodeMLPActivation(s5, hiddenHalf: aneSurfaces.hidden.metalBuffer)\n'
+          new_call = '            try encodeMLPActivation(s5, hiddenHalf: aneSurfaces.hidden.metalBuffer,\n                                    rows: Self.tokens)\n'
+          assert s.count(old_sig) == 1, f'signature occurrences={s.count(old_sig)}'
+          assert s.count(old_call) == 1, f'call occurrences={s.count(old_call)}'
+          s = s.replace(old_sig, new_sig)
+          s = s.replace(old_call, new_call)
+          p.write_text(s)
+          PY
+          rm .github/workflows/apply-ci-fix.yml
+      - name: Commit source fix and self-remove
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add AnimaXS/Runtime/Metal/DiTBlockExecutor.swift .github/workflows/apply-ci-fix.yml
+          git diff --cached --check
+          git commit -m "Fix dynamic DiT MLP row argument"
+          git push origin HEAD:experiment/ane-multiproc-production-ab
