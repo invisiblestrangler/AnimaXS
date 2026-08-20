@@ -348,7 +348,10 @@ static inline NSMutableDictionary *A12S2ProcedureOutput(
     id bottom = source[@"Bottom"];
     NSString *unitName = nil;
     if ([bottom isKindOfClass:NSString.class]) unitName = bottom;
-    else if ([bottom isKindOfClass:NSArray.class] && [bottom.firstObject isKindOfClass:NSString.class]) unitName = bottom.firstObject;
+    else if ([bottom isKindOfClass:NSArray.class]) {
+        NSArray *bottomArray = (NSArray *)bottom;
+        if ([bottomArray.firstObject isKindOfClass:NSString.class]) unitName = bottomArray.firstObject;
+    }
     if (!unitName) {
         NSArray *units = [network[@"Units"] isKindOfClass:NSArray.class] ? network[@"Units"] : @[];
         unitName = [units.lastObject isKindOfClass:NSString.class] ? units.lastObject : symbol;
@@ -480,7 +483,7 @@ static inline BOOL A12S2NormalizeWeights(
             NSString *newName = [NSString stringWithFormat:@"s2_n%02lu_w%02lu_%@",
                 (unsigned long)n, (unsigned long)w,
                 reference.lastPathComponent.length ? reference.lastPathComponent : @"weights.bin"];
-            normalized[w] = newName;
+            [normalized addObject:newName];
             weightMap[newName] = @{@"offset": @0, @"data": data};
             totalBytes += data.length;
             [lines addObject:[NSString stringWithFormat:
