@@ -6,9 +6,7 @@
 // while the old eight-model production backend remains untouched for A/B.
 // Once the physical-device A/B is accepted, these helpers can be moved out of
 // Experiment/ without changing the Swift scheduler API below.
-#define A12ANEStage2MProbe A12ANEStage2MProbeProductionUnused
 #import "../../../Experiment/A12ANEMultiProcResidencyStage2MMemSafe.h"
-#undef A12ANEStage2MProbe
 
 #if !TARGET_OS_SIMULATOR
 
@@ -20,10 +18,6 @@ static inline NSString *A12MPErrorText(NSArray<NSString *> *detail, NSString *fa
     return fallback ?: @"multiprocedure ANE operation failed";
 }
 
-/// Creates one real block's 10-procedure _ANEInMemoryModel and LEAVES IT
-/// LOADED. The large construction/normalization map lives only inside this
-/// autorelease pool; Stage2L already clears the descriptor after load.
-/// The returned NSMutableDictionary is an opaque handle owned by Swift.
 static inline NSMutableDictionary * _Nullable A12ANEMultiProcCreateLoadedHandle(
     NSUInteger block,
     double * _Nullable compileMSOut,
@@ -91,8 +85,6 @@ static inline void A12MPSetError(NSMutableDictionary *handle, NSArray<NSString *
     handle[@"lastError"] = A12MPErrorText(detail, fallback);
 }
 
-/// Reloads a previously unloaded+trimmed handle. Returns the private runtime's
-/// loadWithQoS wall time through loadMSOut.
 static inline BOOL A12ANEMultiProcLoadHandle(
     NSMutableDictionary * _Nullable handle,
     double * _Nullable loadMSOut) {
@@ -123,8 +115,6 @@ static inline BOOL A12ANEMultiProcLoadHandle(
     return YES;
 }
 
-/// Unloads ANE residency then applies the most aggressive Stage2M trim proven
-/// reloadable on device: descriptor + lowered model + attributes + program.
 static inline BOOL A12ANEMultiProcUnloadHandle(
     NSMutableDictionary * _Nullable handle,
     double * _Nullable unloadMSOut) {
@@ -151,9 +141,6 @@ static inline BOOL A12ANEMultiProcUnloadHandle(
     return YES;
 }
 
-/// Dispatches one named single-output procedure from the currently loaded block
-/// model. Stage2K already proved all ten procedure outputs bit-exact against the
-/// corresponding production projection path.
 static inline BOOL A12ANEMultiProcEvaluateHandle(
     NSMutableDictionary * _Nullable handle,
     NSString *procedureName,
