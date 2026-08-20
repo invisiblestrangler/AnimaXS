@@ -137,7 +137,9 @@ static inline NSString *A12ANEPrivateRuntimeInventory(void) {
             aneHandle ? @"PASS" : @"FAIL", espressoHandle ? @"PASS" : @"FAIL"]];
 
         int total = objc_getClassList(NULL, 0);
-        Class *classes = total > 0 ? malloc(sizeof(Class) * (NSUInteger)total) : NULL;
+        __unsafe_unretained Class *classes = total > 0
+            ? (__unsafe_unretained Class *)malloc(sizeof(Class) * (NSUInteger)total)
+            : NULL;
         int copied = classes ? objc_getClassList(classes, total) : 0;
 
         NSMutableDictionary<NSString *, NSValue *> *relevant = [NSMutableDictionary dictionary];
