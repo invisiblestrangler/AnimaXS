@@ -6,13 +6,12 @@ struct AnimaXSApp: App {
 
     init() {
         #if !targetEnvironment(simulator)
-        // Experiment branch only: lower each block-0 W8 donor exactly once,
-        // then compile real multi-procedure subsets (2, 2-QKV, 6, 7, 8)
-        // to distinguish container grammar problems from an ANEC helper/resource
-        // threshold. No prompt, diffusion, VAE, or image generation is involved.
+        // Experiment branch only: isolate the first ANEC failure boundary with
+        // one real block-0 self_o W8 network: raw Espresso dump v1.0.9, then
+        // Version 1.0.10, then one synthesized procedure. No generation runs.
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = A12ANETargetedRuntimeProbe() ?? "Stage 2C block0 probe returned nil"
-            print("\n========== ANIMAXS_ANE_BLOCK0_MULTIPROC_STAGE2C ==========\n\(result)\n===========================================================\n")
+            let result = A12ANETargetedRuntimeProbe() ?? "Stage 2D block0 probe returned nil"
+            print("\n========== ANIMAXS_ANE_BLOCK0_MULTIPROC_STAGE2D ==========\n\(result)\n===========================================================\n")
         }
         #endif
     }
