@@ -6,12 +6,12 @@ struct AnimaXSApp: App {
 
     init() {
         #if !targetEnvironment(simulator)
-        // Experiment branch only: compile/load one native ANE netplist that
-        // exposes two procedures, then dispatch both by procedure index.
+        // Experiment branch only: compile/load one native ANE netplist with
+        // two network/procedure pairs, then dispatch both emitted procedure IDs.
         // No DiT pack, prompt, diffusion, or generation is involved.
         DispatchQueue.global(qos: .userInitiated).async {
             let result = A12ANETargetedRuntimeProbe() ?? "multi-procedure probe returned nil"
-            print("\n========== ANIMAXS_ANE_MULTIPROC_NETPLIST_V1 ==========\n\(result)\n=========================================================\n")
+            print("\n========== ANIMAXS_ANE_MULTIPROC_NETPLIST_V2 ==========\n\(result)\n=========================================================\n")
         }
         #endif
     }
