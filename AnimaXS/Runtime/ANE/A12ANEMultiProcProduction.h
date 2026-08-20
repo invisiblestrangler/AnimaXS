@@ -18,6 +18,34 @@ static inline NSString *A12MPErrorText(NSArray<NSString *> *detail, NSString *fa
     return fallback ?: @"multiprocedure ANE operation failed";
 }
 
+// Exact Stage2N build sequence, given a production-only name so this header
+// does not need to import Stage2N (which would re-import the Stage2L static
+// helper chain in the same translation unit).
+static inline BOOL A12MPBuildBlock(
+    NSUInteger block,
+    NSURL *root,
+    NSString *runtimeVersion,
+    NSMutableArray<NSString *> *detail,
+    NSMutableDictionary **plistOut,
+    NSMutableDictionary **weightsOut) {
+    NSArray<NSMutableDictionary *> *donors = A12S2LFindDonors(block, detail);
+    if (donors.count != 8) return NO;
+    NSMutableDictionary *canonical = A12S2HBuildCanonicalCombined(
+        donors, root, runtimeVersion, detail);
+    NSMutableDictionary *full10 = canonical ? A12S2JSplitQKV(canonical, detail) : nil;
+    NSMutableDictionary *plist = full10 ? A12S2HSubset(
+        full10, @[@0,@1,@2,@3,@4,@5,@6,@7,@8,@9], detail,
+        [NSString stringWithFormat:@"prod-mp-b%02lu-full10", (unsigned long)block]) : nil;
+    NSArray<NSDictionary *> *donorMap = donors ? A12S2JDonorMap(donors) : nil;
+    NSMutableDictionary *weights = [NSMutableDictionary dictionary];
+    BOOL ok = plist && donorMap.count == 10 &&
+        A12S2JNormalizeWeightsDedup(plist, donorMap, root, weights, detail);
+    if (!ok) return NO;
+    if (plistOut) *plistOut = plist;
+    if (weightsOut) *weightsOut = weights;
+    return YES;
+}
+
 static inline NSMutableDictionary * _Nullable A12ANEMultiProcCreateLoadedHandle(
     NSUInteger block,
     double * _Nullable compileMSOut,
@@ -32,7 +60,7 @@ static inline NSMutableDictionary * _Nullable A12ANEMultiProcCreateLoadedHandle(
                 (unsigned long)block, NSUUID.UUID.UUIDString]] isDirectory:YES];
         NSMutableDictionary *plist = nil;
         NSMutableDictionary *weights = nil;
-        if (!A12S2NBuildBlock(block, root, runtime, detail, &plist, &weights)) {
+        if (!A12MPBuildBlock(block, root, runtime, detail, &plist, &weights)) {
             [NSFileManager.defaultManager removeItemAtURL:root error:nil];
             return nil;
         }
