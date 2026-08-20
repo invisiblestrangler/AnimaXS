@@ -3,240 +3,240 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import <dlfcn.h>
+#import <mach-o/dyld.h>
+#import <mach-o/loader.h>
+#import <stdint.h>
+#import <string.h>
 
-// Experiment branch only.
-//
-// V1 established the private ANE/Espresso Objective-C API surface on the
-// physical A12 device. This V2 probe is narrower: it mines the actual loaded
-// framework binaries for embedded compiler/runtime vocabulary around
-// multi-head / procedure support, and constructs only lightweight metadata
-// objects (_ANEProcedureData / _ANEModelInstanceParameters) in memory.
-//
-// No model is compiled, loaded, evaluated, mapped, or unloaded here.
+// Experiment branch only. Read-only runtime introspection.
+// No model compile/load/evaluate/mapping is performed here.
 
 #if TARGET_OS_SIMULATOR
 static inline NSString *A12ANETargetedRuntimeProbe(void) {
-    return @"ANE targeted runtime probe v2\nRESULT=SKIP simulator";
+    return @"ANE targeted runtime probe v3\nRESULT=SKIP simulator";
 }
 #else
 
-static inline BOOL A12ProbeContains(NSString *value, NSString *needle) {
+static inline BOOL A12V3Contains(NSString *value, NSString *needle) {
     if (!value || !needle) return NO;
     return [value rangeOfString:needle options:NSCaseInsensitiveSearch].location != NSNotFound;
 }
 
-static inline NSString *A12ProbeSafeDescription(id value) {
+static inline NSString *A12V3Desc(id value) {
     if (!value) return @"(nil)";
     @try { return [value description] ?: @""; }
-    @catch (NSException *exception) {
-        return [NSString stringWithFormat:@"<description threw %@>", exception.name ?: @"exception"];
+    @catch (NSException *e) {
+        return [NSString stringWithFormat:@"<description threw %@: %@>", e.name ?: @"?", e.reason ?: @"?"];
     }
 }
 
-static inline BOOL A12ProbeInterestingBinaryString(NSString *value) {
+static inline BOOL A12V3InterestingString(NSString *value) {
     NSArray<NSString *> *needles = @[
-        @"multi_head", @"multihead", @"multi-head",
+        @"multi_head", @"multihead", @"multi-head", @"multi head",
         @"procedure", @"procedurearray", @"procedure_data", @"proceduredata",
         @"anefmodel", @"anef_", @"anef.",
         @"inputnetwork", @"input_network", @"input networks", @"inputnetworks",
         @"program_gen", @"programgen", @"program generation",
         @"two_nets", @"two nets", @"multifunction", @"multi_function",
-        @"networkdescription", @"network_description",
-        @"procedure_name", @"procedureindex", @"procedure_index"
+        @"networkdescription", @"network_description", @"network description",
+        @"procedure_name", @"procedurename", @"procedureindex", @"procedure_index",
+        @"espresso translation", @"translationoptions", @"translation_options"
     ];
-    for (NSString *needle in needles) {
-        if (A12ProbeContains(value, needle)) return YES;
-    }
+    for (NSString *needle in needles) if (A12V3Contains(value, needle)) return YES;
     return NO;
 }
 
-static inline NSArray<NSString *> *A12ProbeFilteredStringsAtPath(NSString *path,
-                                                                 NSString **errorText) {
-    NSError *error = nil;
-    NSData *data = [NSData dataWithContentsOfFile:path
-                                         options:NSDataReadingMappedIfSafe
-                                           error:&error];
-    if (!data) {
-        if (errorText) *errorText = error.localizedDescription ?: @"read failed";
-        return @[];
-    }
+static inline void A12V3ScanBytes(const uint8_t *bytes,
+                                  size_t length,
+                                  NSString *sectionLabel,
+                                  NSMutableOrderedSet<NSString *> *matches) {
+    if (!bytes || length == 0) return;
+    // Avoid pathological scans if a future OS maps a giant const section.
+    if (length > (64u * 1024u * 1024u)) length = 64u * 1024u * 1024u;
 
-    const uint8_t *bytes = (const uint8_t *)data.bytes;
-    const NSUInteger length = data.length;
-    NSUInteger start = NSNotFound;
-    NSMutableOrderedSet<NSString *> *matches = [NSMutableOrderedSet orderedSet];
-
-    for (NSUInteger i = 0; i <= length; ++i) {
+    size_t start = SIZE_MAX;
+    for (size_t i = 0; i <= length; ++i) {
         BOOL printable = NO;
         if (i < length) {
-            const uint8_t c = bytes[i];
+            uint8_t c = bytes[i];
             printable = (c >= 0x20 && c <= 0x7e);
         }
-
         if (printable) {
-            if (start == NSNotFound) start = i;
+            if (start == SIZE_MAX) start = i;
             continue;
         }
-
-        if (start != NSNotFound) {
-            const NSUInteger runLength = i - start;
-            if (runLength >= 4 && runLength <= 1024) {
+        if (start != SIZE_MAX) {
+            size_t run = i - start;
+            if (run >= 4 && run <= 1024) {
                 NSString *candidate = [[NSString alloc] initWithBytes:bytes + start
-                                                               length:runLength
+                                                               length:run
                                                              encoding:NSASCIIStringEncoding];
-                if (candidate && A12ProbeInterestingBinaryString(candidate)) {
-                    [matches addObject:candidate];
+                if (candidate && A12V3InterestingString(candidate)) {
+                    [matches addObject:[NSString stringWithFormat:@"%@ :: %@", sectionLabel, candidate]];
                 }
             }
-            start = NSNotFound;
+            start = SIZE_MAX;
         }
+    }
+}
+
+static inline void A12V3AppendMappedImageStrings(NSMutableArray<NSString *> *lines,
+                                                  NSString *imageNeedle,
+                                                  NSString *label) {
+    const struct mach_header_64 *header = NULL;
+    intptr_t slide = 0;
+    NSString *resolvedPath = nil;
+
+    uint32_t count = _dyld_image_count();
+    for (uint32_t i = 0; i < count; ++i) {
+        const char *raw = _dyld_get_image_name(i);
+        if (!raw) continue;
+        NSString *path = [NSString stringWithUTF8String:raw];
+        if (!A12V3Contains(path, imageNeedle)) continue;
+        const struct mach_header *h = _dyld_get_image_header(i);
+        if (!h || h->magic != MH_MAGIC_64) continue;
+        header = (const struct mach_header_64 *)h;
+        slide = _dyld_get_image_vmaddr_slide(i);
+        resolvedPath = path;
+        break;
+    }
+
+    [lines addObject:[NSString stringWithFormat:@"-- MAPPED STRINGS %@ --", label]];
+    if (!header) {
+        [lines addObject:@"mappedImage=NOT_FOUND"];
+        return;
+    }
+    [lines addObject:[NSString stringWithFormat:@"mappedImage=FOUND path=%@ slide=%lld",
+        resolvedPath ?: @"?", (long long)slide]];
+
+    NSMutableOrderedSet<NSString *> *matches = [NSMutableOrderedSet orderedSet];
+    const uint8_t *cursor = (const uint8_t *)(header + 1);
+    for (uint32_t commandIndex = 0; commandIndex < header->ncmds; ++commandIndex) {
+        const struct load_command *lc = (const struct load_command *)cursor;
+        if (lc->cmd == LC_SEGMENT_64 && lc->cmdsize >= sizeof(struct segment_command_64)) {
+            const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+            const struct section_64 *sections = (const struct section_64 *)(seg + 1);
+            for (uint32_t s = 0; s < seg->nsects; ++s) {
+                const struct section_64 *sec = &sections[s];
+                NSString *sectName = [NSString stringWithUTF8String:sec->sectname] ?: @"?";
+                BOOL scan = [sectName isEqualToString:@"__cstring"] ||
+                            [sectName isEqualToString:@"__objc_methname"] ||
+                            [sectName isEqualToString:@"__objc_classname"] ||
+                            [sectName isEqualToString:@"__const"];
+                if (!scan || sec->size == 0) continue;
+                uintptr_t address = (uintptr_t)(sec->addr + (uint64_t)slide);
+                NSString *sectionLabel = [NSString stringWithFormat:@"%s/%s", seg->segname, sec->sectname];
+                A12V3ScanBytes((const uint8_t *)address, (size_t)sec->size, sectionLabel, matches);
+            }
+        }
+        if (lc->cmdsize == 0) break;
+        cursor += lc->cmdsize;
     }
 
     NSArray<NSString *> *sorted = [[matches array] sortedArrayUsingSelector:@selector(compare:)];
-    // Keep Xcode console output bounded while still returning far more than the
-    // handful of strings we actually expect for these precise filters.
-    if (sorted.count > 400) {
-        sorted = [sorted subarrayWithRange:NSMakeRange(0, 400)];
-    }
-    return sorted;
+    [lines addObject:[NSString stringWithFormat:@"interestingStringCount=%lu", (unsigned long)sorted.count]];
+    NSUInteger limit = MIN((NSUInteger)500, sorted.count);
+    for (NSUInteger i = 0; i < limit; ++i) [lines addObject:sorted[i]];
+    if (sorted.count > limit) [lines addObject:[NSString stringWithFormat:@"... truncated %lu entries", (unsigned long)(sorted.count - limit)]];
 }
 
-static inline void A12ProbeAppendBinaryStrings(NSMutableArray<NSString *> *lines,
-                                                NSString *label,
-                                                NSString *path) {
-    NSString *errorText = nil;
-    NSArray<NSString *> *strings = A12ProbeFilteredStringsAtPath(path, &errorText);
-    [lines addObject:[NSString stringWithFormat:@"-- BINARY STRINGS %@ count=%lu --",
-        label, (unsigned long)strings.count]];
-    if (errorText) {
-        [lines addObject:[NSString stringWithFormat:@"readError=%@", errorText]];
+static inline void A12V3AppendExportedKey(NSMutableArray<NSString *> *lines,
+                                          void *aneHandle,
+                                          void *espressoHandle,
+                                          const char *symbol) {
+    void *ptr = aneHandle ? dlsym(aneHandle, symbol) : NULL;
+    if (!ptr && espressoHandle) ptr = dlsym(espressoHandle, symbol);
+    if (!ptr) {
+        [lines addObject:[NSString stringWithFormat:@"export %s=ABSENT", symbol]];
         return;
     }
-    for (NSString *value in strings) [lines addObject:value];
+
+    id value = nil;
+    @try {
+        value = *(__unsafe_unretained id *)ptr;
+    } @catch (__unused NSException *e) {
+        value = nil;
+    }
+    [lines addObject:[NSString stringWithFormat:@"export %s=YES value=%@ class=%@",
+        symbol,
+        A12V3Desc(value),
+        value ? NSStringFromClass([value class]) : @"(nil)"]];
 }
 
-static inline void A12ProbeAppendProcedureMetadataObjects(NSMutableArray<NSString *> *lines) {
-    [lines addObject:@"-- PROCEDURE METADATA OBJECT CONSTRUCTION --"];
+static inline void A12V3AppendMetadataFactoryVariants(NSMutableArray<NSString *> *lines) {
+    [lines addObject:@"-- MODEL INSTANCE PARAMETER FACTORY SEMANTICS --"];
 
     Class procedureClass = NSClassFromString(@"_ANEProcedureData");
     Class paramsClass = NSClassFromString(@"_ANEModelInstanceParameters");
     SEL procedureFactory = NSSelectorFromString(@"procedureDataWithSymbol:weightArray:");
     SEL paramsFactory = NSSelectorFromString(@"withProcedureData:procedureArray:");
 
-    [lines addObject:[NSString stringWithFormat:@"classes procedureData=%@ modelInstanceParams=%@",
-        procedureClass ? @"YES" : @"NO", paramsClass ? @"YES" : @"NO"]];
-
     if (!procedureClass || !paramsClass ||
         ![procedureClass respondsToSelector:procedureFactory] ||
         ![paramsClass respondsToSelector:paramsFactory]) {
-        [lines addObject:@"metadataConstruction=SKIP missing class/selector"];
+        [lines addObject:@"factorySemantics=SKIP missing private API"];
         return;
     }
 
     @try {
-        id p0 = ((id(*)(Class,SEL,id,id))objc_msgSend)(
-            procedureClass, procedureFactory, @"probe.identity", @[]);
-        id p1 = ((id(*)(Class,SEL,id,id))objc_msgSend)(
-            procedureClass, procedureFactory, @"probe.double", @[]);
+        id p0 = ((id(*)(Class,SEL,id,id))objc_msgSend)(procedureClass, procedureFactory, @"probe.identity", @[]);
+        id p1 = ((id(*)(Class,SEL,id,id))objc_msgSend)(procedureClass, procedureFactory, @"probe.double", @[]);
+        NSArray *array = (p0 && p1) ? @[p0, p1] : @[];
+        [lines addObject:[NSString stringWithFormat:@"p0=%@", A12V3Desc(p0)]];
+        [lines addObject:[NSString stringWithFormat:@"p1=%@", A12V3Desc(p1)]];
 
-        [lines addObject:[NSString stringWithFormat:@"p0 class=%@ desc=%@",
-            p0 ? NSStringFromClass([p0 class]) : @"(nil)", A12ProbeSafeDescription(p0)]];
-        [lines addObject:[NSString stringWithFormat:@"p1 class=%@ desc=%@",
-            p1 ? NSStringFromClass([p1 class]) : @"(nil)", A12ProbeSafeDescription(p1)]];
-
-        if (p0 && p1) {
-            id params = ((id(*)(Class,SEL,id,id))objc_msgSend)(
-                paramsClass, paramsFactory, p0, @[p0, p1]);
-            [lines addObject:[NSString stringWithFormat:@"params class=%@ desc=%@",
-                params ? NSStringFromClass([params class]) : @"(nil)",
-                A12ProbeSafeDescription(params)]];
-
-            if (params) {
+        NSArray *firstArgs = p0 ? @[p0, @"probe.instance"] : @[@"probe.instance"];
+        for (id firstArg in firstArgs) {
+            @try {
+                id params = ((id(*)(Class,SEL,id,id))objc_msgSend)(paramsClass, paramsFactory, firstArg, array);
                 SEL instanceNameSel = NSSelectorFromString(@"instanceName");
                 SEL procedureArraySel = NSSelectorFromString(@"procedureArray");
-                id instanceName = [params respondsToSelector:instanceNameSel]
+                id instanceName = params && [params respondsToSelector:instanceNameSel]
                     ? ((id(*)(id,SEL))objc_msgSend)(params, instanceNameSel) : nil;
-                id procedureArray = [params respondsToSelector:procedureArraySel]
+                id procedureArray = params && [params respondsToSelector:procedureArraySel]
                     ? ((id(*)(id,SEL))objc_msgSend)(params, procedureArraySel) : nil;
-                [lines addObject:[NSString stringWithFormat:@"params.instanceName=%@",
-                    A12ProbeSafeDescription(instanceName)]];
-                [lines addObject:[NSString stringWithFormat:@"params.procedureArray=%@",
-                    A12ProbeSafeDescription(procedureArray)]];
+                [lines addObject:[NSString stringWithFormat:
+                    @"firstArgClass=%@ firstArg=%@ => params=%@ instanceName=%@ procedureArray=%@",
+                    NSStringFromClass([firstArg class]), A12V3Desc(firstArg), A12V3Desc(params),
+                    A12V3Desc(instanceName), A12V3Desc(procedureArray)]];
+            } @catch (NSException *inner) {
+                [lines addObject:[NSString stringWithFormat:@"firstArg=%@ => EXCEPTION %@ %@",
+                    A12V3Desc(firstArg), inner.name ?: @"?", inner.reason ?: @"?"]];
             }
         }
-        [lines addObject:@"metadataConstruction=PASS"];
-    } @catch (NSException *exception) {
-        [lines addObject:[NSString stringWithFormat:@"metadataConstruction=EXCEPTION name=%@ reason=%@",
-            exception.name ?: @"?", exception.reason ?: @"?"]];
-    }
-}
-
-static inline void A12ProbeAppendKeyRuntimeFacts(NSMutableArray<NSString *> *lines) {
-    [lines addObject:@"-- KEY RUNTIME SELECTOR PRESENCE --"];
-    NSDictionary<NSString *, NSArray<NSString *> *> *selectors = @{
-        @"_ANEModel": @[
-            @"procedureInfoForProcedureIndex:",
-            @"inputSymbolIndicesForProcedureIndex:",
-            @"outputSymbolIndicesForProcedureIndex:"
-        ],
-        @"_ANEClient": @[
-            @"loadModelNewInstance:options:modelInstParams:qos:error:",
-            @"prepareChainingWithModel:options:chainingReq:qos:error:"
-        ],
-        @"_ANEInMemoryModelDescriptor": @[
-            @"modelWithNetworkDescription:weights:optionsPlist:",
-            @"modelWithMILText:weights:optionsPlist:"
-        ]
-    };
-
-    for (NSString *className in [[selectors allKeys] sortedArrayUsingSelector:@selector(compare:)]) {
-        Class cls = NSClassFromString(className);
-        for (NSString *selectorName in selectors[className]) {
-            SEL sel = NSSelectorFromString(selectorName);
-            BOOL present = NO;
-            if (cls) {
-                if ([selectorName hasPrefix:@"modelWith"])
-                    present = class_getClassMethod(cls, sel) != NULL;
-                else
-                    present = class_getInstanceMethod(cls, sel) != NULL;
-            }
-            [lines addObject:[NSString stringWithFormat:@"%@ %@=%@",
-                className, selectorName, present ? @"YES" : @"NO"]];
-        }
-    }
-
-    NSArray<NSString *> *passClasses = @[
-        @"EspressoPass_multi_head_program_gen",
-        @"EspressoPass_multi_head_prune_undeclared",
-        @"EspressoPass_style_transfer_two_nets",
-        @"EspressoPass_style_transfer_two_nets_onlyanepart"
-    ];
-    for (NSString *className in passClasses) {
-        [lines addObject:[NSString stringWithFormat:@"class %@=%@",
-            className, NSClassFromString(className) ? @"YES" : @"NO"]];
+        [lines addObject:@"factorySemantics=PASS"];
+    } @catch (NSException *e) {
+        [lines addObject:[NSString stringWithFormat:@"factorySemantics=EXCEPTION %@ %@",
+            e.name ?: @"?", e.reason ?: @"?"]];
     }
 }
 
 static inline NSString *A12ANETargetedRuntimeProbe(void) {
     @autoreleasepool {
         NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithObjects:
-            @"ANE targeted runtime probe v2",
-            @"mode=binary vocabulary + lightweight metadata objects; no compile/load/evaluate",
+            @"ANE targeted runtime probe v3",
+            @"mode=dyld mapped-string vocabulary + exported constants + metadata semantics; no compile/load/evaluate",
             nil];
 
-        NSString *anePath = @"/System/Library/PrivateFrameworks/AppleNeuralEngine.framework/AppleNeuralEngine";
-        NSString *espressoPath = @"/System/Library/PrivateFrameworks/Espresso.framework/Espresso";
-        void *aneHandle = dlopen(anePath.UTF8String, RTLD_NOW | RTLD_LOCAL);
-        void *espressoHandle = dlopen(espressoPath.UTF8String, RTLD_NOW | RTLD_LOCAL);
+        const char *anePath = "/System/Library/PrivateFrameworks/AppleNeuralEngine.framework/AppleNeuralEngine";
+        const char *espressoPath = "/System/Library/PrivateFrameworks/Espresso.framework/Espresso";
+        void *aneHandle = dlopen(anePath, RTLD_NOW | RTLD_LOCAL);
+        void *espressoHandle = dlopen(espressoPath, RTLD_NOW | RTLD_LOCAL);
         [lines addObject:[NSString stringWithFormat:@"dlopen AppleNeuralEngine=%@ Espresso=%@",
             aneHandle ? @"PASS" : @"FAIL", espressoHandle ? @"PASS" : @"FAIL"]];
 
-        A12ProbeAppendKeyRuntimeFacts(lines);
-        A12ProbeAppendProcedureMetadataObjects(lines);
-        A12ProbeAppendBinaryStrings(lines, @"AppleNeuralEngine", anePath);
-        A12ProbeAppendBinaryStrings(lines, @"Espresso", espressoPath);
+        [lines addObject:@"-- EXPORTED ANEF / ESPRESSO KEY VALUES --"];
+        A12V3AppendExportedKey(lines, aneHandle, espressoHandle, "kANEFModelProcedureNameToIDMapKey");
+        A12V3AppendExportedKey(lines, aneHandle, espressoHandle, "kANEModelKeyEspressoTranslationOptions");
+        A12V3AppendExportedKey(lines, aneHandle, espressoHandle, "kANEFModelIdentityStrKey");
+        A12V3AppendExportedKey(lines, aneHandle, espressoHandle, "kANEFModelProceduresKey");
+        A12V3AppendExportedKey(lines, aneHandle, espressoHandle, "kANEFModelDescription");
 
-        [lines addObject:@"RESULT=PASS targeted-runtime-v2"];
+        A12V3AppendMetadataFactoryVariants(lines);
+        A12V3AppendMappedImageStrings(lines, @"AppleNeuralEngine.framework/AppleNeuralEngine", @"AppleNeuralEngine");
+        A12V3AppendMappedImageStrings(lines, @"Espresso.framework/Espresso", @"Espresso");
+
+        [lines addObject:@"RESULT=PASS targeted-runtime-v3"];
         return [lines componentsJoinedByString:@"\n"];
     }
 }
