@@ -726,7 +726,8 @@ final class DiTBlockExecutor {
             s5.label = "DiT block \(blockIndex) ANE GELU"
             try encodeHalfComputeBoundary(s5, aneSurfaces.hidden.metalBuffer,
                                           count: Self.tokens * Self.hidden)
-            try encodeMLPActivation(s5, hiddenHalf: aneSurfaces.hidden.metalBuffer)
+            try encodeMLPActivation(s5, hiddenHalf: aneSurfaces.hidden.metalBuffer,
+                                    rows: Self.tokens)
             let s5End = ProcessInfo.processInfo.systemUptime
             try await commitStandaloneCommand(s5, encodeSeconds: s5End - s5Start)
             try evaluateProjection(old: oldModels?.mlpDown, procedure: .mlpDown,
@@ -1076,7 +1077,7 @@ final class DiTBlockExecutor {
     }
 
     private func encodeMLPActivation(
-        _ command: MTLCommandBuffer, hiddenHalf: MTLBuffer, rows: Int = Self.tokens
+        _ command: MTLCommandBuffer, hiddenHalf: MTLBuffer, rows: Int
     ) throws {
         if optimization.fusedMLPActivation {
             try encodeFusedGELUHalf(
