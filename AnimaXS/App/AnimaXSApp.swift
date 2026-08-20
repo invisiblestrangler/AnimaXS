@@ -6,14 +6,15 @@ struct AnimaXSApp: App {
 
     init() {
         #if !targetEnvironment(simulator)
-        // Experiment branch only: Stage 2H proved a canonical real W8
-        // self_o+cross_q pair compiles and loads as two procedures, while the
-        // all-eight container is rejected as InvalidProcedure. Stage 2I
-        // isolates count, heterogeneous I/O geometry, and QKV multi-output.
+        // Experiment branch only: Stage 2I isolated the sole illegal property
+        // to self-QKV being one three-output procedure. Stage 2J splits that
+        // already-lowered QKV network into q/k/v single-output procedures while
+        // keeping exactly one loaded private ANE model per block. It proves the
+        // split-QKV 3-procedure model first, then the full 10-procedure block.
         // No prompt, diffusion, VAE, or image generation is involved.
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = A12ANEStage2IProbe() ?? "Stage 2I block0 probe returned nil"
-            print("\n========== ANIMAXS_ANE_BLOCK0_MULTIPROC_STAGE2I ==========\n\(result)\n===========================================================\n")
+            let result = A12ANEStage2JProbe() ?? "Stage 2J block0 probe returned nil"
+            print("\n========== ANIMAXS_ANE_BLOCK0_MULTIPROC_STAGE2J ==========\n\(result)\n===========================================================\n")
         }
         #endif
     }
