@@ -6,12 +6,12 @@ struct AnimaXSApp: App {
 
     init() {
         #if !targetEnvironment(simulator)
-        // Experiment branch only: mine the private AppleNeuralEngine/Espresso
+        // Experiment branch only: inspect the mapped private ANE/Espresso
         // runtime for concrete multi-procedure vocabulary and metadata shape.
         // This probe performs no model compile/load/evaluation.
         DispatchQueue.global(qos: .userInitiated).async {
             let result = A12ANETargetedRuntimeProbe() ?? "targeted runtime probe returned nil"
-            print("\n========== ANIMAXS_ANE_TARGETED_RUNTIME_V2 ==========\n\(result)\n=======================================================\n")
+            print("\n========== ANIMAXS_ANE_TARGETED_RUNTIME_V3 ==========\n\(result)\n=======================================================\n")
         }
         #endif
     }
