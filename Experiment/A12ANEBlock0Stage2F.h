@@ -14,12 +14,10 @@
 // their symbols and constructed the procedure entry. Everything else in the
 // lowered real W8 network body, including x/output stride dictionaries and the
 // exact Conv/GOC units + weights, remains unchanged.
-#define A12ANETargetedRuntimeProbe A12ANETargetedRuntimeProbe_Stage2E
 #import "A12ANEBlock0Stage2E.h"
-#undef A12ANETargetedRuntimeProbe
 
 #if TARGET_OS_SIMULATOR
-static inline NSString *A12ANETargetedRuntimeProbe(void) {
+static inline NSString *A12ANEStage2FProbe(void) {
     return @"ANE real block0 multi-procedure Stage 2F\nRESULT=SKIP simulator";
 }
 #else
@@ -133,7 +131,7 @@ static inline BOOL A12S2FLoadPair(NSDictionary *plist,
     return procedureCount == 2 && unloaded;
 }
 
-static inline NSString *A12ANETargetedRuntimeProbe(void) {
+static inline NSString *A12ANEStage2FProbe(void) {
     @autoreleasepool {
         NSMutableArray<NSString *> *lines = [NSMutableArray arrayWithObjects:
             @"ANE real block0 multi-procedure Stage 2F",
