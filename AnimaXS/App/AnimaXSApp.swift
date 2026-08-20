@@ -6,12 +6,12 @@ struct AnimaXSApp: App {
 
     init() {
         #if !targetEnvironment(simulator)
-        // Experiment branch only: dump the private AppleNeuralEngine/Espresso
-        // Objective-C runtime API surface. This is read-only and deliberately
-        // performs no model compilation, loading, evaluation, or inference.
+        // Experiment branch only: mine the private AppleNeuralEngine/Espresso
+        // runtime for concrete multi-procedure vocabulary and metadata shape.
+        // This probe performs no model compile/load/evaluation.
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = A12ANEPrivateRuntimeInventory() ?? "runtime inventory returned nil"
-            print("\n========== ANIMAXS_ANE_RUNTIME_INVENTORY_V1 ==========\n\(result)\n========================================================\n")
+            let result = A12ANETargetedRuntimeProbe() ?? "targeted runtime probe returned nil"
+            print("\n========== ANIMAXS_ANE_TARGETED_RUNTIME_V2 ==========\n\(result)\n=======================================================\n")
         }
         #endif
     }
