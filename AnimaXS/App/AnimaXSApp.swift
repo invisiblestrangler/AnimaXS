@@ -6,13 +6,13 @@ struct AnimaXSApp: App {
 
     init() {
         #if !targetEnvironment(simulator)
-        // Experiment branch only: Stage 2N isolates the loader regression observed
-        // after Stage 2K. It compares the proven Stage-K cache-hit lifecycle against
-        // fresh-object, localModelPath, current Stage-2L helper, and same/new-object
-        // reload paths on separate real blocks. No diffusion is involved.
+        // Experiment branch only: Stage 2O measures how far the ~14 ms ANE
+        // runtime-hot reload state survives across distinct multiprocedure model
+        // identities. The key production point is reuse distance 21, matching the
+        // proven 6-pinned + 2-streaming scheduler's 22 streamed blocks.
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = A12ANEStage2NProbe() ?? "Stage 2N loader parity probe returned nil"
-            print("\n========== ANIMAXS_ANE_MULTIPROC_LOADER_STAGE2N ==========\n\(result)\n============================================================\n")
+            let result = A12ANEStage2OProbe() ?? "Stage 2O hot-cache reuse-distance probe returned nil"
+            print("\n========== ANIMAXS_ANE_MULTIPROC_HOT_CACHE_STAGE2O ==========\n\(result)\n================================================================\n")
         }
         #endif
     }
