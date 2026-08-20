@@ -6,13 +6,13 @@ struct AnimaXSApp: App {
 
     init() {
         #if !targetEnvironment(simulator)
-        // Experiment branch only: match Apple's private ANEC procedure grammar
-        // for real block-0 W8 networks while preserving Stage 2D's explicit
-        // compiler-file materialization. Test self_o first, then self_o+cross_q,
-        // then verify one load exposes two procedures.
+        // Experiment branch only: remove only the legacy network-level
+        // Inputs/Outputs arrays from real lowered W8 ANECIR after constructing
+        // ProcedureList, then test one real procedure and a two-procedure pair.
+        // No prompt, diffusion, VAE, or image generation is involved.
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = A12ANEStage2EPreparedProbe() ?? "Stage 2E prepared block0 probe returned nil"
-            print("\n========== ANIMAXS_ANE_BLOCK0_MULTIPROC_STAGE2E ==========\n\(result)\n===========================================================\n")
+            let result = A12ANETargetedRuntimeProbe() ?? "Stage 2F block0 probe returned nil"
+            print("\n========== ANIMAXS_ANE_BLOCK0_MULTIPROC_STAGE2F ==========\n\(result)\n===========================================================\n")
         }
         #endif
     }
