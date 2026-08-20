@@ -6,15 +6,13 @@ struct AnimaXSApp: App {
 
     init() {
         #if !targetEnvironment(simulator)
-        // Experiment branch only: Stage 2L found a real first-compile residency
-        // boundary at the 11th loaded 10-procedure block, but that admission still
-        // carried the temporary ~180 MB construction/weight-map state. Stage 2M
-        // first precompiles every block in isolation, then reloads descriptor-free
-        // unloaded model handles to measure clean resident-program capacity and
-        // warm scheduler load/unload costs. No diffusion is involved.
+        // Experiment branch only: Stage 2N isolates the loader regression observed
+        // after Stage 2K. It compares the proven Stage-K cache-hit lifecycle against
+        // fresh-object, localModelPath, current Stage-2L helper, and same/new-object
+        // reload paths on separate real blocks. No diffusion is involved.
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = A12ANEStage2MProbe() ?? "Stage 2M cache-hit residency probe returned nil"
-            print("\n========== ANIMAXS_ANE_MULTIPROC_RESIDENCY_STAGE2M ==========\n\(result)\n================================================================\n")
+            let result = A12ANEStage2NProbe() ?? "Stage 2N loader parity probe returned nil"
+            print("\n========== ANIMAXS_ANE_MULTIPROC_LOADER_STAGE2N ==========\n\(result)\n============================================================\n")
         }
         #endif
     }
