@@ -6,12 +6,12 @@ struct AnimaXSApp: App {
 
     init() {
         #if !targetEnvironment(simulator)
-        // Experiment branch only: preserve neighboring private Espresso/ANE
-        // parser strings and dump one known-good prepared ANEF description.
-        // No model compilation or evaluation is performed.
+        // Experiment branch only: compile/load one native ANE netplist that
+        // exposes two procedures, then dispatch both by procedure index.
+        // No DiT pack, prompt, diffusion, or generation is involved.
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = A12ANETargetedRuntimeProbe() ?? "targeted runtime probe returned nil"
-            print("\n========== ANIMAXS_ANE_TARGETED_RUNTIME_V4 ==========\n\(result)\n=======================================================\n")
+            let result = A12ANETargetedRuntimeProbe() ?? "multi-procedure probe returned nil"
+            print("\n========== ANIMAXS_ANE_MULTIPROC_NETPLIST_V1 ==========\n\(result)\n=========================================================\n")
         }
         #endif
     }
