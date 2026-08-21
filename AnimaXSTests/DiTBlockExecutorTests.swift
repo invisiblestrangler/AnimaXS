@@ -373,12 +373,11 @@ final class DiTBlockExecutorTests: XCTestCase {
     func testANEProductionSchedulerPolicyStaysInsideMeasuredCeiling() {
         XCTAssertEqual(ANEW8DiTModelProfile.full8.programCount, 8)
         XCTAssertEqual(ANEW8DiTModelProfile.kvWarm6.programCount, 6)
-        XCTAssertEqual(ANEW8DiTSchedulerPolicy.prefetchDepth, 3)
-        XCTAssertEqual(ANEW8DiTSchedulerPolicy.retireDepth, 1)
+        XCTAssertEqual(ANEW8DiTSchedulerPolicy.streamingSlots, 1)
         XCTAssertEqual(ANEW8DiTSchedulerPolicy.pinnedBlocks(for: .full8), 4)
-        XCTAssertEqual(ANEW8DiTSchedulerPolicy.pinnedBlocks(for: .kvWarm6), 6)
-        XCTAssertEqual(ANEW8DiTSchedulerPolicy.theoreticalPeakPrograms(for: .full8), 64)
-        XCTAssertEqual(ANEW8DiTSchedulerPolicy.theoreticalPeakPrograms(for: .kvWarm6), 60)
+        XCTAssertEqual(ANEW8DiTSchedulerPolicy.pinnedBlocks(for: .kvWarm6), 7)
+        XCTAssertEqual(ANEW8DiTSchedulerPolicy.theoreticalPeakPrograms(for: .full8), 40)
+        XCTAssertEqual(ANEW8DiTSchedulerPolicy.theoreticalPeakPrograms(for: .kvWarm6), 48)
         XCTAssertLessThanOrEqual(
             ANEW8DiTSchedulerPolicy.theoreticalPeakPrograms(for: .full8),
             ANEW8DiTSchedulerPolicy.measuredSafetyCeilingPrograms)
