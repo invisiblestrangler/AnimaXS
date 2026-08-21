@@ -90,7 +90,7 @@ final class AttentionExecutorTests: XCTestCase {
     /// Exact production DiT cross-attention shape with uniform scores. One V
     /// token contains +32; NegPiP marks only that row negative, so every output
     /// element must become -32/512 while the source V buffer itself stays +32.
-    func testNegPiPFlipsOnlyCrossAttentionValueRows() throws {
+    func testNegPiPFlipsOnlyCrossAttentionValueRows() async throws {
         let context = try requireContext()
         let heads = DiTBlockExecutor.heads
         let headDim = DiTBlockExecutor.headDim
@@ -110,19 +110,20 @@ final class AttentionExecutorTests: XCTestCase {
 
         var signs = [Float](repeating: 1, count: LLMAdapterMetal.maximumTokens)
         signs[7] = -1
-        let lease = try XCTUnwrap(NegPiPGenerationContext.install(signs: signs))
-        defer { NegPiPGenerationContext.clear(lease: lease) }
+        let scope = try XCTUnwrap(NegPiPGenerationContext.make(signs: signs))
 
-        let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
-        try AttentionExecutor(context: context).encode(
-            commandBuffer: command,
-            query: q, key: k, value: v, output: output,
-            heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
-            probe: .crossScores,
-            layout: .tokenMajor(tokenStride: modelDim))
-        command.commit()
-        command.waitUntilCompleted()
-        XCTAssertNil(command.error)
+        try await NegPiPGenerationContext.$active.withValue(scope) {
+            let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+            try AttentionExecutor(context: context).encode(
+                commandBuffer: command,
+                query: q, key: k, value: v, output: output,
+                heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
+                probe: .crossScores,
+                layout: .tokenMajor(tokenStride: modelDim))
+            command.commit()
+            command.waitUntilCompleted()
+            XCTAssertNil(command.error)
+        }
 
         let actual = readHalf(output, count: modelDim)
         for (index, value) in actual.enumerated() {
@@ -132,6 +133,7 @@ final class AttentionExecutorTests: XCTestCase {
         let originalV = readHalf(v, count: keyCount * modelDim)
         XCTAssertEqual(originalV[7 * modelDim], 32, "NegPiP must never mutate the cached/source V")
         XCTAssertEqual(readHalf(k, count: 1)[0], 0, "cross-K source must remain untouched")
+        XCTAssertNil(NegPiPGenerationContext.snapshot(), "NegPiP must leave no state after the task scope")
         print("ATTENTION_NEGPIP_V_ONLY=PASS row=7 sign=-1")
     }
 
