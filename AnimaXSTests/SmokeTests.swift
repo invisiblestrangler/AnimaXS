@@ -16,6 +16,26 @@ final class SmokeTests: XCTestCase {
         XCTAssertEqual(ModelConstants.ditBlocks, 28)
     }
 
+    func testGenerationResolutionGeometry() {
+        XCTAssertEqual(GenerationResolution.square512.imageSize, 512)
+        XCTAssertEqual(GenerationResolution.square512.latentSize, 64)
+        XCTAssertEqual(GenerationResolution.square512.patchGrid, 32)
+        XCTAssertEqual(GenerationResolution.square512.ditTokens, 1_024)
+        XCTAssertEqual(GenerationResolution.square512.latentElements, 65_536)
+
+        XCTAssertEqual(GenerationResolution.square1024.imageSize, 1_024)
+        XCTAssertEqual(GenerationResolution.square1024.latentSize, 128)
+        XCTAssertEqual(GenerationResolution.square1024.patchGrid, 64)
+        XCTAssertEqual(GenerationResolution.square1024.ditTokens, 4_096)
+        XCTAssertEqual(GenerationResolution.square1024.latentElements, 262_144)
+    }
+
+    func testGenerationGeometryTaskLocalDefaultsTo512() {
+        XCTAssertEqual(GenerationGeometryRuntime.current, .square512)
+        XCTAssertEqual(DiffusionSampler.latentElements, 65_536)
+        XCTAssertEqual(DiTBlockExecutor.tokens, 1_024)
+    }
+
     func testEulerSamplerMatchesReferenceVector() throws {
         var latent = [Float](repeating: 1, count: 4)
         for step in 0..<8 {

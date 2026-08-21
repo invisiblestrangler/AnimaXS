@@ -30,35 +30,16 @@ struct QuantizedLinearWeightBuffers {
 
 /// Common bounded-memory quantized linear path:
 /// `[M,K] fp16 × [N,K]ᵀ quantized → [M,N] fp16`.
-///
-/// The weight matrix is dequantized once into one reusable fp16 scratch buffer.
-/// Input rows are submitted to MPS in tiles so the same executor works for token
-/// matrices without allocating per-tile copies.
-///
-/// `directMPSIO` (runtime experiment): when a tile's tight row stride exactly
-/// satisfies MPS's recommended row stride, the MPSMatrix wraps the existing
-/// input/output buffers directly and the per-tile copy kernels are skipped.
-/// Input and output eligibility are independent; the run metrics counters
-/// report how many tiles actually hit direct wrapping on the target device.
 final class LinearExecutor {
     static let defaultTileRows = 128
-    /// P8: QGEMM tile-profile thresholds. The K=16-wide profile (128
-    /// threads) is only chosen when N is large enough to make it worthwhile;
-    /// small-N linears use the K=8-wide profile.
     static let qgemmWideProfileMinN = 16
 
     private let context: MetalContext
     private let buffers: BufferPool
     let tileRows: Int
     private let directMPSIO: Bool
-    /// P8: direct packed QGEMM backend selector (defaults to the legacy
-    /// dequantized-MPS behavior).
     let linearBackend: DiTLinearBackend
-    /// P8: matrix family for hybrid dispatch (defaults to `.other` so
-    /// non-DiT callers are unaffected).
     let family: DiTLinearFamily
-    /// Run telemetry collector (nil in tests / diagnostic-only construction).
-    /// Receives the cheap tile counters (simple integer increments).
     var metrics: MetricsCollector?
 
     init(context: MetalContext, tileRows: Int = defaultTileRows,
@@ -74,8 +55,6 @@ final class LinearExecutor {
         self.family = family
     }
 
-    /// Encodes dequantization and all MPS tiles into an existing command buffer.
-    /// The caller owns command-buffer commit/completion.
     func encode(
         commandBuffer: MTLCommandBuffer,
         input: MTLBuffer,
@@ -89,11 +68,6 @@ final class LinearExecutor {
         try validate(input: input, inputOffset: inputOffset, weight: weight,
                      output: output, outputOffset: outputOffset, inputRows: inputRows)
 
-        // P8: backend dispatch. M=1 modulation matvecs are NEVER routed to
-        // the QGEMM (the existing direct matvec kernels are the precision
-        // baseline for those); QGEMM requires packed W4/W8 weights with a
-        // group-64 layout. Every other case falls through to the legacy
-        // dequantized-MPS path, which stays byte-for-byte unchanged.
         let direct = (weight.storage == .w4 || weight.storage == .w8)
             && inputRows > 1
         if direct {
@@ -117,11 +91,10 @@ final class LinearExecutor {
                 case .attentionProjection, .other:
                     break
                 }
-            case .aneHybridW8:
-                // Whole-branch ANE scheduling lives in DiTBlockExecutor because
-                // ANE/Metal dependency boundaries require command-buffer
-                // completion between projections. Any linear not explicitly
-                // offloaded there stays on this known-good MPS implementation.
+            case .aneHybridW8, .aneMultiProcW8:
+                // Both private-ANE backends are scheduled at whole-block
+                // dependency boundaries in DiTBlockExecutor. Any linear not
+                // explicitly offloaded there stays on this known-good MPS path.
                 break
             }
         }
@@ -132,8 +105,6 @@ final class LinearExecutor {
                       inputRows: inputRows)
     }
 
-    /// P8: the legacy dequantize-once + MPS-tile path (byte-for-byte the
-    /// P0-P7 behavior; `encode` keeps it as the default and hybrid fallback).
     private func encodeMPS(
         commandBuffer: MTLCommandBuffer,
         input: MTLBuffer,
@@ -188,8 +159,6 @@ final class LinearExecutor {
             MTLSize(width: k, height: n, depth: 1),
             threadsPerThreadgroup: MTLSize(width: width, height: height, depth: 1))
         encoder.endEncoding()
-        // P2-C: logical traffic counter — bytes the dequant kernel materializes
-        // (n×k fp16, counted once). Arithmetic counter, not a GPU readback.
         metrics?.recordDequantizedWeightBytesWritten(UInt64(n * rightRowBytes))
 
         let scalarBytes = MemoryLayout<Float16>.stride
@@ -197,9 +166,6 @@ final class LinearExecutor {
             rows: n, columns: k, rowBytes: rightRowBytes, dataType: .float16)
         let right = MPSMatrix(buffer: scratch, descriptor: rightDescriptor)
 
-        // MPS-recommended row strides for this tile shape. A tile may wrap the
-        // existing tight input/output buffers directly ONLY when the tight
-        // stride exactly equals the recommended stride.
         let mpsLeftRowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: k, dataType: .float16)
         let mpsResultRowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: n, dataType: .float16)
         let tightLeftRowBytes = k * scalarBytes
@@ -212,8 +178,6 @@ final class LinearExecutor {
             let rowsThisTile = min(tileRows, inputRows - rowStart)
             let leftRowBytes = mpsLeftRowBytes
             let resultRowBytes = mpsResultRowBytes
-            // Direct input wrap: construct the MPSMatrix over the existing
-            // input buffer at the tile's row offset (no per-tile copy).
             let left: MPSMatrix
             if inputEligible {
                 left = MPSMatrix(
@@ -236,8 +200,6 @@ final class LinearExecutor {
                         rows: rowsThisTile, columns: k,
                         rowBytes: leftRowBytes, dataType: .float16))
             }
-            // Direct output wrap: MPS writes into the existing output buffer at
-            // the tile's row offset when the tight stride matches.
             let result: MPSMatrix
             let resultBuffer: MTLBuffer
             if outputEligible {
@@ -273,7 +235,6 @@ final class LinearExecutor {
                 rightMatrix: right,
                 resultMatrix: result)
             if !outputEligible {
-                // Copy the MPS result scratch back into the tight destination.
                 try encodeCopy(commandBuffer: commandBuffer,
                                source: resultBuffer, sourceOffset: 0,
                                destination: output,
@@ -284,23 +245,15 @@ final class LinearExecutor {
             metrics?.recordLinearGEMMTile(
                 directInput: inputEligible, directOutput: outputEligible)
             if !inputEligible {
-                // P2-C: per-tile input materialization (fp16, counted once).
                 metrics?.recordConversionBytes(UInt64(rowsThisTile * k * scalarBytes))
             }
             if !outputEligible {
-                // P2-C: per-tile result materialization (fp16, counted once).
                 metrics?.recordConversionBytes(UInt64(rowsThisTile * n * scalarBytes))
             }
             rowStart += rowsThisTile
         }
     }
 
-    /// P8: direct packed W4/W8 GEMM. Dequantizes each 64-wide K group's W tile
-    /// into threadgroup memory and MACs immediately with an FP32 accumulator —
-    /// no full `[N,K]` fp16 weight scratch. Picks the 8x8 or 8x16 tile profile
-    /// by output width N; W4 vs W8 selects the matching kernel. The kernel
-    /// reuses the EXACT `dequant_w4_to_half`/`dequant_w8_to_half` decode
-    /// semantics (group K = 64). M=1 is never routed here (see `encode`).
     private func encodeQGEMM(
         commandBuffer: MTLCommandBuffer,
         input: MTLBuffer,
@@ -318,8 +271,6 @@ final class LinearExecutor {
             throw AnimapkError.validation("invalid QGEMM shape M=\(m) N=\(n) K=\(k)")
         }
         let isW4 = weight.storage == .w4
-        // Profile: 8x16 (128 threads) for wide outputs, 8x8 (64 threads) for
-        // narrow ones (the runbook's two simple profiles; no autotuner).
         let wide = n >= Self.qgemmWideProfileMinN
         let kernelName: String
         if isW4 {
@@ -347,7 +298,7 @@ final class LinearExecutor {
         encoder.setBytes(&rowStride, length: 4, index: 8)
         encoder.setBytes(&inputStride, length: 4, index: 9)
         encoder.setBytes(&outputStride, length: 4, index: 10)
-        let tm = wide ? 8 : 8
+        let tm = 8
         let tn = wide ? 16 : 8
         let threads = wide ? 128 : 64
         let groupX = (m + tm - 1) / tm
@@ -356,9 +307,9 @@ final class LinearExecutor {
             MTLSize(width: groupX, height: groupY, depth: 1),
             threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1))
         encoder.endEncoding()
-        // P2-E: count the QGEMM dispatch (simple integer; no GPU readback).
         metrics?.recordQGEMMCall(family: family)
     }
+
     private func encodeCopy(
         commandBuffer: MTLCommandBuffer, source: MTLBuffer, sourceOffset: Int,
         destination: MTLBuffer, destinationOffset: Int, columns: Int, rows: Int,
@@ -382,7 +333,6 @@ final class LinearExecutor {
         encoder.endEncoding()
     }
 
-    /// Convenience async submission. Completion resumes off the command-buffer callback.
     func execute(
         input: MTLBuffer,
         inputOffset: Int = 0,
@@ -458,9 +408,6 @@ final class LinearExecutor {
     }
 }
 
-/// Shared validation and construction for all rank-2 DiT/adapter matrices.
-/// W4 and W8 use the same row-major group-64 span layout; only the packed row
-/// stride and direct matvec kernel differ.
 enum DiTQuantizedWeightFactory {
     static let groupSize = 64
 
@@ -510,11 +457,8 @@ enum DiTQuantizedWeightFactory {
             packedOffset: Int(item.data.offset),
             scale: ring,
             scaleOffset: Int(scale.offset),
-            zero: ring,
-            zeroOffset: Int(zero.offset),
-            rows: rows,
-            columns: columns,
-            packedRowStride: rowStride)
+            zero: ring, zeroOffset: Int(zero.offset), rows: rows,
+            columns: columns, packedRowStride: rowStride)
     }
 
     static func matvecKernel(for storage: StorageDtype) throws -> String {

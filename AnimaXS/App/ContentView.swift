@@ -27,6 +27,8 @@ struct ContentView: View {
     private var prompt = "masterpiece, best quality, score_7, safe, 1girl"
     @AppStorage("generation.lastSeed")
     private var seedText = "1337"
+    @AppStorage("generation.resolution")
+    private var resolutionRaw = GenerationResolution.square512.rawValue
     @State private var generationStart = Date()
     @State private var elapsedText = ""
     @State private var elapsedTimer: Timer?
@@ -50,6 +52,7 @@ struct ContentView: View {
                 modelSection
                 promptSection
                 seedSection
+                resolutionSection
                 generationSection
                 errorSection
                 imageSection
@@ -200,6 +203,29 @@ struct ContentView: View {
                     seedText = String(UInt64.random(in: 0..<UInt64.max))
                 }
                 .disabled(isGenerating)
+            }
+        }
+    }
+
+    // MARK: - Resolution
+
+    private var selectedResolution: GenerationResolution {
+        GenerationResolution(rawValue: resolutionRaw) ?? .square512
+    }
+
+    private var resolutionSection: some View {
+        Section("Resolution") {
+            Picker("Output", selection: $resolutionRaw) {
+                ForEach(GenerationResolution.allCases) { resolution in
+                    Text(resolution.label).tag(resolution.rawValue)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(isGenerating)
+            if selectedResolution == .square1024 {
+                Text("Experimental: 4× DiT tokens and substantially heavier attention/VAE work. ANE projection programs are reused in four exact 1024-token chunks.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -366,7 +392,7 @@ struct ContentView: View {
         let config = optimizationSettings.snapshot
         coordinator.generate(
             prompt: prompt, seed: seed, models: models,
-            optimization: config)
+            optimization: config, resolution: selectedResolution)
         Self.generationLog.info(
             "generation state after start: \(String(describing: coordinator.state), privacy: .public)")
     }

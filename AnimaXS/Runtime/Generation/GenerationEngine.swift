@@ -40,16 +40,11 @@ struct ResolvedModels: Equatable {
     }
 }
 
-/// Cooperative cancellation policy for a generation run (K003 core).
 enum GenerationCancellation {
     case none
     case requested
 }
 
-/// Why a generation run was cancelled. Telemetry only — it lets final metrics
-/// and the cancelled UI state distinguish user-initiated cancellation from
-/// automatic app-lifecycle / resource-driven cancellation. It is not a
-/// resource policy and introduces no thermal cancellation.
 enum GenerationCancellationReason: String, Codable {
     case user
     case background
@@ -58,9 +53,6 @@ enum GenerationCancellationReason: String, Codable {
     case unknown
 }
 
-// MARK: - Stage seams (narrow dependency injection for orchestration tests)
-
-/// Protocol for the Qwen text-encoder stage. Production: `QwenEncoderMetal`.
 protocol PromptEncoderStage: AnyObject {
     func execute(
         tokenIDs: [Int], output: MTLBuffer,
@@ -68,7 +60,6 @@ protocol PromptEncoderStage: AnyObject {
     ) async throws
 }
 
-/// Protocol for the LLM adapter stage. Production: `LLMAdapterMetal`.
 protocol ContextAdapterStage: AnyObject {
     func execute(
         qwenContext: MTLBuffer, contextTokens: Int,
@@ -77,7 +68,6 @@ protocol ContextAdapterStage: AnyObject {
     ) async throws
 }
 
-/// Protocol for the diffusion sampler stage. Production: `DiffusionSampler`.
 protocol DiffusionStage: AnyObject {
     func execute(
         initialLatent: MTLBuffer,
@@ -89,13 +79,10 @@ protocol DiffusionStage: AnyObject {
     ) async throws
 }
 
-/// Protocol for the VAE decode stage. Production: `VAEDecoder`.
 protocol VAEDecodeStage: AnyObject {
     func decode(latent: MTLBuffer) async throws -> DecodedRGBA8
 }
 
-/// Builds stage objects for the engine. The production factory constructs the
-/// real Metal executors; tests inject probe factories with `deinit` tracking.
 protocol GenerationStageFactory {
     func makePromptEncoder(context: MetalContext, fileURL: URL) throws -> PromptEncoderStage
     func makeContextAdapter(context: MetalContext, fileURL: URL) throws -> ContextAdapterStage
@@ -111,14 +98,11 @@ protocol GenerationStageFactory {
 }
 
 extension GenerationStageFactory {
-    /// Test factories do not own real model packs, so preparation is a no-op
-    /// unless the production factory overrides it.
     func prepareDiffusion(
         fileURL: URL, optimization: InferenceOptimizationConfig, metrics: MetricsCollector
     ) throws {}
 }
 
-/// Production factory: real executors over real `AnimapkFile` mmaps.
 struct ProductionStageFactory: GenerationStageFactory {
     func makePromptEncoder(context: MetalContext, fileURL: URL) throws -> PromptEncoderStage {
         try QwenEncoderMetal(context: context, file: try AnimapkFile(url: fileURL))
@@ -131,8 +115,15 @@ struct ProductionStageFactory: GenerationStageFactory {
     func prepareDiffusion(
         fileURL: URL, optimization: InferenceOptimizationConfig, metrics: MetricsCollector
     ) throws {
-        guard optimization.linearBackend == .aneHybridW8 else { return }
+        // Both private-ANE backends consume the same already-prepared native
+        // projection donors. The multiprocedure backend combines those donors
+        // into one 10-procedure model per block at first use; keeping the
+        // existing preparer here makes the old and new paths directly A/B-able.
+        guard optimization.linearBackend.isANEW8 else { return }
         let file = try AnimapkFile(url: fileURL)
+        if optimization.linearBackend == .aneMultiProcW8 {
+            ANEW8MultiProcModelCache.selectNamespace(try ANEW8NativePack.namespace(file: file))
+        }
         let result = try ANEW8ModelPreparer.ensurePrepared(file: file)
         metrics.recordANECachePreparation(result)
     }
@@ -152,22 +143,10 @@ struct ProductionStageFactory: GenerationStageFactory {
     }
 }
 
-// MARK: - Engine
-
-/// Non-UI inference engine (K002 §5.4). NOT MainActor-isolated: model
-/// construction, tokenization, mmap setup and heavy Metal work run off the
-/// main actor. The UI-facing coordinator publishes progress to the view.
-///
-/// Stage-scoped lifetime (K002 §5.3): each pipeline stage runs inside its own
-/// helper function. The heavy model object AND its `AnimapkFile` mmap are
-/// local to that function and cannot escape it — the only value that crosses
-/// a stage boundary is the fp32 conditioning buffer (512×1024) between the
-/// text encoder and the DiT.
 struct GenerationEngine {
     let context: MetalContext
     private let factory: any GenerationStageFactory
 
-    /// Progress callback invoked synchronously on the engine's executor.
     typealias ProgressCallback = (GenerationStage) -> Void
 
     enum GenerationStage: Equatable {
@@ -183,20 +162,6 @@ struct GenerationEngine {
         self.factory = factory
     }
 
-    /// Runs the full production pipeline: prompt → tokens → Qwen → adapter →
-    /// diffusion → VAE → RGBA8. Always starts diffusion from step 0.
-    ///
-    /// - Parameters:
-    ///   - prompt: User prompt. Not altered between UI and tokenization.
-    ///   - seed: User seed. `SeededRNG(seed:)` creates the initial latent unless
-    ///           `noise` is injected (test-only golden path).
-    ///   - models: Exactly three resolved pack URLs.
-    ///   - noise: Optional pre-generated initial noise (test-only injection).
-    ///   - progress: Stage progress, including diffusion step/block counts.
-    ///   - metrics: Optional collector for this run's timing/memory telemetry;
-    ///              a private one is created when nil (test path).
-    ///   - optimization: Immutable per-run inference configuration snapshot.
-    ///              Captured at Generate time; never mutated mid-run.
     func generate(
         prompt: String,
         seed: UInt64,
@@ -204,10 +169,28 @@ struct GenerationEngine {
         noise: MTLBuffer? = nil,
         progress: ProgressCallback? = nil,
         metrics metricsIn: MetricsCollector? = nil,
-        optimization: InferenceOptimizationConfig = .currentBaseline
+        optimization: InferenceOptimizationConfig = .currentBaseline,
+        resolution: GenerationResolution = .square512
+    ) async throws -> DecodedRGBA8 {
+        try await GenerationGeometryRuntime.$current.withValue(resolution) {
+            try await generateConfigured(
+                prompt: prompt, seed: seed, models: models, noise: noise,
+                progress: progress, metrics: metricsIn, optimization: optimization)
+        }
+    }
+
+    private func generateConfigured(
+        prompt: String,
+        seed: UInt64,
+        models: ResolvedModels,
+        noise: MTLBuffer?,
+        progress: ProgressCallback?,
+        metrics metricsIn: MetricsCollector?,
+        optimization: InferenceOptimizationConfig
     ) async throws -> DecodedRGBA8 {
         let metrics = metricsIn ?? MetricsCollector()
         metrics.recordOptimizationConfig(optimization)
+        metrics.recordResolution(GenerationGeometryRuntime.current)
         let numerics = DiTNumericsPolicy.fromVariantID(models.dit.variant.id)
         if let reason = InferenceOptimizationConfig.blockingReason(
             for: optimization, numerics: numerics, ditVariantID: models.dit.variant.id) {
@@ -217,7 +200,6 @@ struct GenerationEngine {
         defer {
             metrics.finalize(totalWall: ProcessInfo.processInfo.systemUptime - generationStart)
         }
-        // ---- 1. Tokenization (production TokenizerLoader semantics) ----
         progress?(.tokenizing)
         try Task.checkCancellation()
         let tokenized = try measuredSync(.tokenizing, metrics: metrics) {
@@ -227,16 +209,12 @@ struct GenerationEngine {
         let t5IDs = tokenized.t5
         let t5Weights = tokenized.t5Weights
 
-        // ---- 2. Qwen text encoding (stage-scoped; Qwen + its mmap cannot
-        // escape this helper) ----
         progress?(.encodingPrompt)
         try Task.checkCancellation()
         let qwenOutput = try await measured(.textEncode, metrics: metrics) {
             try await encodePrompt(models: models, tokenIDs: qwenTokenIDs)
         }
 
-        // ---- 3. Adapter → crossContext [512, 1024] fp32 (adapter + its mmap
-        // cannot escape this helper) ----
         progress?(.adapting)
         try Task.checkCancellation()
         let cross = try await measured(.adapter, metrics: metrics) {
@@ -245,9 +223,6 @@ struct GenerationEngine {
                 contextTokens: qwenTokenIDs.count, t5IDs: t5IDs, t5Weights: t5Weights)
         }
 
-        // ---- 4. Diffusion: seeded noise → final latent (sampler-space).
-        // Always starts from step 0: there is no checkpoint/resume path, so
-        // no per-step latent snapshot is copied to the CPU. ----
         let totalSteps = ModelConstants.samplerSteps
         let initialLatent = try makeInitialLatent(seed: seed, noise: noise)
         let finalLatent = try await measured(.diffusion, metrics: metrics) {
@@ -258,16 +233,8 @@ struct GenerationEngine {
                 optimization: optimization)
         }
 
-        // ---- 4b. Wan21 latent-format boundary (sampler-space → VAE-space) ----
-        // Root-cause fix (2026-08-14): ComfyUI applies latent_format.process_out
-        // to the sampler return before the workflow's VAE decode
-        // (samplers.py CFGGuider.inner_sample). The custom runtime omitted it,
-        // decoding raw sampler latents as VAE latents — the 8px grid. Apply
-        // EXACTLY ONCE here; VAEDecoder still consumes its canonical latent
-        // unchanged (D060).
         Wan21LatentFormat.applyProcessOutInPlace(finalLatent)
 
-        // ---- 5. VAE decode (VAE + its mmap cannot escape this helper) ----
         progress?(.decoding)
         try Task.checkCancellation()
         let decoded = try await measured(.vae, metrics: metrics) {
@@ -276,10 +243,6 @@ struct GenerationEngine {
         return decoded
     }
 
-    // MARK: - Stage helpers (lexical lifetime boundaries)
-
-    /// Measures a synchronous stage, ALWAYS closing its timer even when `body`
-    /// throws (so a failed stage is not silently folded into "Other").
     private func measuredSync<T>(
         _ stage: MetricsCollector.Stage, metrics: MetricsCollector,
         _ body: () throws -> T
@@ -289,9 +252,6 @@ struct GenerationEngine {
         return try body()
     }
 
-    /// Measures an async stage, ALWAYS closing its timer even when `body`
-    /// throws. This is the failure-safe replacement for scattered begin/end
-    /// pairs: e.g. a thrown `diffuse()` must still record nonzero diffusion time.
     private func measured<T>(
         _ stage: MetricsCollector.Stage, metrics: MetricsCollector,
         _ body: () async throws -> T
@@ -302,9 +262,6 @@ struct GenerationEngine {
     }
 
     private func tokenize(prompt: String) throws -> (qwen: [Int], t5: [Int], t5Weights: [Float]) {
-        // Qwen: encode(prompt, no specials) — no start/end token.
-        // T5:   encode(prompt, no specials) + [1] (trailing </s> EOS).
-        // t5Weights: all 1.0 (verified from case1 fixture JSON).
         let qwenTokenizer = try TokenizerLoader.qwen()
         let qwen = qwenTokenizer.encode(text: prompt, addSpecialTokens: false)
         guard !qwen.isEmpty else {
@@ -320,8 +277,6 @@ struct GenerationEngine {
         models: ResolvedModels, tokenIDs: [Int]
     ) async throws -> MTLBuffer {
         let encoder = try factory.makePromptEncoder(context: context, fileURL: models.textEncoder.url)
-        // Structural lifetime boundary: `encoder` (and its AnimapkFile mmap) is
-        // strongly held by this defer until the helper returns, then released.
         defer { withExtendedLifetime(encoder) {} }
         let output = try makeBuffer(
             length: tokenIDs.count * QwenEncoderMetal.hidden * 4,
@@ -334,7 +289,6 @@ struct GenerationEngine {
         models: ResolvedModels, qwenContext: MTLBuffer, contextTokens: Int,
         t5IDs: [Int], t5Weights: [Float]
     ) async throws -> MTLBuffer {
-        // Production topology: adapter reads the DiT pack (same URL as sampler).
         let adapter = try factory.makeContextAdapter(context: context, fileURL: models.dit.url)
         defer { withExtendedLifetime(adapter) {} }
         let output = try makeBuffer(
@@ -358,8 +312,6 @@ struct GenerationEngine {
             context: context, fileURL: models.dit.url,
             optimization: optimization,
             numerics: DiTNumericsPolicy.fromVariantID(models.dit.variant.id))
-        // Production path: inject the run's metrics collector into the sampler
-        // (and through it the preparation/forward/final-layer/euler executors).
         if let sampler = sampler as? DiffusionSampler {
             sampler.metrics = metrics
         }
@@ -367,9 +319,6 @@ struct GenerationEngine {
         let output = try makeBuffer(
             length: DiffusionSampler.latentElements * 4, "diffusion output buffer")
         let blocks = ModelConstants.ditBlocks
-        // Production always starts from step 0 and passes NO stepCompleted
-        // callback: there is no checkpoint to write, so the sampler never
-        // snapshots the fp32 latent to the CPU after each step.
         try await sampler.execute(
             initialLatent: initialLatent, crossContext: cross, outputLatent: output,
             startStep: 0,
@@ -393,10 +342,6 @@ struct GenerationEngine {
         return try await decoder.decode(latent: latent)
     }
 
-    // MARK: - Helpers
-
-    /// Seeded production RNG (K002 §5.2). The user's seed always feeds
-    /// `SeededRNG`; only an explicit test-injected noise buffer bypasses it.
     private func makeInitialLatent(seed: UInt64, noise: MTLBuffer?) throws -> MTLBuffer {
         if let noise { return noise }
         var rng = SeededRNG(seed: seed)

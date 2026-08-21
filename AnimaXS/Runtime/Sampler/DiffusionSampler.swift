@@ -6,7 +6,7 @@ import Metal
 /// Model output is FLOW velocity. It is materialized as fp32 denoised output
 /// before the fp32 Euler update to preserve the pinned ComfyUI operation order.
 final class DiffusionSampler {
-    static let latentElements = 16 * 64 * 64
+    static var latentElements: Int { GenerationGeometryRuntime.current.latentElements }
 
     typealias BlockProgress = (_ step: Int, _ block: Int) throws -> Void
     typealias StepCompleted = (
@@ -57,46 +57,24 @@ final class DiffusionSampler {
          optimization: InferenceOptimizationConfig = .currentBaseline,
          numerics: DiTNumericsPolicy? = nil) throws {
         self.context = context
-        // When the pack-derived policy is supplied it selects the numerical
-        // fidelity. Production W8-v2 resolves to `w8LegacyStabilized` (legacy
-        // numerics — the known-good path); the BF16 experimental policy is
-        // never selected by variant-id resolution, only by explicit request.
-        // Policy is derived from the resolved variant id, never from the
-        // app-owned filename.
         let resolvedActivation: ActivationNumerics
         let resolvedAttention: AttentionNumerics
         let resolvedFinalResidualBoundary: FinalResidualBoundary
         if let numerics {
             (resolvedActivation, resolvedAttention) = Self.resolvedNumerics(for: numerics)
-            // The policy also selects the final-residual ENTRY boundary
-            // (decoupled from activation numerics): production W8-v2 keeps
-            // legacy block numerics but its large residual enters the final
-            // layer via BF16-RNE-in-FP32, never FP16.
             resolvedFinalResidualBoundary = Self.resolvedFinalResidualBoundary(for: numerics)
         } else {
             resolvedActivation = activationNumerics
             resolvedAttention = attentionNumerics
-            // Explicit construction (no pack policy): preserve the existing
-            // experimental behavior — .bf16Compute activation numerics implies
-            // the BF16 residual boundary, everything else keeps the FP16
-            // legacy boundary.
             resolvedFinalResidualBoundary = activationNumerics == .bf16Compute
                 ? .bf16RNEInFP32 : .fp16Legacy
         }
-        // Numerical monitoring OFF removes monitor/probe work from the
-        // production path (the final CPU finite guard is retained). ON keeps
-        // the current production monitor exactly.
         let monitor = optimization.numericalMonitoring
             ? try NumericalMonitor(context: context) : nil
         self.monitor = monitor
         preparation = try DiTPreparationExecutor(
             context: context, file: file, activationNumerics: resolvedActivation,
             monitor: monitor, optimization: optimization)
-        // P5: per-generation exact cross-attention K/V cache. The ANE W8
-        // backend always requests it because device measurements show that the
-        // post-hit six-program working set materially reduces private-runtime
-        // load/residency/unload cost. Allocation failure still falls back
-        // safely to bounded full8 execution for every traversal.
         let cache = Self.shouldUseCrossKVCache(optimization: optimization)
             ? CrossKVCache(device: context.device) : nil
         self.crossKVCache = cache
@@ -109,7 +87,8 @@ final class DiffusionSampler {
         euler = EulerSampler(context: context, monitor: monitor)
         buffers = BufferPool(device: context.device)
 
-        let values = DitRoPE.generate()
+        let grid = GenerationGeometryRuntime.current.patchGrid
+        let values = DitRoPE.generate(H: grid, W: grid)
         guard let rope = context.device.makeBuffer(
             length: values.count * MemoryLayout<Float>.stride,
             options: .storageModeShared
@@ -122,20 +101,13 @@ final class DiffusionSampler {
         self.rope = rope
     }
 
-    /// Pure policy seam: P5 remains opt-in for Metal backends, while ANE
-    /// makes exact K/V reuse part of its measured production recipe.
+    /// Pure policy seam: P5 remains opt-in for Metal backends, while either
+    /// private-ANE representation makes exact K/V reuse part of its measured
+    /// production recipe.
     static func shouldUseCrossKVCache(optimization: InferenceOptimizationConfig) -> Bool {
-        optimization.crossKVCache || optimization.linearBackend == .aneHybridW8
+        optimization.crossKVCache || optimization.linearBackend.isANEW8
     }
 
-    /// Runs the eight model evaluations and writes the final fp32 latent.
-    /// `stepCompleted` is called after each finite post-Euler latent. Its
-    /// buffers remain valid only for the callback.
-    ///
-    /// - Parameter startStep: Number of Euler steps to skip. Production always
-    ///   passes `0` (start from step 0); diagnostic/trajectory tests may pass
-    ///   a nonzero value to resume from a previously captured latent.
-    /// - Precondition: `0 <= startStep <= 8`.
     func execute(
         initialLatent: MTLBuffer,
         crossContext: MTLBuffer,
@@ -165,16 +137,11 @@ final class DiffusionSampler {
         try beginRun()
         defer { endRun() }
         monitor?.beginRun()
-        // Publish numerical-monitor bookkeeping in a defer so it is recorded on
-        // FAILURE as well as success (a thrown step must still surface its
-        // collected warnings). We only publish state the monitor has already
-        // completed — no GPU readback of an unfinished command buffer here.
         defer {
             if let monitor {
                 metrics?.setNumericalWarnings(monitor.warningCount())
                 metrics?.setNumericalDetails(monitor.warningDetails())
             } else {
-                // Monitor OFF: warnings were not collected — never report "0".
                 metrics?.setNumericalMonitoringDisabled(true)
             }
         }
@@ -207,16 +174,8 @@ final class DiffusionSampler {
             key: "diffusion.cross-context.f16", bytes: 512 * 1_024 * 2)
         try await convertToHalf(crossContext, output: crossHalf, count: 512 * 1_024)
 
-        // Only execute the remaining sigma transitions (startStep == 8 copies
-        // the latent straight to output).
         for step in startStep..<EulerSampler.sigmas.count - 1 {
             metrics?.beginStep(step)
-            // P2: a step that throws is still recorded as a PARTIAL step
-            // (completed == false) with its partial durations/counters, so a
-            // device log can attribute a slowdown to the failing step (e.g.
-            // the W8 failure case). On success the explicit endStep below
-            // keeps the historical timing point (before the step-completed
-            // callback); the defer only fires on failure.
             var completedForMetrics = false
             defer {
                 if !completedForMetrics { metrics?.endStep(completed: false) }
@@ -250,8 +209,6 @@ final class DiffusionSampler {
                 sigma: sigma, nextSigma: nextSigma, count: Self.latentElements)
             monitor?.noteStepCompleted(step: step)
             guard isFinite(next, count: Self.latentElements) else {
-                // 1-based step for the human-visible message; attribution
-                // (block/stage/condition) is added by the numerical monitor.
                 throw numericalFailure(step: step)
             }
             metrics?.endStep(completed: true)
@@ -262,16 +219,10 @@ final class DiffusionSampler {
         try await copy(latent, to: outputLatent, bytes: bytes)
     }
 
-    // MARK: - Diagnostic accessors (stress harness / tests)
-
-    /// Full probe report after a completed (or failed) run. Empty when the
-    /// numerical monitor was disabled for this run.
     var numericalReport: [NumericalMonitor.Probe: NumericalMonitor.Stats] {
         monitor?.report() ?? [:]
     }
 
-    /// First unsafe (step, block, probe) attribution, if any. nil when the
-    /// monitor was disabled or no issue was recorded.
     var earliestNumericalIssue: NumericalMonitor.FirstIssue? {
         monitor?.earliestIssue
     }
@@ -304,10 +255,6 @@ final class DiffusionSampler {
             step: step + 1, totalSteps: ModelConstants.samplerSteps)
     }
 
-    /// Maps a numerical-monitor first-issue to a failure with the correct
-    /// location. Final-layer probes are attributed as "final layer" (never a
-    /// fabricated block); block probes use the attributed block; otherwise the
-    /// post-Euler guard is the location.
     private static func attributedFailure(
         from issue: NumericalMonitor.FirstIssue
     ) -> NumericalFailure {
@@ -327,9 +274,6 @@ final class DiffusionSampler {
             step: issue.step, totalSteps: ModelConstants.samplerSteps)
     }
 
-    /// Test seam: the failure produced when the Euler finite guard fires with
-    /// no monitor attached (monitoring OFF). Proves the guard is independent
-    /// of monitoring and still fails safely with a 1-based step.
     static func numericalFailureForTesting(
         step: Int, monitor: NumericalMonitor?
     ) -> NumericalFailure {
@@ -340,9 +284,6 @@ final class DiffusionSampler {
             step: step + 1, totalSteps: ModelConstants.samplerSteps)
     }
 
-    /// Resolves the attention/activation numerics selected by a DiT numerics
-    /// policy. The single source of truth for the policy -> numerics mapping,
-    /// used by `init` (test seam: no Metal context required to assert it).
     static func resolvedNumerics(
         for policy: DiTNumericsPolicy
     ) -> (activation: ActivationNumerics, attention: AttentionNumerics) {
@@ -356,13 +297,6 @@ final class DiffusionSampler {
         }
     }
 
-    /// Resolves the final-residual ENTRY boundary selected by a DiT numerics
-    /// policy. DECOUPLED from `resolvedNumerics`: production W8-v2
-    /// (w8LegacyStabilized) keeps legacy activation numerics yet its large
-    /// final residual must never be converted to FP16 (overflow above 65,504),
-    /// so the policy carries a source-faithful BF16-RNE-in-FP32 boundary. W4
-    /// keeps its byte-for-byte FP16 legacy boundary. Test seam: no Metal
-    /// context required.
     static func resolvedFinalResidualBoundary(
         for policy: DiTNumericsPolicy
     ) -> FinalResidualBoundary {
@@ -410,8 +344,6 @@ final class DiffusionSampler {
               let encoder = command.makeComputeCommandEncoder() else {
             throw AnimapkError.validation("failed to create context conversion command")
         }
-        // Use the non-probe conversion when the numerical monitor is OFF so
-        // the monitoring-overhead experiment measures a clean path.
         let pipeline = try context.pipeline(
             named: monitor != nil ? "float_to_half_probe" : "float_to_half")
         var count = UInt32(count)

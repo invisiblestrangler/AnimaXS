@@ -23,9 +23,15 @@ enum DiTLinearBackend: String, Codable, CaseIterable {
     /// A12/H11 hybrid backend proven by the V12-V14 device harness. Large W8
     /// DiT projection GEMMs (self QKV/O, cross Q/K/V/O, MLP up/down) execute
     /// on ANE; AdaLN, learned RMSNorm, RoPE, attention, GELU and residual math
-    /// remain on the source-faithful Metal path. This stays opt-in until the
-    /// integrated pipeline completes a physical XS Max acceptance run.
+    /// remain on the source-faithful Metal path. This is the original
+    /// eight-model-per-block production control for the multiprocedure A/B.
     case aneHybridW8
+    /// Stage2J/K production candidate: the same projection math, but each DiT
+    /// block is represented by ONE `_ANEInMemoryModel` exposing ten
+    /// single-output procedures. The scheduler uses the device-measured
+    /// 6-pinned + 2-streaming residency policy while all nonlinear/attention
+    /// math remains on the identical Metal path.
+    case aneMultiProcW8
 
     /// QUARANTINED (device stabilization — Task 4): true for the P8 direct
     /// packed QGEMM backends (`.directQuantized`, `.hybrid`) that measured
@@ -39,6 +45,10 @@ enum DiTLinearBackend: String, Codable, CaseIterable {
     /// search runs.
     var isQuarantined: Bool {
         self == .directQuantized || self == .hybrid
+    }
+
+    var isANEW8: Bool {
+        self == .aneHybridW8 || self == .aneMultiProcW8
     }
 }
 
@@ -175,52 +185,18 @@ struct InferenceOptimizationConfig: Equatable {
     /// persisted/corrupt values must never reach the executors.
     static func sanitizedTileRows(_ value: Int) -> Int {
         if allowedTileRows.contains(value) { return value }
-        // Clamp to the allowed range, then round to the nearest allowed row.
         let clamped = min(1024, max(128, value))
         return allowedTileRows.min(by: { abs($0 - clamped) < abs($1 - clamped) }) ?? 128
     }
 
     // MARK: - Central compatibility validator (Task 9)
 
-    /// DISABLED (Task 5) — P6 mmap no-copy weight source. A physical A12 run
-    /// hit a real GPU page fault (`kIOGPUCommandBufferCallbackErrorPageFault`)
-    /// while no-copy bytes were being served, so production configuration can
-    /// never run the no-copy path. The Task 5 settings layer already
-    /// normalizes `true` → `false` and never persists it; this reason is the
-    /// central-validator wording for any config that still carries `true`
-    /// (defense-in-depth — a normal device user cannot currently produce one).
     static let noCopyBlockingReason = "P6 mmap no-copy weight source is disabled for device use: a physical A12 run hit a real GPU page fault (kIOGPUCommandBufferCallbackErrorPageFault) while no-copy bytes were being served. Correctness/safety hardening, not a proof of the historical root cause."
-
-    /// QUARANTINED (Task 4) — P8 direct packed QGEMM linear backends
-    /// (`.directQuantized` / `.hybrid`). They measured ~10x SLOWER than
-    /// `.dequantizedMPS` on the physical A12 device — a measured PERFORMANCE
-    /// regression, NOT a proven correctness failure (the research kernel
-    /// stays intact and directly testable via `LinearExecutor`). The Task 4
-    /// settings layer already normalizes them to `.dequantizedMPS`; this
-    /// reason is the central-validator wording for any config that still
-    /// carries one (defense-in-depth).
     static let linearBackendBlockingReason = "P8 direct QGEMM (.directQuantized / .hybrid) is quarantined for device use: it measured ~10x slower than dequantized MPS on the A12 device (performance regression, not a proven correctness failure)."
-
-    static let aneNativePackRequiredReason = "ANE Hybrid W8 requires the ANE-native W8 pack (w8-ane-v1). Import that pack before using this backend."
-    static let aneNativeBackendRequiredReason = "The ANE-native W8 pack can only run with ANE Hybrid W8 because its projection tensors use ANE row-wise quantization."
-
-    /// EXPERIMENTAL BF16 numerics + strided token-major attention layout.
-    /// `AttentionExecutor` throws "P4 strided token-major attention does not
-    /// support bf16Compute numerics" for this exact combination — the BF16
-    /// boundary round is contiguous in the legacy layout but would corrupt
-    /// the strided token-major layout, so it refuses loudly instead of
-    /// silently producing wrong results. Production W8-v2 resolves to
-    /// `w8LegacyStabilized` → legacy/legacy numerics (compatible with strided
-    /// attention); only an EXPLICIT experimental BF16 policy triggers this.
+    static let aneNativePackRequiredReason = "ANE W8 requires the ANE-native W8 pack (w8-ane-v1). Import that pack before using this backend."
+    static let aneNativeBackendRequiredReason = "The ANE-native W8 pack can only run with an ANE W8 backend because its projection tensors use ANE row-wise quantization."
     static let bf16StridedAttentionBlockingReason = "Experimental BF16 numerics (w8BF16Experimental / bf16Compute) are not supported with strided token-major attention: the BF16 boundary round would corrupt the strided layout. Select legacy numerics or disable the strided token-major attention layout."
 
-    /// True when the resolved DiT attention layout is strided token-major.
-    /// Mirrors `DiTBlockExecutor`'s backend selection exactly:
-    /// `.legacyHeadMajorMPS` never uses the strided layout; `.stridedTokenMajorMPS`
-    /// honors the `stridedTokenMajorAttention` boolean; `.streamingMPS` /
-    /// `.metalFlash` REQUIRE the token-major layout (they throw unless the
-    /// toggle is ON). Qwen/VAE/adapter attention is always head-major and is
-    /// never affected.
     var resolvesToStridedTokenMajorAttention: Bool {
         switch attentionBackend {
         case .legacyHeadMajorMPS:
@@ -232,63 +208,25 @@ struct InferenceOptimizationConfig: Equatable {
         }
     }
 
-    /// The single central compatibility validator for a RESOLVED production
-    /// configuration (Task 9). Returns a user-visible blocking reason when
-    /// the configuration must NOT reach the executors, or `nil` when it is
-    /// compatible.
-    ///
-    /// It blocks:
-    /// 1. `noCopyWeightSource == true` (P6 disabled — A12 GPU page fault).
-    /// 2. A P8 quarantined direct-QGEMM `linearBackend` (`.directQuantized`
-    ///    / `.hybrid`, ~10x A12 regression). `.aneHybridW8` is a separate
-    ///    device-proven H11 backend and is not part of that quarantine.
-    /// 3. An explicit experimental BF16 numerical policy — resolved
-    ///    attention/activation numerics `bf16Compute` — combined with a
-    ///    strided token-major attention layout (the `AttentionExecutor`
-    ///    constraint).
-    ///
-    /// The BF16 check is based on the ACTUAL resolved numerical policy
-    /// (`DiffusionSampler.resolvedNumerics(for:)`), NOT the pack name: a
-    /// production W8 pack resolves to `w8LegacyStabilized` → legacy/legacy
-    /// numerics, which IS compatible with strided attention and must not be
-    /// blocked. `numerics` defaults to the W4 pack policy (the most common
-    /// resolved case, legacy/legacy).
-    ///
-    /// The validator is read-only: it NEVER mutates a user-selected config.
-    /// Persisted bad settings are migrated at app initialization (Tasks 4/5);
-    /// an explicit current incompatible selection is surfaced as a blocking
-    /// reason and left exactly as the user set it.
     static func blockingReason(
         for config: InferenceOptimizationConfig,
         numerics: DiTNumericsPolicy = .w4Legacy,
         ditVariantID: String? = nil
     ) -> String? {
-        // 1. P6 no-copy (Task 5): a physical A12 run hit a real GPU page
-        // fault while no-copy bytes were being served.
         if config.noCopyWeightSource {
             return noCopyBlockingReason
         }
-        // 2. The ANE-native pack and ANE backend are an inseparable pair.
-        // Native projection scale/bias bytes must never reach the group-64
-        // MPS/QGEMM decoders, and the ANE backend must never runtime-repack an
-        // old W8-v2 pack.
         if let ditVariantID {
-            if config.linearBackend == .aneHybridW8, ditVariantID != "w8-ane-v1" {
+            if config.linearBackend.isANEW8, ditVariantID != "w8-ane-v1" {
                 return aneNativePackRequiredReason
             }
-            if ditVariantID == "w8-ane-v1", config.linearBackend != .aneHybridW8 {
+            if ditVariantID == "w8-ane-v1", !config.linearBackend.isANEW8 {
                 return aneNativeBackendRequiredReason
             }
         }
-        // 3. P8 quarantined linear backends (Task 4): measured ~10x slower
-        // than dequantized MPS on the A12 device.
         if config.linearBackend.isQuarantined {
             return linearBackendBlockingReason
         }
-        // 4. Experimental BF16 numerics + strided token-major attention:
-        // AttentionExecutor refuses bf16Compute for the strided layout.
-        // Only the explicit experimental policy resolves to BF16 numerics
-        // (w8LegacyStabilized -> legacy/legacy, compatible with strided).
         if numerics == .w8BF16Experimental {
             let (activation, attention) = DiffusionSampler.resolvedNumerics(for: numerics)
             if activation == .bf16Compute || attention == .bf16Compute {
@@ -312,80 +250,25 @@ struct InferenceOptimizationConfig: Equatable {
 /// configuration. No preset claims physical-A12 victory; the user must measure
 /// on the device (§17) before a `recommendedA12` preset can be added.
 enum InferencePreset: String, CaseIterable {
-    /// Everything at defaults: legacy W4-known-good path (runbook §17 #1 control
-    /// with 128-tile rows and direct MPS I/O / ping-pong at their defaults).
     case baseline
-    /// The §17 first-pass control: linear/attention 1024, direct MPS I/O on,
-    /// ping-pong on, all new optimizations off.
     case current1024Control
-    /// Control + fused LayerNorm+AdaLN+to-half + fused in-place MLP GELU.
     case fusedTraffic
-    /// Fused + strided token-major MPS attention.
     case stridedMPS
-    /// Strided + cross-attention K/V cache.
     case stridedMPSKV
-    /// KV + mmap no-copy weight source (experimental). DISABLED (Task 5):
-    /// the no-copy part is forced back to `false` in `makeConfig()` — a
-    /// physical A12 run hit a real GPU page fault
-    /// (`kIOGPUCommandBufferCallbackErrorPageFault`) while no-copy bytes
-    /// were being served. This is correctness/safety hardening, NOT a proof
-    /// of the historical root cause; every other component of the
-    /// combination still applies unchanged.
     case noCopyCandidate
-    /// Fused + KV + streaming MPS attention backend.
     case streamingMPSCandidate
-    /// Fused + KV + pure-Metal Flash attention backend.
     case metalFlashCandidate
-    /// QUARANTINED (Task 4) — §17 preset 8 "MLP QGEMM hybrid". The QGEMM
-    /// part of this preset is temporarily disabled: `.hybrid` measured ~10x
-    /// SLOWER than `.dequantizedMPS` on the physical A12 device (a measured
-    /// performance regression, NOT a proven correctness failure — the P8
-    /// research kernel stays intact and testable). `makeConfig()` therefore
-    /// FORCES `linearBackend` back to `.dequantizedMPS` so a device preset
-    /// can never silently run the 10x-slower direct path; every other
-    /// component of the combination still applies unchanged. The preset is
-    /// kept selectable (with a visible note in Diagnostics) so the
-    /// combination can be re-enabled instantly once the QGEMM kernel is
-    /// structurally fixed and re-measured.
     case directQGEMMCandidate
-    /// All currently-winning components combined — one test configuration,
-    /// NOT an automatic "best". QUARANTINED (Task 4): like
-    /// `directQGEMMCandidate`, the hybrid/QGEMM part is temporarily disabled
-    /// (measured ~10x A12 regression vs `.dequantizedMPS`; performance, not
-    /// correctness). `makeConfig()` keeps every other combined setting as-is
-    /// EXCEPT `linearBackend` is forced back to `.dequantizedMPS`. DISABLED
-    /// (Task 5): the P6 mmap no-copy part is also forced back to `false` —
-    /// a physical A12 run hit a real GPU page fault
-    /// (`kIOGPUCommandBufferCallbackErrorPageFault`) while no-copy bytes
-    /// were being served (correctness/safety hardening, not a proof of the
-    /// historical root cause).
     case allCandidate
 
-    /// QUARANTINED (Task 4): true for presets whose QGEMM part is temporarily
-    /// disabled (measured ~10x A12 regression vs `.dequantizedMPS` —
-    /// performance, not correctness). They remain selectable: `makeConfig()`
-    /// forces `linearBackend` to `.dequantizedMPS` while keeping every other
-    /// component of the combination. The UI marks them with a visible warning
-    /// so a device preset can never silently run the 10x-slower direct path.
     var containsQuarantinedLinearBackend: Bool {
         self == .directQGEMMCandidate || self == .allCandidate
     }
 
-    /// DISABLED (Task 5): true for presets whose P6 mmap no-copy part is
-    /// temporarily disabled — a physical A12 run hit a real GPU page fault
-    /// (`kIOGPUCommandBufferCallbackErrorPageFault`) while no-copy bytes
-    /// were being served. This is correctness/safety hardening, NOT a proof
-    /// that the no-copy path caused the historical page fault. They remain
-    /// selectable: `makeConfig()` forces `noCopyWeightSource` back to `false`
-    /// while keeping every other component of the combination. The UI marks
-    /// them so the disabled part is impossible to miss. The research
-    /// implementation (`WeightNoCopyPolicy.makeAlias` / `WeightStreamer`)
-    /// stays intact so an isolated hardware test can re-enable it later.
     var containsDisabledNoCopy: Bool {
         self == .noCopyCandidate || self == .allCandidate
     }
 
-    /// Human-friendly label for UI selection.
     var label: String {
         switch self {
         case .baseline: return "Baseline"
@@ -401,10 +284,6 @@ enum InferencePreset: String, CaseIterable {
         }
     }
 
-    /// Builds the `InferenceOptimizationConfig` this preset names, starting
-    /// from `currentBaseline` and layering the intended combination on top.
-    /// Immutable snapshot semantics are unchanged: callers keep the returned
-    /// value for the whole generation and never mutate it mid-run.
     func makeConfig() -> InferenceOptimizationConfig {
         var c = InferenceOptimizationConfig.currentBaseline
         switch self {
@@ -428,12 +307,6 @@ enum InferencePreset: String, CaseIterable {
             c.crossKVCache = true
         case .noCopyCandidate:
             c = InferencePreset.stridedMPSKV.makeConfig()
-            // DISABLED (Task 5): the P6 mmap no-copy part is forced back to
-            // `false` — a physical A12 run hit a real GPU page fault
-            // (kIOGPUCommandBufferCallbackErrorPageFault) while no-copy
-            // bytes were being served. Correctness/safety hardening, not a
-            // proof of the historical root cause. Every other component of
-            // the combination still applies unchanged.
             c.noCopyWeightSource = false
         case .streamingMPSCandidate:
             c = InferencePreset.fusedTraffic.makeConfig()
@@ -447,23 +320,11 @@ enum InferencePreset: String, CaseIterable {
             c.attentionBackend = .metalFlash
         case .directQGEMMCandidate:
             c = InferencePreset.stridedMPSKV.makeConfig()
-            // QUARANTINED (Task 4): the hybrid/QGEMM part is disabled — a
-            // measured ~10x A12 regression vs .dequantizedMPS. Force the
-            // backend back to the known-good path; never persist/run hybrid.
             c.linearBackend = .dequantizedMPS
         case .allCandidate:
             c = InferencePreset.stridedMPSKV.makeConfig()
-            // DISABLED (Task 5): the P6 mmap no-copy part is forced back to
-            // `false` — a physical A12 run hit a real GPU page fault
-            // (kIOGPUCommandBufferCallbackErrorPageFault) while no-copy
-            // bytes were being served. Correctness/safety hardening, not a
-            // proof of the historical root cause.
             c.noCopyWeightSource = false
             c.attentionBackend = .streamingMPS
-            // QUARANTINED (Task 4): keep every other combined setting as-is,
-            // EXCEPT the hybrid/QGEMM part — measured ~10x A12 regression vs
-            // .dequantizedMPS. A device preset must never silently run the
-            // 10x-slower direct path.
             c.linearBackend = .dequantizedMPS
         }
         return c

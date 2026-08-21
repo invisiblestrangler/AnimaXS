@@ -4,8 +4,8 @@ import Metal
 /// Production Metal bridge for H001/H002: latent patch embedding plus timestep
 /// RMSNorm/AdaLN-LoRA base vectors, streamed from one metadata-derived range.
 final class DiTPreparationExecutor {
-    static let latentElements = 16 * 64 * 64
-    static let tokens = 1_024
+    static var latentElements: Int { GenerationGeometryRuntime.current.latentElements }
+    static var tokens: Int { GenerationGeometryRuntime.current.ditTokens }
     static let hidden = 2_048
     static let adaln = 6_144
     private static let eps: Float = 1e-6
@@ -77,21 +77,21 @@ final class DiTPreparationExecutor {
         }
 
         let modelInput = buffers.buffer(
-            key: "dit.prepare.input17.f32", bytes: 17 * 64 * 64 * 4)
+            key: "dit.prepare.input17.f32", bytes: 17 * GenerationGeometryRuntime.current.latentSize * GenerationGeometryRuntime.current.latentSize * 4)
         guard let blit = command.makeBlitCommandEncoder() else {
             throw AnimapkError.validation("failed to create DiT preparation blit encoder")
         }
         blit.copy(from: latent, sourceOffset: 0, to: modelInput, destinationOffset: 0,
                   size: Self.latentElements * 4)
         blit.fill(buffer: modelInput,
-                  range: (Self.latentElements * 4)..<(17 * 64 * 64 * 4), value: 0)
+                  range: (Self.latentElements * 4)..<(17 * GenerationGeometryRuntime.current.latentSize * GenerationGeometryRuntime.current.latentSize * 4), value: 0)
         blit.endEncoding()
 
         // Comfy's BF16 model receives a BF16 latent before PatchEmbed. Keep
         // the scratch buffer fp32 for the existing kernel ABI, but apply the
         // same round-to-nearest-even boundary before patchification.
         try encodeComputeBoundary(command, modelInput,
-                                  count: 17 * 64 * 64)
+                                  count: 17 * GenerationGeometryRuntime.current.latentSize * GenerationGeometryRuntime.current.latentSize)
 
         let patches = buffers.buffer(
             key: "dit.prepare.patches.f32", bytes: Self.tokens * 68 * 4)
@@ -179,7 +179,7 @@ final class DiTPreparationExecutor {
         guard let encoder = command.makeComputeCommandEncoder() else {
             throw AnimapkError.validation("failed to create patchify encoder")
         }
-        var height: UInt32 = 64, width: UInt32 = 64
+        var height = UInt32(GenerationGeometryRuntime.current.latentSize), width = height
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(input, offset: 0, index: 0)
         encoder.setBuffer(output, offset: 0, index: 1)

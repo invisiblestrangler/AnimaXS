@@ -40,7 +40,10 @@ enum Wan21LatentFormat {
     ]
 
     static let channelCount = 16
-    static let elementsPerChannel = 64 * 64
+    static var elementsPerChannel: Int {
+        let side = GenerationGeometryRuntime.current.latentSize
+        return side * side
+    }
 
     /// Wan21.process_out: sampler-space -> VAE-space, channel-major [C, H*W].
     ///

@@ -20,25 +20,25 @@ enum ANEW8NativePack {
 
     static let projectionSpecs: [ProjectionSpec] = [
         .init(suffix: "self_attn.q_proj.weight", rows: DiTBlockExecutor.dim,
-              columns: DiTBlockExecutor.dim, spatial: DiTBlockExecutor.tokens, tag: "self_q"),
+              columns: DiTBlockExecutor.dim, spatial: ModelConstants.ditTokensAt512, tag: "self_q"),
         .init(suffix: "self_attn.k_proj.weight", rows: DiTBlockExecutor.dim,
-              columns: DiTBlockExecutor.dim, spatial: DiTBlockExecutor.tokens, tag: "self_k"),
+              columns: DiTBlockExecutor.dim, spatial: ModelConstants.ditTokensAt512, tag: "self_k"),
         .init(suffix: "self_attn.v_proj.weight", rows: DiTBlockExecutor.dim,
-              columns: DiTBlockExecutor.dim, spatial: DiTBlockExecutor.tokens, tag: "self_v"),
+              columns: DiTBlockExecutor.dim, spatial: ModelConstants.ditTokensAt512, tag: "self_v"),
         .init(suffix: "self_attn.output_proj.weight", rows: DiTBlockExecutor.dim,
-              columns: DiTBlockExecutor.dim, spatial: DiTBlockExecutor.tokens, tag: "self_o"),
+              columns: DiTBlockExecutor.dim, spatial: ModelConstants.ditTokensAt512, tag: "self_o"),
         .init(suffix: "cross_attn.q_proj.weight", rows: DiTBlockExecutor.dim,
-              columns: DiTBlockExecutor.dim, spatial: DiTBlockExecutor.tokens, tag: "cross_q"),
+              columns: DiTBlockExecutor.dim, spatial: ModelConstants.ditTokensAt512, tag: "cross_q"),
         .init(suffix: "cross_attn.k_proj.weight", rows: DiTBlockExecutor.dim,
               columns: DiTBlockExecutor.contextDim, spatial: DiTBlockExecutor.contextTokens, tag: "cross_k"),
         .init(suffix: "cross_attn.v_proj.weight", rows: DiTBlockExecutor.dim,
               columns: DiTBlockExecutor.contextDim, spatial: DiTBlockExecutor.contextTokens, tag: "cross_v"),
         .init(suffix: "cross_attn.output_proj.weight", rows: DiTBlockExecutor.dim,
-              columns: DiTBlockExecutor.dim, spatial: DiTBlockExecutor.tokens, tag: "cross_o"),
+              columns: DiTBlockExecutor.dim, spatial: ModelConstants.ditTokensAt512, tag: "cross_o"),
         .init(suffix: "mlp.layer1.weight", rows: DiTBlockExecutor.hidden,
-              columns: DiTBlockExecutor.dim, spatial: DiTBlockExecutor.tokens, tag: "mlp1"),
+              columns: DiTBlockExecutor.dim, spatial: ModelConstants.ditTokensAt512, tag: "mlp1"),
         .init(suffix: "mlp.layer2.weight", rows: DiTBlockExecutor.dim,
-              columns: DiTBlockExecutor.hidden, spatial: DiTBlockExecutor.tokens, tag: "mlp2"),
+              columns: DiTBlockExecutor.hidden, spatial: ModelConstants.ditTokensAt512, tag: "mlp2"),
     ]
 
     static func spec(suffix: String) -> ProjectionSpec? {
@@ -542,7 +542,7 @@ private final class ANEW8DiTModelLoader: @unchecked Sendable {
         let qkvKey = ANEW8NativePack.qkvCacheKey(block: block, q: qHash, k: kHash, v: vHash)
         let selfQKV = try A12ANEQKVModel(
             preparedChannels: UInt(DiTBlockExecutor.dim),
-            spatial: UInt(DiTBlockExecutor.tokens),
+            spatial: UInt(ModelConstants.ditTokensAt512),
             label: "dit_b\(block)_self_qkv", cacheKey: qkvKey)
         let crossQ = try projection("cross_attn.q_proj.weight")
         let crossK = profile.includesCrossKV ? try projection("cross_attn.k_proj.weight") : nil
@@ -843,14 +843,14 @@ final class ANEW8DiTSurfaces {
     let hidden: A12ANESurface
 
     init(device: MTLDevice) throws {
-        tokenInput = try A12ANESurface(device: device, channels: UInt(DiTBlockExecutor.dim), spatial: UInt(DiTBlockExecutor.tokens))
-        q = try A12ANESurface(device: device, channels: UInt(DiTBlockExecutor.dim), spatial: UInt(DiTBlockExecutor.tokens))
-        k = try A12ANESurface(device: device, channels: UInt(DiTBlockExecutor.dim), spatial: UInt(DiTBlockExecutor.tokens))
-        v = try A12ANESurface(device: device, channels: UInt(DiTBlockExecutor.dim), spatial: UInt(DiTBlockExecutor.tokens))
-        tokenOutput = try A12ANESurface(device: device, channels: UInt(DiTBlockExecutor.dim), spatial: UInt(DiTBlockExecutor.tokens))
+        tokenInput = try A12ANESurface(device: device, channels: UInt(DiTBlockExecutor.dim), spatial: UInt(ModelConstants.ditTokensAt512))
+        q = try A12ANESurface(device: device, channels: UInt(DiTBlockExecutor.dim), spatial: UInt(ModelConstants.ditTokensAt512))
+        k = try A12ANESurface(device: device, channels: UInt(DiTBlockExecutor.dim), spatial: UInt(ModelConstants.ditTokensAt512))
+        v = try A12ANESurface(device: device, channels: UInt(DiTBlockExecutor.dim), spatial: UInt(ModelConstants.ditTokensAt512))
+        tokenOutput = try A12ANESurface(device: device, channels: UInt(DiTBlockExecutor.dim), spatial: UInt(ModelConstants.ditTokensAt512))
         contextInput = try A12ANESurface(device: device, channels: UInt(DiTBlockExecutor.contextDim), spatial: UInt(DiTBlockExecutor.contextTokens))
         contextK = try A12ANESurface(device: device, channels: UInt(DiTBlockExecutor.dim), spatial: UInt(DiTBlockExecutor.contextTokens))
         contextV = try A12ANESurface(device: device, channels: UInt(DiTBlockExecutor.dim), spatial: UInt(DiTBlockExecutor.contextTokens))
-        hidden = try A12ANESurface(device: device, channels: UInt(DiTBlockExecutor.hidden), spatial: UInt(DiTBlockExecutor.tokens))
+        hidden = try A12ANESurface(device: device, channels: UInt(DiTBlockExecutor.hidden), spatial: UInt(ModelConstants.ditTokensAt512))
     }
 }
