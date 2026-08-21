@@ -52,4 +52,66 @@ final class TokenizerParityTests: XCTestCase {
         // The reference appends </s> (id 1) after the prompt tokens.
         XCTAssertEqual(t5.convertTokenToId("</s>"), 1)
     }
+
+    /// The feature-off path is intentionally the exact historical tokenizer
+    /// recipe: no combined caption, no sign allocation, all adapter weights 1.
+    func testEmptyNegativePromptPreservesBaselineConditioning() throws {
+        let fixtures = try loadFixture()
+        for (caseName, fx) in fixtures.sorted(by: { $0.key < $1.key }) {
+            let compiled = try GenerationEngine.compileConditioning(
+                positive: fx.prompt, negative: "")
+            XCTAssertEqual(compiled.qwenIDs, fx.qwen_ids, "Qwen baseline drift for \(caseName)")
+            XCTAssertEqual(compiled.t5IDs, fx.t5_ids, "T5 baseline drift for \(caseName)")
+            XCTAssertEqual(compiled.t5Weights, [Float](repeating: 1, count: fx.t5_ids.count))
+            XCTAssertNil(compiled.negPiPValueSigns)
+        }
+    }
+
+    /// Two familiar UI boxes compile to ONE Qwen caption + ONE T5 target stream.
+    /// Only rows sourced from the negative box receive -1 in the separate V mask;
+    /// the adapter token weights stay positive so cross-K is unchanged.
+    func testNegativePromptCompilesToVOnlySigns() throws {
+        let positive = "1girl, silver hair"
+        let negative = "watermark, blurry"
+        let compiled = try GenerationEngine.compileConditioning(
+            positive: positive, negative: negative)
+
+        let qwen = try TokenizerLoader.qwen()
+        XCTAssertEqual(
+            compiled.qwenIDs,
+            qwen.encode(text: positive + ", " + negative, addSpecialTokens: false))
+
+        let t5 = try TokenizerLoader.t5()
+        let positiveIDs = t5.encode(text: positive + ", ", addSpecialTokens: false)
+        let negativeIDs = t5.encode(text: negative, addSpecialTokens: false)
+        XCTAssertEqual(compiled.t5IDs, positiveIDs + negativeIDs + [1])
+        XCTAssertEqual(compiled.t5Weights, [Float](repeating: 1, count: compiled.t5IDs.count))
+
+        let signs = try XCTUnwrap(compiled.negPiPValueSigns)
+        XCTAssertEqual(signs.count, LLMAdapterMetal.maximumTokens)
+        XCTAssertTrue(signs[..<positiveIDs.count].allSatisfy { $0 == 1 })
+        let negativeRange = positiveIDs.count..<(positiveIDs.count + negativeIDs.count)
+        XCTAssertTrue(signs[negativeRange].allSatisfy { $0 == -1 })
+        XCTAssertEqual(signs[positiveIDs.count + negativeIDs.count], 1, "EOS must remain positive")
+        XCTAssertTrue(signs[(positiveIDs.count + negativeIDs.count + 1)...].allSatisfy { $0 == 1 })
+    }
+
+    func testNegPiPLeaseIsGenerationLocal() throws {
+        var signs = [Float](repeating: 1, count: LLMAdapterMetal.maximumTokens)
+        signs[7] = -1
+        let lease = try XCTUnwrap(NegPiPGenerationContext.install(signs: signs))
+        defer { NegPiPGenerationContext.clear(lease: lease) }
+
+        let snapshot = try XCTUnwrap(NegPiPGenerationContext.snapshot())
+        XCTAssertEqual(snapshot.lease, lease)
+        XCTAssertEqual(snapshot.signs[7], -1)
+        NegPiPGenerationContext.clear(lease: lease)
+        XCTAssertNil(NegPiPGenerationContext.snapshot())
+    }
+
+    func testAllPositiveNegPiPMaskIsZeroWork() throws {
+        let signs = [Float](repeating: 1, count: LLMAdapterMetal.maximumTokens)
+        XCTAssertNil(try NegPiPGenerationContext.install(signs: signs))
+        XCTAssertNil(NegPiPGenerationContext.snapshot())
+    }
 }
