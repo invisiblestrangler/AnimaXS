@@ -2,21 +2,18 @@ import Foundation
 import Metal
 import MetalPerformanceShaders
 
-/// Immutable process-local lease carrying the one generation's NegPiP V signs.
-/// GenerationEngine installs it only around diffusion; exact-shape DiT cross
-/// attention reads it. The app guarantees one generation at a time, but a lock
-/// makes cancellation/cleanup safe against Metal callback threads and tests.
-struct NegPiPValueMaskSnapshot {
+/// Immutable NegPiP V signs scoped to one diffusion task. Task-local state is
+/// important here: Diagnostics or tests running concurrently must never observe
+/// the creative generation's negative prompt.
+struct NegPiPValueMaskSnapshot: Sendable {
     let lease: UInt64
     let signs: [Float]
 }
 
 enum NegPiPGenerationContext {
-    private static let lock = NSLock()
-    private static var nextLease: UInt64 = 1
-    private static var active: NegPiPValueMaskSnapshot?
+    @TaskLocal static var active: NegPiPValueMaskSnapshot?
 
-    static func install(signs: [Float]?) throws -> UInt64? {
+    static func make(signs: [Float]?) throws -> NegPiPValueMaskSnapshot? {
         guard let signs else { return nil }
         guard signs.count == LLMAdapterMetal.maximumTokens,
               signs.allSatisfy({ $0 == 1 || $0 == -1 }) else {
@@ -25,26 +22,11 @@ enum NegPiPGenerationContext {
         // A compiler result containing only +1 is equivalent to baseline and
         // must not allocate/encode any NegPiP GPU work.
         guard signs.contains(-1) else { return nil }
-        lock.lock()
-        defer { lock.unlock() }
-        let lease = nextLease
-        nextLease &+= 1
-        if nextLease == 0 { nextLease = 1 }
-        active = NegPiPValueMaskSnapshot(lease: lease, signs: signs)
-        return lease
+        return NegPiPValueMaskSnapshot(
+            lease: UInt64.random(in: 1...UInt64.max), signs: signs)
     }
 
-    static func clear(lease: UInt64) {
-        lock.lock()
-        defer { lock.unlock() }
-        if active?.lease == lease { active = nil }
-    }
-
-    static func snapshot() -> NegPiPValueMaskSnapshot? {
-        lock.lock()
-        defer { lock.unlock() }
-        return active
-    }
+    static func snapshot() -> NegPiPValueMaskSnapshot? { active }
 }
 
 enum AttentionNumerics: String, CaseIterable {
@@ -163,8 +145,6 @@ final class AttentionExecutor {
 
     func maximumScoreScratchBytes(keyCount: Int, queryCount: Int? = nil) throws -> Int {
         guard keyCount > 0 else { throw AnimapkError.validation("attention key count must be positive") }
-        // Bound the configured tile by the real query count so scratch sizing
-        // never over-allocates beyond what the row loop will actually touch.
         let effectiveTile = queryCount.map { min(tileRows, $0) } ?? tileRows
         let elementBytes = numerics == .legacy
             ? MemoryLayout<Float16>.stride : MemoryLayout<Float>.stride
@@ -198,7 +178,7 @@ final class AttentionExecutor {
         // NegPiP lives at the semantic V boundary, after the base projection
         // and any LoRA delta, but before attention. K is never touched. The
         // exact DiT cross-attention probe/shape gate prevents Qwen, adapter,
-        // VAE, and DiT self-attention from observing the generation context.
+        // VAE, and DiT self-attention from observing the task-local context.
         let effectiveValue = try negPiPValueIfNeeded(
             commandBuffer: commandBuffer,
             value: value, valueOffset: valueOffset,
@@ -230,10 +210,6 @@ final class AttentionExecutor {
         }
 
         if inputLayout.isTokenMajor {
-            // P4-F: the BF16 boundary round is contiguous in the legacy layout
-            // but would corrupt the strided token-major layout; refuse loudly
-            // instead of silently producing wrong results. Select baseline
-            // numerics (or disable the strided toggle) to proceed.
             guard numerics != .bf16Compute else {
                 throw AnimapkError.validation(
                     "P4 strided token-major attention does not support bf16Compute numerics; select baseline numerics")
@@ -363,9 +339,8 @@ final class AttentionExecutor {
     }
 
     /// Returns the original V buffer untouched for every normal call. With an
-    /// active lease it recognizes exactly Anima DiT cross-attention and creates
-    /// a V-only sign-adjusted scratch. Using a buffer-backed r16Float image lets
-    /// MPS do the broadcast multiply without adding a bespoke shader ABI.
+    /// active task-local snapshot it recognizes exactly Anima DiT cross-attention
+    /// and creates a V-only sign-adjusted scratch.
     private func negPiPValueIfNeeded(
         commandBuffer: MTLCommandBuffer,
         value: MTLBuffer,
@@ -381,10 +356,6 @@ final class AttentionExecutor {
               let snapshot = NegPiPGenerationContext.snapshot() else {
             return (value, valueOffset)
         }
-        guard !valueOffset.isMultiple(of: -1) == false else {
-            // Syntactic no-op; kept out of the shape contract below.
-            return (value, valueOffset)
-        }
         guard heads == DiTBlockExecutor.heads,
               kvHeads == DiTBlockExecutor.heads,
               keyCount == DiTBlockExecutor.contextTokens,
@@ -392,8 +363,6 @@ final class AttentionExecutor {
               !snapshot.signs.isEmpty else {
             throw AnimapkError.validation("active NegPiP reached an unexpected cross-attention shape")
         }
-        // Current DiT callers pass tightly based V buffers. Refuse a future
-        // sliced V layout rather than risk texture-offset aliasing.
         guard valueOffset == 0 else {
             throw AnimapkError.validation("NegPiP requires a zero-based DiT V buffer")
         }
@@ -418,7 +387,7 @@ final class AttentionExecutor {
         let rowBytes = try checkedProduct(width, MemoryLayout<Float16>.stride)
         let bytes = try checkedProduct(rowBytes, height)
         let alignment = context.device.minimumLinearTextureAlignment(for: .r16Float)
-        guard rowBytes.isMultiple(of: alignment), value.length >= bytes else {
+        guard alignment > 0, rowBytes.isMultiple(of: alignment), value.length >= bytes else {
             throw AnimapkError.validation("NegPiP V layout is not compatible with an r16Float buffer texture")
         }
 
