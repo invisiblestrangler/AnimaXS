@@ -376,17 +376,20 @@ enum ANEW8DiTModelProfile: String, Sendable {
     var includesCrossKV: Bool { self == .full8 }
 }
 
-/// Device-measured A12 scheduler policy. These are production constants, not
-/// user-facing tuning knobs: V6 measured depth-3 prefetch and bounded retire1.
-/// Production keeps 4 pinned full8 blocks for the first/KV-miss traversal and
-/// conservatively 6 pinned six-program blocks once exact P5 K/V is warm after
-/// a real generation hit memory pressure at the previous 8-pin setting. The
-/// theoretical peaks are 64 full8 and 60 kvWarm6 programs.
+/// A12 serial-admission experiment derived from the load/eval concurrency probe.
+/// `_ANEClient.sharedConnection` made concurrent `loadModel` + evaluation slower
+/// than the serial baseline, so the legacy backend no longer spends residency on
+/// ANE prefetch/retire overlap. The first K/V-miss traversal keeps four full8
+/// blocks pinned plus one synchronous stream block. Once exact cross-K/V is warm,
+/// seven six-program blocks are pinned plus one synchronous stream block.
+///
+/// Peak private-ANE program residency therefore falls from the old 64 full8 / 60
+/// warm programs to 40 full8 / 48 warm programs while one additional warm block
+/// survives across denoise steps.
 enum ANEW8DiTSchedulerPolicy {
-    static let prefetchDepth = 3
-    static let retireDepth = 1
+    static let streamingSlots = 1
     static let fullPinnedBlocks = 4
-    static let warmPinnedBlocks = 6
+    static let warmPinnedBlocks = 7
     static let measuredSafetyCeilingPrograms = 80
 
     static func pinnedBlocks(for profile: ANEW8DiTModelProfile) -> Int {
@@ -394,18 +397,17 @@ enum ANEW8DiTSchedulerPolicy {
     }
 
     static func theoreticalPeakPrograms(for profile: ANEW8DiTModelProfile) -> Int {
-        (pinnedBlocks(for: profile) + prefetchDepth + retireDepth) * profile.programCount
+        (pinnedBlocks(for: profile) + streamingSlots) * profile.programCount
     }
 }
 
 struct ANEW8ScheduledModels {
     let models: ANEW8DiTModels
-    /// Sum of private `_ANEClient loadModel` time for models that entered the
-    /// scheduler while servicing this block. Background-prefetched work is
-    /// charged once, when its block first consumes it.
+    /// Sum of private `_ANEClient loadModel` time for models synchronously
+    /// admitted while servicing this block/traversal setup.
     let newlyLoadedMilliseconds: Double
-    /// Foreground wall time spent waiting for scheduler setup / a load future.
-    /// Background load/unload work that was fully hidden is intentionally 0.
+    /// Foreground wall time spent in synchronous scheduler setup/load work.
+    /// With this experiment there is intentionally no hidden ANE load future.
     let waitMilliseconds: Double
 }
 
@@ -559,73 +561,17 @@ private final class ANEW8DiTModelLoader: @unchecked Sendable {
     }
 }
 
-private final class ANEW8LoadResultBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value: Result<ANEW8DiTModels, Error>?
-    func set(_ result: Result<ANEW8DiTModels, Error>) {
-        lock.lock(); value = result; lock.unlock()
-    }
-    func take() -> Result<ANEW8DiTModels, Error>? {
-        lock.lock(); defer { lock.unlock() }
-        let result = value
-        value = nil
-        return result
-    }
-}
-
-private final class ANEW8LoadFuture: @unchecked Sendable {
-    let block: Int
-    private let semaphore = DispatchSemaphore(value: 0)
-    private let box = ANEW8LoadResultBox()
-
-    init(block: Int, profile: ANEW8DiTModelProfile,
-         loader: ANEW8DiTModelLoader, queue: DispatchQueue) {
-        self.block = block
-        queue.async {
-            do { self.box.set(.success(try loader.load(block: block, profile: profile))) }
-            catch { self.box.set(.failure(error)) }
-            self.semaphore.signal()
-        }
-    }
-
-    func wait() throws -> ANEW8DiTModels {
-        semaphore.wait()
-        guard let result = box.take() else {
-            throw AnimapkError.validation("ANE scheduler load future returned no result")
-        }
-        return try result.get()
-    }
-}
-
-private final class ANEW8RetireFuture: @unchecked Sendable {
-    private let semaphore = DispatchSemaphore(value: 0)
-
-    init(models: ANEW8DiTModels, queue: DispatchQueue) {
-        queue.async {
-            models.invalidateAll()
-            self.semaphore.signal()
-        }
-    }
-
-    func wait() { semaphore.wait() }
-}
-
-/// Generation-lifetime bounded private-ANE scheduler. It recognizes each
-/// ordered 0...27 DiT traversal itself, so `DitForward` does not need an ANE-
-/// specific loop. First/KV-miss traversals use full8 4+3+retire1. Once the
-/// generation-local P5 cache is warm, blocks use six dynamic programs with a
-/// conservative 6+3+retire1 policy. The pinned prefix survives across steps.
+/// Generation-lifetime bounded private-ANE scheduler for the serial-admission
+/// experiment. It recognizes each ordered 0...27 DiT traversal itself. There is
+/// deliberately no ANE load future and no background ANE retirement: streamed
+/// blocks follow load -> evaluate -> unload on one logical stream slot. The
+/// pinned prefix survives across denoise steps.
 final class ANEW8DiTModelCache: @unchecked Sendable {
     private let loader: ANEW8DiTModelLoader
-    private let loadQueue = DispatchQueue(
-        label: "com.invisiblestrangler.AnimaXS.ane-production-loader", qos: .userInitiated)
-    private let retireQueue = DispatchQueue(
-        label: "com.invisiblestrangler.AnimaXS.ane-production-retire", qos: .userInitiated)
 
     private var pinned: [Int: ANEW8DiTModels] = [:]
-    private var futures: [Int: ANEW8LoadFuture] = [:]
-    private var activeStreamed: [Int: ANEW8DiTModels] = [:]
-    private var retiring: ANEW8RetireFuture?
+    private var activeStreamedBlock: Int?
+    private var activeStreamedModels: ANEW8DiTModels?
     private var traversalProfile: ANEW8DiTModelProfile?
     private var expectedBlock = 0
     private var pendingLoadMilliseconds = 0.0
@@ -638,11 +584,11 @@ final class ANEW8DiTModelCache: @unchecked Sendable {
     init(file: AnimapkFile) throws {
         loader = try ANEW8DiTModelLoader(file: file)
         precondition(
-            ANEW8DiTSchedulerPolicy.theoreticalPeakPrograms(for: .full8)
-                <= ANEW8DiTSchedulerPolicy.measuredSafetyCeilingPrograms)
+  ANEW8DiTSchedulerPolicy.theoreticalPeakPrograms(for: .full8)
+      <= ANEW8DiTSchedulerPolicy.measuredSafetyCeilingPrograms)
         precondition(
-            ANEW8DiTSchedulerPolicy.theoreticalPeakPrograms(for: .kvWarm6)
-                <= ANEW8DiTSchedulerPolicy.measuredSafetyCeilingPrograms)
+  ANEW8DiTSchedulerPolicy.theoreticalPeakPrograms(for: .kvWarm6)
+      <= ANEW8DiTSchedulerPolicy.measuredSafetyCeilingPrograms)
     }
 
     /// Production API. `kvWarm` must be the actual per-block P5 readiness, not
@@ -650,14 +596,14 @@ final class ANEW8DiTModelCache: @unchecked Sendable {
     func scheduledModels(for block: Int, kvWarm: Bool) throws -> ANEW8ScheduledModels {
         let profile: ANEW8DiTModelProfile = kvWarm ? .kvWarm6 : .full8
         guard block == expectedBlock else {
-            throw AnimapkError.validation(
-                "ANE scheduler expected block \(expectedBlock), got \(block)")
+  throw AnimapkError.validation(
+      "ANE scheduler expected block \(expectedBlock), got \(block)")
         }
         if block == 0 {
-            try beginTraversal(profile: profile)
+  try beginTraversal(profile: profile)
         } else if traversalProfile != profile {
-            throw AnimapkError.validation(
-                "ANE scheduler profile changed inside traversal at block \(block)")
+  throw AnimapkError.validation(
+      "ANE scheduler profile changed inside traversal at block \(block)")
         }
 
         let models: ANEW8DiTModels
@@ -665,74 +611,65 @@ final class ANEW8DiTModelCache: @unchecked Sendable {
         var loadedMilliseconds = takePendingLoadMilliseconds()
         let pinnedCount = ANEW8DiTSchedulerPolicy.pinnedBlocks(for: profile)
         if block < pinnedCount {
-            guard let value = pinned[block] else {
-                throw AnimapkError.validation("ANE scheduler missing pinned block \(block)")
-            }
-            models = value
+  guard let value = pinned[block] else {
+      throw AnimapkError.validation("ANE scheduler missing pinned block \(block)")
+  }
+  models = value
         } else {
-            guard let future = futures.removeValue(forKey: block) else {
-                throw AnimapkError.validation("ANE scheduler missing future for block \(block)")
-            }
-            let waitStart = ProcessInfo.processInfo.systemUptime
-            models = try future.wait()
-            waitMilliseconds += elapsedMS(since: waitStart)
-            loadedMilliseconds += models.loadMilliseconds
-            activeStreamed[block] = models
+  guard activeStreamedModels == nil, activeStreamedBlock == nil else {
+      throw AnimapkError.validation(
+          "ANE serial scheduler attempted a second streamed admission before retirement")
+  }
+  let loadStart = ProcessInfo.processInfo.systemUptime
+  let loaded = try loader.load(block: block, profile: profile)
+  waitMilliseconds += elapsedMS(since: loadStart)
+  loadedMilliseconds += loaded.loadMilliseconds
+  activeStreamedBlock = block
+  activeStreamedModels = loaded
+  models = loaded
         }
         expectedBlock += 1
         return ANEW8ScheduledModels(
-            models: models,
-            newlyLoadedMilliseconds: loadedMilliseconds,
-            waitMilliseconds: waitMilliseconds)
+  models: models,
+  newlyLoadedMilliseconds: loadedMilliseconds,
+  waitMilliseconds: waitMilliseconds)
     }
 
-    /// Called only after all ANE/Metal work for this block has completed.
-    /// Pinned cache-miss blocks immediately shed crossK/crossV once the exact
-    /// generation-local P5 entry exists. Streamed blocks use bounded retire1.
+    /// Called only after all ANE/Metal work for this block has completed. Pinned
+    /// cache-miss blocks immediately shed crossK/crossV once exact P5 K/V exists.
+    /// A streamed block is synchronously unloaded before the next block can load,
+    /// intentionally following the serialization observed on `_ANEClient`.
     func complete(block: Int, crossKVReady: Bool) throws {
         guard let profile = traversalProfile else {
-            throw AnimapkError.validation("ANE scheduler completion outside traversal")
+  throw AnimapkError.validation("ANE scheduler completion outside traversal")
         }
         let pinnedCount = ANEW8DiTSchedulerPolicy.pinnedBlocks(for: profile)
         if block < pinnedCount {
-            if crossKVReady { pinned[block]?.dropCrossKV() }
+  if crossKVReady { pinned[block]?.dropCrossKV() }
         } else {
-            guard let models = activeStreamed.removeValue(forKey: block) else {
-                throw AnimapkError.validation("ANE scheduler missing active streamed block \(block)")
-            }
-            if let previous = retiring { previous.wait() }
-            retiring = ANEW8RetireFuture(models: models, queue: retireQueue)
-
-            let newBlock = block + ANEW8DiTSchedulerPolicy.prefetchDepth
-            if newBlock < ModelConstants.ditBlocks {
-                futures[newBlock] = ANEW8LoadFuture(
-                    block: newBlock, profile: profile, loader: loader, queue: loadQueue)
-            }
+  guard activeStreamedBlock == block, let models = activeStreamedModels else {
+      throw AnimapkError.validation("ANE serial scheduler missing streamed block \(block)")
+  }
+  activeStreamedBlock = nil
+  activeStreamedModels = nil
+  models.invalidateAll()
         }
 
         if block == ModelConstants.ditBlocks - 1 {
-            if let finalRetire = retiring { finalRetire.wait() }
-            retiring = nil
-            guard futures.isEmpty, activeStreamed.isEmpty else {
-                throw AnimapkError.validation("ANE scheduler leaked streamed state at traversal end")
-            }
-            traversalProfile = nil
-            expectedBlock = 0
+  guard activeStreamedModels == nil, activeStreamedBlock == nil else {
+      throw AnimapkError.validation("ANE serial scheduler leaked streamed state at traversal end")
+  }
+  traversalProfile = nil
+  expectedBlock = 0
         }
     }
 
-    /// Failure/cancellation cleanup. This is intentionally stronger than the
-    /// happy-path traversal end: all pinned state is released because the
-    /// generation is no longer useful and must not leave private residency.
+    /// Failure/cancellation cleanup. Release both the one active streamed set and
+    /// all pinned state because the generation is no longer useful.
     func abortTraversal() {
-        if let retiring { retiring.wait() }
-        retiring = nil
-        for (_, future) in futures {
-            if let models = try? future.wait() { models.invalidateAll() }
-        }
-        futures.removeAll()
-        for (_, models) in activeStreamed { models.invalidateAll() }
-        activeStreamed.removeAll()
+        activeStreamedModels?.invalidateAll()
+        activeStreamedModels = nil
+        activeStreamedBlock = nil
         for (_, models) in pinned { models.invalidateAll() }
         pinned.removeAll()
         traversalProfile = nil
@@ -757,8 +694,10 @@ final class ANEW8DiTModelCache: @unchecked Sendable {
     }
 
     private func beginTraversal(profile: ANEW8DiTModelProfile) throws {
-        guard traversalProfile == nil, futures.isEmpty, activeStreamed.isEmpty else {
-            throw AnimapkError.validation("ANE scheduler began traversal with residual streamed state")
+        guard traversalProfile == nil,
+    activeStreamedModels == nil,
+    activeStreamedBlock == nil else {
+  throw AnimapkError.validation("ANE scheduler began traversal with residual streamed state")
         }
         traversalProfile = profile
         expectedBlock = 0
@@ -768,45 +707,36 @@ final class ANEW8DiTModelCache: @unchecked Sendable {
         let targetPinned = ANEW8DiTSchedulerPolicy.pinnedBlocks(for: profile)
 
         // Exact P5 transition: preserve the six useful programs in the first
-        // four pins instead of throwing them away and reloading them.
+        // four full8 pins instead of throwing them away and reloading them.
         if profile == .kvWarm6 {
-            for block in 0..<min(ANEW8DiTSchedulerPolicy.fullPinnedBlocks, targetPinned) {
-                pinned[block]?.dropCrossKV()
-            }
+  for block in 0..<min(ANEW8DiTSchedulerPolicy.fullPinnedBlocks, targetPinned) {
+      pinned[block]?.dropCrossKV()
+  }
         }
 
         // A cache-allocation failure keeps every traversal in full8. If the
-        // profile is warm, expand the retained prefix from 4 -> 6 using six-
+        // profile is warm, expand the retained prefix from 4 -> 7 using six-
         // program loads. Any incompatible stale pin is rebuilt defensively.
         for block in 0..<targetPinned {
-            if let existing = pinned[block] {
-                if profile == .full8 && !existing.hasCrossKVModels {
-                    existing.invalidateAll()
-                    pinned.removeValue(forKey: block)
-                } else {
-                    continue
-                }
-            }
-            let models = try loader.load(block: block, profile: profile)
-            pinned[block] = models
-            setupLoadMilliseconds += models.loadMilliseconds
+  if let existing = pinned[block] {
+      if profile == .full8 && !existing.hasCrossKVModels {
+          existing.invalidateAll()
+          pinned.removeValue(forKey: block)
+      } else {
+          continue
+      }
+  }
+  let models = try loader.load(block: block, profile: profile)
+  pinned[block] = models
+  setupLoadMilliseconds += models.loadMilliseconds
         }
 
-        // If a future policy ever reduces the pinned prefix, retire surplus
-        // pins now. Current production transition grows 4 -> 6.
+        // Defensive support for any future policy that reduces the pinned prefix.
         let surplus = pinned.keys.filter { $0 >= targetPinned }
         for block in surplus {
-            pinned.removeValue(forKey: block)?.invalidateAll()
+  pinned.removeValue(forKey: block)?.invalidateAll()
         }
 
-        if targetPinned < ModelConstants.ditBlocks {
-            for block in targetPinned..<min(
-                ModelConstants.ditBlocks,
-                targetPinned + ANEW8DiTSchedulerPolicy.prefetchDepth) {
-                futures[block] = ANEW8LoadFuture(
-                    block: block, profile: profile, loader: loader, queue: loadQueue)
-            }
-        }
         pendingLoadMilliseconds += setupLoadMilliseconds
         pendingForegroundWaitMilliseconds += elapsedMS(since: setupStart)
     }
