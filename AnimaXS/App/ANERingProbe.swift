@@ -1,802 +1,750 @@
 import Foundation
 import Metal
+import UIKit
 
-/// V8 device-only ANE native-projection correctness sweep.
+/// Device-only probe for one remaining ANE scheduling question:
+/// can `_ANEClient loadModel` overlap real `evaluateWithModel` work on A12?
 ///
-/// V7 cleared one production-shaped W8 projection, the real P5 private cache,
-/// repeated evaluation determinism, and foreground evaluation while a second
-/// prepared model was loaded/unloaded through the shared private client. Its
-/// standalone layout fixture was invalid: 37x64 produced an 8 KiB IOSurface on
-/// a device whose VM page is 16 KiB, so the surface was rejected before either
-/// layout kernel ran.
+/// Four top-level cases are reported:
+///  1. shared-connection load alone;
+///  2. shared-connection evaluation alone;
+///  3. shared-connection load + evaluation started concurrently;
+///  4. load + evaluation started concurrently on two independently initialized
+///     `_ANEClient` objects, with independent-client isolated controls.
 ///
-/// V8 re-tests the layout bridge with page-valid shapes, then checks every one
-/// of the 280 ANE-native projection tensors across all 28 blocks. Each prepared
-/// program is loaded independently; fused self-QKV is checked as Q/K/V against
-/// separate CPU row references. Projection I/O is written/read directly in the
-/// IOSurface plane-major layout, deliberately bypassing both layout kernels.
-/// Production inference and scheduler behavior are unchanged.
+/// The measured load unit is one exact production warm6 block admission:
+/// fused self-QKV + self-O + cross-Q + cross-O + MLP-up + MLP-down. Each target
+/// is unloaded while retaining its `_ANEModel`, other model identities are
+/// churned to evict immediate runtime-hot state, and its prepared bundles are
+/// prefaulted before timing. This removes cold filesystem and Swift object
+/// construction from the concurrency measurement.
+///
+/// Production inference and scheduler code are not modified.
 enum ANERingProbe {
-    private static let relativeRMSELimit: Float = 0.06
-    private static let targetSampleRows = 128
+    private static let projectionSuffixes = [
+        "self_attn.output_proj.weight",
+        "cross_attn.q_proj.weight",
+        "cross_attn.output_proj.weight",
+        "mlp.layer1.weight",
+        "mlp.layer2.weight"
+    ]
+    private static let evalSuffix = "mlp.layer1.weight"
+    private static let initialChurnCount = 12
+    private static let extendedChurnCount = 24
+    private static let coldEnoughWarm6MS = 100.0
 
-    private struct Measurement {
+    private struct LoadResult: Sendable {
+        let apiMS: Double
+        let wallMS: Double
+        let error: String?
+
+        var ok: Bool { error == nil && apiMS >= 0 }
+    }
+
+    private struct EvalResult: Sendable {
+        let calls: Int
+        let apiMS: Double
+        let wallMS: Double
+        let error: String?
+
+        var ok: Bool { error == nil }
+    }
+
+    private struct JointResult: Sendable {
+        let load: LoadResult
+        let eval: EvalResult
+        let wallMS: Double
+    }
+
+    private struct PrefaultResult: Sendable {
+        let bytes: UInt64
+        let wallMS: Double
+        let checksum: UInt8
+    }
+
+    private final class WarningCounter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        private var token: NSObjectProtocol?
+
+        init() {
+            token = NotificationCenter.default.addObserver(
+                forName: UIApplication.didReceiveMemoryWarningNotification,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                self?.lock.lock()
+                self?.count += 1
+                self?.lock.unlock()
+            }
+        }
+
+        func value() -> Int {
+            lock.lock(); defer { lock.unlock() }
+            return count
+        }
+
+        deinit {
+            if let token { NotificationCenter.default.removeObserver(token) }
+        }
+    }
+
+    private final class Box<T>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: T?
+
+        func set(_ newValue: T) {
+            lock.lock(); value = newValue; lock.unlock()
+        }
+
+        func get() -> T? {
+            lock.lock(); defer { lock.unlock() }
+            return value
+        }
+    }
+
+    /// Type-erased retained model with exactly the diagnostic lifecycle methods
+    /// needed by this probe. The closures retain the Objective-C model object.
+    private final class ReloadableModel: @unchecked Sendable {
+        let object: NSObject
+        private let unloadImpl: () -> Bool
+        private let reloadImpl: () -> Double
+        private let invalidateImpl: () -> Void
+
+        init(_ model: A12ANEProjectionModel) {
+            object = model
+            unloadImpl = { model.diagnosticUnloadKeepingModel() }
+            reloadImpl = { model.diagnosticReloadMilliseconds() }
+            invalidateImpl = { model.invalidate() }
+        }
+
+        init(_ model: A12ANEQKVModel) {
+            object = model
+            unloadImpl = { model.diagnosticUnloadKeepingModel() }
+            reloadImpl = { model.diagnosticReloadMilliseconds() }
+            invalidateImpl = { model.invalidate() }
+        }
+
+        func unload() -> Bool { unloadImpl() }
+        func reload() -> Double { reloadImpl() }
+        func invalidate() { invalidateImpl() }
+
+        func setClient(_ client: NSObject) throws {
+            let selector = NSSelectorFromString("setClient:")
+            guard object.responds(to: selector) else {
+                throw AnimapkError.validation(
+                    "ANE wrapper does not expose diagnostic private client setter")
+            }
+            object.setValue(client, forKey: "client")
+        }
+    }
+
+    /// Six resident legacy programs matching the post-cross-KV production path.
+    private final class Warm6Target: @unchecked Sendable {
         let block: Int
-        let name: String
-        let relativeRMSE: Float
-        let maxAbs: Float
-        let spatialBitMismatches: Int
-        let finite: Bool
-        let evaluationMS: Double
-        let errorText: String?
+        let cacheKeys: [String]
+        private let models: [ReloadableModel]
 
-        var passed: Bool {
-            errorText == nil
-                && finite
-                && relativeRMSE < ANERingProbe.relativeRMSELimit
-                && spatialBitMismatches == 0
-        }
+        init(file: AnimapkFile, block: Int) throws {
+            self.block = block
 
-        var compact: String {
-            if let errorText { return "\(name) ERROR=\(errorText)" }
-            return "\(name) rel=\(five(relativeRMSE)) maxAbs=\(six(maxAbs)) "
-                + "spatialBits=\(spatialBitMismatches) eval=\(two(evaluationMS))ms"
-        }
-    }
-
-    private struct LayoutResult {
-        let name: String
-        let rawMaxAbs: Float
-        let roundTripMaxAbs: Float
-        let errorText: String?
-
-        var passed: Bool {
-            errorText == nil && rawMaxAbs == 0 && roundTripMaxAbs == 0
-        }
-
-        var line: String {
-            if let errorText { return "FAIL layout-\(name): \(errorText)" }
-            let status = passed ? "PASS" : "FAIL"
-            return "\(status) layout-\(name): rawMaxAbs=\(eight(rawMaxAbs)) "
-                + "roundTripMaxAbs=\(eight(roundTripMaxAbs))"
-        }
-    }
-
-    /// Diagnostic-local mirror of DiTBlockExecutor's exact production bridge.
-    private final class ProbeKernels {
-        private let context: MetalContext
-
-        init(context: MetalContext) { self.context = context }
-
-        func tokenToANE(
-            _ command: MTLCommandBuffer,
-            source: MTLBuffer,
-            destination: MTLBuffer,
-            rows: Int,
-            channels: Int,
-            planeStrideElements: UInt
-        ) throws {
-            try bridge(
-                command, kernel: "dit_token_to_ane_f16",
-                source: source, destination: destination,
-                rows: rows, channels: channels,
-                planeStrideElements: planeStrideElements)
-        }
-
-        func aneToToken(
-            _ command: MTLCommandBuffer,
-            source: MTLBuffer,
-            destination: MTLBuffer,
-            rows: Int,
-            channels: Int,
-            planeStrideElements: UInt
-        ) throws {
-            try bridge(
-                command, kernel: "dit_ane_to_token_f16",
-                source: source, destination: destination,
-                rows: rows, channels: channels,
-                planeStrideElements: planeStrideElements)
-        }
-
-        private func bridge(
-            _ command: MTLCommandBuffer,
-            kernel: String,
-            source: MTLBuffer,
-            destination: MTLBuffer,
-            rows: Int,
-            channels: Int,
-            planeStrideElements: UInt
-        ) throws {
-            let pipeline = try context.pipeline(named: kernel)
-            guard let encoder = command.makeComputeCommandEncoder() else {
-                throw AnimapkError.validation("V8 failed to create \(kernel) encoder")
-            }
-            var rows32 = UInt32(rows)
-            var channels32 = UInt32(channels)
-            var stride32 = UInt32(planeStrideElements)
-            encoder.setComputePipelineState(pipeline)
-            encoder.setBuffer(source, offset: 0, index: 0)
-            encoder.setBuffer(destination, offset: 0, index: 1)
-            encoder.setBytes(&rows32, length: 4, index: 2)
-            encoder.setBytes(&channels32, length: 4, index: 3)
-            encoder.setBytes(&stride32, length: 4, index: 4)
-            let tw = max(1, min(pipeline.threadExecutionWidth, channels))
-            let th = max(1, min(pipeline.maxTotalThreadsPerThreadgroup / tw, 8))
-            encoder.dispatchThreads(
-                MTLSize(width: channels, height: rows, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: tw, height: th, depth: 1))
-            encoder.endEncoding()
-        }
-    }
-
-    private final class ModelFactory {
-        private let file: AnimapkFile
-
-        init(file: AnimapkFile) { self.file = file }
-
-        func projection(
-            block: Int, suffix: String, label: String
-        ) throws -> A12ANEProjectionModel {
-            guard let spec = ANEW8NativePack.spec(suffix: suffix) else {
-                throw AnimapkError.validation("V8 unknown projection suffix: \(suffix)")
-            }
-            let tensor = try ANEW8NativePack.tensor(
-                file: file, block: block, suffix: suffix)
-            guard let digest = tensor.blobSHA256 else {
-                throw AnimapkError.validation("V8 native tensor hash missing: \(suffix)")
-            }
-            let key = ANEW8NativePack.projectionCacheKey(
-                block: block, tag: spec.tag, hash: digest)
-            return try A12ANEProjectionModel(
-                preparedInputChannels: UInt(spec.columns),
-                outputChannels: UInt(spec.rows),
-                spatial: UInt(spec.spatial),
-                label: label,
-                cacheKey: key)
-        }
-
-        func qkv(block: Int) throws -> A12ANEQKVModel {
             func digest(_ suffix: String) throws -> String {
                 let tensor = try ANEW8NativePack.tensor(
                     file: file, block: block, suffix: suffix)
                 guard let digest = tensor.blobSHA256 else {
-                    throw AnimapkError.validation("V8 QKV hash missing: \(suffix)")
+                    throw AnimapkError.validation(
+                        "concurrency probe missing digest b\(block) \(suffix)")
                 }
                 return digest
             }
-            let key = ANEW8NativePack.qkvCacheKey(
+
+            let qkvKey = ANEW8NativePack.qkvCacheKey(
                 block: block,
                 q: try digest("self_attn.q_proj.weight"),
                 k: try digest("self_attn.k_proj.weight"),
                 v: try digest("self_attn.v_proj.weight"))
-            return try A12ANEQKVModel(
+            let qkv = try A12ANEQKVModel(
                 preparedChannels: UInt(DiTBlockExecutor.dim),
-                spatial: UInt(DiTBlockExecutor.tokens),
-                label: "v8_b\(block)_self_qkv",
-                cacheKey: key)
-        }
-    }
+                spatial: UInt(ModelConstants.ditTokensAt512),
+                label: "conc_b\(block)_self_qkv",
+                cacheKey: qkvKey)
 
-    private static func makeInput(count: Int, seed: UInt64) -> [Float] {
-        var state = seed
-        return (0..<count).map { index in
-            state &*= 6_364_136_223_846_793_005
-            state &+= 1_442_695_040_888_963_407
-            let unit = Float((state >> 40) & 0xFFFFFF) / Float(0xFFFFFF)
-            let value = (unit * 2 - 1) * 0.2 + Float((index % 17) - 8) * 0.001
-            return Float(Float16(value))
-        }
-    }
-
-    private static func zero(_ buffer: MTLBuffer) {
-        buffer.contents().initializeMemory(
-            as: UInt8.self, repeating: 0, count: buffer.length)
-    }
-
-    private static func maxAbsDiff(_ lhs: [Float], _ rhs: [Float]) -> Float {
-        guard lhs.count == rhs.count else { return .infinity }
-        var value: Float = 0
-        for index in lhs.indices {
-            value = max(value, abs(lhs[index] - rhs[index]))
-        }
-        return value
-    }
-
-    private static func relativeRMSE(_ actual: [Float], _ expected: [Float]) -> Float {
-        guard actual.count == expected.count, !actual.isEmpty else { return .infinity }
-        var error2: Double = 0
-        var reference2: Double = 0
-        for index in actual.indices {
-            let delta = Double(actual[index] - expected[index])
-            let reference = Double(expected[index])
-            error2 += delta * delta
-            reference2 += reference * reference
-        }
-        return Float(sqrt(error2 / max(reference2, 1e-30)))
-    }
-
-    private static func sampledRows(total: Int) -> [Int] {
-        guard total > 0 else { return [] }
-        if total <= targetSampleRows { return Array(0..<total) }
-
-        var rows = Set<Int>()
-        let boundary = [
-            0, 1, 2, 31, 63, 64, 65, 127, 128, 129,
-            total / 4, total / 2 - 1, total / 2, total / 2 + 1,
-            (3 * total) / 4, total - 3, total - 2, total - 1
-        ]
-        for row in boundary where row >= 0 && row < total { rows.insert(row) }
-
-        for index in 0..<64 {
-            rows.insert(Int((Int64(index) * Int64(total - 1)) / 63))
-        }
-        var state = UInt64(total) ^ 0xA12A_4E45_5638_0001
-        while rows.count < targetSampleRows {
-            state &*= 6_364_136_223_846_793_005
-            state &+= 1_442_695_040_888_963_407
-            rows.insert(Int(state % UInt64(total)))
-        }
-        return rows.sorted()
-    }
-
-    /// Direct plane-major write: no token->ANE layout kernel is involved.
-    private static func fillSurface(
-        _ surface: A12ANESurface,
-        vector: [Float],
-        positions: [Int]
-    ) throws {
-        let channels = Int(surface.channels)
-        let spatial = Int(surface.spatial)
-        let stride = Int(surface.planeStrideElements)
-        guard vector.count == channels,
-              positions.allSatisfy({ $0 >= 0 && $0 < spatial }) else {
-            throw AnimapkError.validation("V8 surface fill shape/position mismatch")
-        }
-        zero(surface.metalBuffer)
-        let capacity = surface.metalBuffer.length / MemoryLayout<UInt16>.stride
-        let pointer = surface.metalBuffer.contents().bindMemory(
-            to: UInt16.self, capacity: capacity)
-        for channel in 0..<channels {
-            let bits = Float16(vector[channel]).bitPattern
-            let base = channel * stride
-            for position in positions {
-                pointer[base + position] = bits
-            }
-        }
-    }
-
-    /// Direct plane-major read: no ANE->token layout kernel is involved.
-    private static func readSamples(
-        _ surface: A12ANESurface,
-        rows: [Int],
-        positions: [Int],
-        requireSpatialEquality: Bool
-    ) throws -> (values: [Float], spatialBitMismatches: Int) {
-        let channels = Int(surface.channels)
-        let spatial = Int(surface.spatial)
-        let stride = Int(surface.planeStrideElements)
-        guard rows.allSatisfy({ $0 >= 0 && $0 < channels }),
-              positions.allSatisfy({ $0 >= 0 && $0 < spatial }),
-              let firstPosition = positions.first else {
-            throw AnimapkError.validation("V8 surface sample shape/position mismatch")
-        }
-        let capacity = surface.metalBuffer.length / MemoryLayout<UInt16>.stride
-        let pointer = surface.metalBuffer.contents().bindMemory(
-            to: UInt16.self, capacity: capacity)
-        var values: [Float] = []
-        values.reserveCapacity(rows.count * positions.count)
-        var mismatches = 0
-        for position in positions {
-            for row in rows {
-                let bits = pointer[row * stride + position]
-                values.append(Float(Float16(bitPattern: bits)))
-                if requireSpatialEquality && position != firstPosition {
-                    let baseline = pointer[row * stride + firstPosition]
-                    if bits != baseline { mismatches += 1 }
+            var retained: [ReloadableModel] = [ReloadableModel(qkv)]
+            var keys: [String] = [qkvKey]
+            for suffix in ANERingProbe.projectionSuffixes {
+                guard let spec = ANEW8NativePack.spec(suffix: suffix) else {
+                    throw AnimapkError.validation(
+                        "concurrency probe missing projection spec \(suffix)")
                 }
+                let key = ANEW8NativePack.projectionCacheKey(
+                    block: block, tag: spec.tag, hash: try digest(suffix))
+                let model = try A12ANEProjectionModel(
+                    preparedInputChannels: UInt(spec.columns),
+                    outputChannels: UInt(spec.rows),
+                    spatial: UInt(spec.spatial),
+                    label: "conc_b\(block)_\(spec.tag)",
+                    cacheKey: key)
+                retained.append(ReloadableModel(model))
+                keys.append(key)
             }
-        }
-        return (values, mismatches)
-    }
-
-    private static func cpuProjectionRows(
-        file: AnimapkFile,
-        block: Int,
-        suffix: String,
-        input: [Float],
-        rows: [Int]
-    ) throws -> [Float] {
-        guard let spec = ANEW8NativePack.spec(suffix: suffix),
-              input.count == spec.columns else {
-            throw AnimapkError.validation("V8 CPU projection shape mismatch: \(suffix)")
-        }
-        let tensor = try ANEW8NativePack.tensor(
-            file: file, block: block, suffix: suffix)
-        guard let scaleBytes = file.scaleBytes(tensor),
-              let biasBytes = file.zeroBytes(tensor) else {
-            throw AnimapkError.validation("V8 native row parameters missing: \(suffix)")
-        }
-        let quantized = file.dataBytes(tensor).bindMemory(to: UInt8.self)
-        let scales = scaleBytes.bindMemory(to: Float.self)
-        let biases = biasBytes.bindMemory(to: Float.self)
-        guard quantized.count == spec.rows * spec.columns,
-              scales.count == spec.rows,
-              biases.count == spec.rows,
-              rows.allSatisfy({ $0 >= 0 && $0 < spec.rows }) else {
-            throw AnimapkError.validation("V8 native row payload mismatch: \(suffix)")
+            models = retained
+            cacheKeys = keys
         }
 
-        var result: [Float] = []
-        result.reserveCapacity(rows.count)
-        for row in rows {
-            let base = row * spec.columns
-            let scale = scales[row]
-            let bias = biases[row]
-            var sum: Float = 0
-            for column in 0..<spec.columns {
-                let weight = Float(quantized[base + column]) * scale + bias
-                sum += input[column] * weight
-            }
-            result.append(sum)
+        func unloadAll() -> Bool {
+            models.reduce(true) { partial, model in model.unload() && partial }
         }
-        return result
-    }
 
-    private static func compare(
-        block: Int,
-        name: String,
-        expectedOnePosition: [Float],
-        output: A12ANESurface,
-        rows: [Int],
-        positions: [Int],
-        evaluationMS: Double
-    ) -> Measurement {
-        do {
-            let sampled = try readSamples(
-                output, rows: rows, positions: positions,
-                requireSpatialEquality: true)
-            var expected: [Float] = []
-            expected.reserveCapacity(expectedOnePosition.count * positions.count)
-            for _ in positions { expected.append(contentsOf: expectedOnePosition) }
-            return Measurement(
-                block: block,
-                name: name,
-                relativeRMSE: relativeRMSE(sampled.values, expected),
-                maxAbs: maxAbsDiff(sampled.values, expected),
-                spatialBitMismatches: sampled.spatialBitMismatches,
-                finite: sampled.values.allSatisfy(\.isFinite)
-                    && expected.allSatisfy(\.isFinite),
-                evaluationMS: evaluationMS,
-                errorText: nil)
-        } catch {
-            return failure(block: block, name: name, error: error)
-        }
-    }
-
-    private static func failure(
-        block: Int, name: String, error: Error
-    ) -> Measurement {
-        Measurement(
-            block: block,
-            name: name,
-            relativeRMSE: .infinity,
-            maxAbs: .infinity,
-            spatialBitMismatches: Int.max,
-            finite: false,
-            evaluationMS: 0,
-            errorText: error.localizedDescription)
-    }
-
-    private static func layoutCase(
-        name: String,
-        context: MetalContext,
-        kernels: ProbeKernels,
-        rows: Int,
-        channels: Int
-    ) -> LayoutResult {
-        do {
-            let surface = try A12ANESurface(
-                device: context.device,
-                channels: UInt(channels), spatial: UInt(rows))
-            let count = rows * channels
-            guard let source = context.device.makeBuffer(
-                    length: count * MemoryLayout<Float16>.stride,
-                    options: .storageModeShared),
-                  let roundTrip = context.device.makeBuffer(
-                    length: count * MemoryLayout<Float16>.stride,
-                    options: .storageModeShared),
-                  let encode = context.commandQueue.makeCommandBuffer() else {
-                throw AnimapkError.validation("V8 layout Metal allocation failed")
-            }
-            let values = makeInput(
-                count: count,
-                seed: (UInt64(rows) << 32) ^ UInt64(channels) ^ 0x1A90_0008)
-            let sourcePointer = source.contents().bindMemory(
-                to: UInt16.self, capacity: count)
-            for index in values.indices {
-                sourcePointer[index] = Float16(values[index]).bitPattern
-            }
-            zero(surface.metalBuffer)
-            try kernels.tokenToANE(
-                encode, source: source, destination: surface.metalBuffer,
-                rows: rows, channels: channels,
-                planeStrideElements: surface.planeStrideElements)
-            encode.commit()
-            encode.waitUntilCompleted()
-            if let error = encode.error { throw error }
-
-            let channelSamples = sampledRows(total: channels)
-            let positionSamples = Array(Set([
-                0, 1, rows / 2, max(0, rows - 2), rows - 1
-            ])).sorted()
-            let raw = try readSamples(
-                surface, rows: channelSamples, positions: positionSamples,
-                requireSpatialEquality: false).values
-            var rawExpected: [Float] = []
-            rawExpected.reserveCapacity(raw.count)
-            for position in positionSamples {
-                for channel in channelSamples {
-                    rawExpected.append(values[position * channels + channel])
+        func reloadAll() -> LoadResult {
+            let start = nowMS()
+            var api = 0.0
+            for model in models {
+                let value = model.reload()
+                if value < 0 {
+                    return LoadResult(
+                        apiMS: api,
+                        wallMS: nowMS() - start,
+                        error: "reload failed after \(api) ms")
                 }
+                api += value
             }
-            let rawMax = maxAbsDiff(raw, rawExpected)
-
-            guard let decode = context.commandQueue.makeCommandBuffer() else {
-                throw AnimapkError.validation("V8 layout decode allocation failed")
-            }
-            zero(roundTrip)
-            try kernels.aneToToken(
-                decode, source: surface.metalBuffer, destination: roundTrip,
-                rows: rows, channels: channels,
-                planeStrideElements: surface.planeStrideElements)
-            decode.commit()
-            decode.waitUntilCompleted()
-            if let error = decode.error { throw error }
-            let pointer = roundTrip.contents().bindMemory(
-                to: UInt16.self, capacity: count)
-            var roundTripMax: Float = 0
-            for index in values.indices {
-                let actual = Float(Float16(bitPattern: pointer[index]))
-                roundTripMax = max(roundTripMax, abs(actual - values[index]))
-            }
-            return LayoutResult(
-                name: name,
-                rawMaxAbs: rawMax,
-                roundTripMaxAbs: roundTripMax,
-                errorText: nil)
-        } catch {
-            return LayoutResult(
-                name: name,
-                rawMaxAbs: .infinity,
-                roundTripMaxAbs: .infinity,
-                errorText: error.localizedDescription)
+            return LoadResult(
+                apiMS: api,
+                wallMS: nowMS() - start,
+                error: nil)
         }
+
+        func setClient(_ client: NSObject) throws {
+            for model in models { try model.setClient(client) }
+        }
+
+        func invalidateAll() {
+            for model in models { model.invalidate() }
+        }
+
+        deinit { invalidateAll() }
     }
 
-    private static func projection(
-        file: AnimapkFile,
-        factory: ModelFactory,
-        block: Int,
-        name: String,
-        suffix: String,
-        inputVector: [Float],
-        inputSurface: A12ANESurface,
-        outputSurface: A12ANESurface,
-        positions: [Int]
-    ) -> Measurement {
-        do {
-            guard let spec = ANEW8NativePack.spec(suffix: suffix) else {
-                throw AnimapkError.validation("V8 projection spec missing: \(suffix)")
-            }
-            let rows = sampledRows(total: spec.rows)
-            let expected = try cpuProjectionRows(
-                file: file, block: block, suffix: suffix,
-                input: inputVector, rows: rows)
-            try fillSurface(inputSurface, vector: inputVector, positions: positions)
-            zero(outputSurface.metalBuffer)
-            let model = try factory.projection(
-                block: block, suffix: suffix,
-                label: "v8_b\(block)_\(name)")
-            defer { model.invalidate() }
-            var evaluationMS = 0.0
-            _ = try model.evaluateInput(
-                inputSurface, output: outputSurface,
-                milliseconds: &evaluationMS)
-            return compare(
-                block: block, name: name,
-                expectedOnePosition: expected,
-                output: outputSurface,
-                rows: rows, positions: positions,
-                evaluationMS: evaluationMS)
-        } catch {
-            return failure(block: block, name: name, error: error)
+    private final class EvalContext: @unchecked Sendable {
+        let model: A12ANEProjectionModel
+        let surfaces: ANEW8DiTSurfaces
+
+        init(model: A12ANEProjectionModel, surfaces: ANEW8DiTSurfaces) {
+            self.model = model
+            self.surfaces = surfaces
         }
-    }
-
-    private static func qkv(
-        file: AnimapkFile,
-        factory: ModelFactory,
-        block: Int,
-        inputVector: [Float],
-        surfaces: ANEW8DiTSurfaces,
-        positions: [Int]
-    ) -> [Measurement] {
-        let suffixes = [
-            "self_attn.q_proj.weight",
-            "self_attn.k_proj.weight",
-            "self_attn.v_proj.weight"
-        ]
-        let names = ["self_q", "self_k", "self_v"]
-        let outputs = [surfaces.q, surfaces.k, surfaces.v]
-        do {
-            let rows = sampledRows(total: DiTBlockExecutor.dim)
-            let expected = try suffixes.map { suffix in
-                try cpuProjectionRows(
-                    file: file, block: block, suffix: suffix,
-                    input: inputVector, rows: rows)
-            }
-            try fillSurface(
-                surfaces.tokenInput, vector: inputVector, positions: positions)
-            for output in outputs { zero(output.metalBuffer) }
-            let model = try factory.qkv(block: block)
-            defer { model.invalidate() }
-            var evaluationMS = 0.0
-            _ = try model.evaluateInput(
-                surfaces.tokenInput,
-                qOutput: surfaces.q,
-                kOutput: surfaces.k,
-                vOutput: surfaces.v,
-                milliseconds: &evaluationMS)
-            return (0..<3).map { index in
-                compare(
-                    block: block,
-                    name: names[index],
-                    expectedOnePosition: expected[index],
-                    output: outputs[index],
-                    rows: rows,
-                    positions: positions,
-                    evaluationMS: evaluationMS)
-            }
-        } catch {
-            return names.map { failure(block: block, name: $0, error: error) }
-        }
-    }
-
-    private static func sweepBlock(
-        file: AnimapkFile,
-        factory: ModelFactory,
-        surfaces: ANEW8DiTSurfaces,
-        block: Int
-    ) -> [Measurement] {
-        let tokenPositions = [
-            0, DiTBlockExecutor.tokens / 2, DiTBlockExecutor.tokens - 1
-        ]
-        let contextPositions = [
-            0, DiTBlockExecutor.contextTokens / 2,
-            DiTBlockExecutor.contextTokens - 1
-        ]
-        let tokenInput = makeInput(
-            count: DiTBlockExecutor.dim,
-            seed: 0x7100_0000 + UInt64(block))
-        let contextInput = makeInput(
-            count: DiTBlockExecutor.contextDim,
-            seed: 0x7200_0000 + UInt64(block))
-        let hiddenInput = makeInput(
-            count: DiTBlockExecutor.hidden,
-            seed: 0x7300_0000 + UInt64(block))
-
-        var result = qkv(
-            file: file, factory: factory, block: block,
-            inputVector: tokenInput, surfaces: surfaces,
-            positions: tokenPositions)
-        result.append(projection(
-            file: file, factory: factory, block: block,
-            name: "self_o", suffix: "self_attn.output_proj.weight",
-            inputVector: tokenInput,
-            inputSurface: surfaces.tokenInput,
-            outputSurface: surfaces.tokenOutput,
-            positions: tokenPositions))
-        result.append(projection(
-            file: file, factory: factory, block: block,
-            name: "cross_q", suffix: "cross_attn.q_proj.weight",
-            inputVector: tokenInput,
-            inputSurface: surfaces.tokenInput,
-            outputSurface: surfaces.q,
-            positions: tokenPositions))
-        result.append(projection(
-            file: file, factory: factory, block: block,
-            name: "cross_k", suffix: "cross_attn.k_proj.weight",
-            inputVector: contextInput,
-            inputSurface: surfaces.contextInput,
-            outputSurface: surfaces.contextK,
-            positions: contextPositions))
-        result.append(projection(
-            file: file, factory: factory, block: block,
-            name: "cross_v", suffix: "cross_attn.v_proj.weight",
-            inputVector: contextInput,
-            inputSurface: surfaces.contextInput,
-            outputSurface: surfaces.contextV,
-            positions: contextPositions))
-        result.append(projection(
-            file: file, factory: factory, block: block,
-            name: "cross_o", suffix: "cross_attn.output_proj.weight",
-            inputVector: tokenInput,
-            inputSurface: surfaces.tokenInput,
-            outputSurface: surfaces.tokenOutput,
-            positions: tokenPositions))
-        result.append(projection(
-            file: file, factory: factory, block: block,
-            name: "mlp1", suffix: "mlp.layer1.weight",
-            inputVector: tokenInput,
-            inputSurface: surfaces.tokenInput,
-            outputSurface: surfaces.hidden,
-            positions: tokenPositions))
-        result.append(projection(
-            file: file, factory: factory, block: block,
-            name: "mlp2", suffix: "mlp.layer2.weight",
-            inputVector: hiddenInput,
-            inputSurface: surfaces.hidden,
-            outputSurface: surfaces.tokenOutput,
-            positions: tokenPositions))
-        return result
     }
 
     static func run() async -> String {
+        let warnings = WarningCounter()
         var lines = [
-            "ANE native projection sweep v8",
-            "Diagnostic only; production inference and scheduler are unchanged.",
-            "V7 layout failure was an invalid 8 KiB fixture on a 16 KiB-page device.",
-            "V8 checks page-valid layout plus every native projection tensor/program family across all 28 blocks.",
-            "Projection checks bypass layout kernels via direct plane-major IOSurface I/O.",
-            "sampleRows≈\(targetSampleRows) per tensor; positions=3; relRMSE limit=\(relativeRMSELimit).",
+            "ANE load/eval concurrency probe v1",
+            "cases=1 load-alone(shared), 2 eval-alone(shared), 3 concurrent(shared), 4 concurrent(two independent clients)",
+            "load-unit=real warm6 block; measured reload excludes wrapper construction; backing bundles prefaulted after runtime-hot churn",
+            "classification: overlapScore 0≈serialized, 1≈ideal full overlap",
             ""
         ]
 
         do {
             guard A12ANEIsAvailable() else {
-                lines.append("SKIP: ANE unavailable: \(A12ANERuntimeStatus())")
+                lines.append("SKIP ANE unavailable: \(A12ANERuntimeStatus())")
                 return lines.joined(separator: "\n")
             }
             guard let context = MetalContext() else {
-                lines.append("FAIL: Metal unavailable")
+                lines.append("FAIL Metal unavailable")
                 return lines.joined(separator: "\n")
             }
             guard let ditEntry = ModelManifest.entries.first(where: { $0.component == .dit }) else {
-                lines.append("FAIL: DiT manifest entry missing")
+                lines.append("FAIL DiT manifest entry missing")
                 return lines.joined(separator: "\n")
             }
             let store = try ModelStore()
             let ditURL = await store.localURL(for: ditEntry)
             guard FileManager.default.fileExists(atPath: ditURL.path) else {
-                lines.append("FAIL: installed DiT pack missing")
+                lines.append("FAIL installed DiT pack missing")
                 return lines.joined(separator: "\n")
             }
             let file = try AnimapkFile(url: ditURL)
             try ANEW8NativePack.validate(file: file)
             guard ANEW8ModelPreparer.isPrepared(file: file) else {
-                lines.append("FAIL: prepared ANE cache incomplete; prepare/import the native W8 pack first")
+                lines.append("FAIL prepared ANE cache incomplete")
                 return lines.joined(separator: "\n")
             }
 
-            let factory = ModelFactory(file: file)
-            let kernels = ProbeKernels(context: context)
             lines.append("runtime: \(A12ANERuntimeStatus())")
             lines.append("client selectors: \(A12ANEClientCapabilitySummary())")
             lines.append("pack: \(ditURL.lastPathComponent) scheme=\(file.quantScheme ?? "n/a")")
             lines.append("")
 
-            lines.append("LAYOUT — page-valid independent checks")
-            let layouts = [
-                layoutCase(
-                    name: "production-token-1024x2048",
-                    context: context, kernels: kernels,
-                    rows: DiTBlockExecutor.tokens,
-                    channels: DiTBlockExecutor.dim),
-                layoutCase(
-                    name: "production-context-512x1024",
-                    context: context, kernels: kernels,
-                    rows: DiTBlockExecutor.contextTokens,
-                    channels: DiTBlockExecutor.contextDim),
-                layoutCase(
-                    name: "padded-37x128",
-                    context: context, kernels: kernels,
-                    rows: 37, channels: 128)
-            ]
-            lines.append(contentsOf: layouts.map(\.line))
-            lines.append("")
-
-            // Match production lifetime and eliminate IOSurface allocator churn
-            // from the 28-block projection sweep.
             let surfaces = try ANEW8DiTSurfaces(device: context.device)
-            lines.append("PROJECTIONS — all 28 blocks, direct plane-major I/O")
-            var measurements: [Measurement] = []
-            measurements.reserveCapacity(ModelConstants.ditBlocks * 10)
-            for block in 0..<ModelConstants.ditBlocks {
-                let current = sweepBlock(
-                    file: file, factory: factory,
-                    surfaces: surfaces, block: block)
-                measurements.append(contentsOf: current)
-                let failures = current.filter { !$0.passed }
-                let valid = current.filter { $0.errorText == nil }
-                if let worst = valid.max(by: { $0.relativeRMSE < $1.relativeRMSE }) {
-                    let status = failures.isEmpty ? "PASS" : "FAIL"
-                    lines.append(
-                        "b\(twoInt(block)) \(status) failures=\(failures.count) "
-                        + "worst=\(worst.name) rel=\(five(worst.relativeRMSE)) "
-                        + "maxAbs=\(six(worst.maxAbs))")
-                } else {
-                    lines.append("b\(twoInt(block)) FAIL failures=\(failures.count) no valid measurements")
+
+            // CASE 1 — shared-connection load alone.
+            lines.append("CASE 1 — LOAD ALONE / sharedConnection")
+            let loadTarget = try Warm6Target(file: file, block: 12)
+            guard loadTarget.unloadAll() else {
+                throw AnimapkError.validation("case1 initial warm6 unload failed")
+            }
+            var churnCount = initialChurnCount
+            let pf1 = try prepareColdPageHot(
+                target: loadTarget, file: file, churnCount: churnCount)
+            var sharedLoadAlone = loadTarget.reloadAll()
+            if sharedLoadAlone.ok && sharedLoadAlone.apiMS < coldEnoughWarm6MS {
+                lines.append(String(
+                    format: "case1 first reload %.1fms still runtime-hot; extending churn %d→%d",
+                    sharedLoadAlone.apiMS, churnCount, extendedChurnCount))
+                guard loadTarget.unloadAll() else {
+                    throw AnimapkError.validation("case1 retry unload failed")
                 }
-                for failure in failures {
-                    lines.append("  -> \(failure.compact)")
+                churnCount = extendedChurnCount
+                _ = try prepareColdPageHot(
+                    target: loadTarget, file: file, churnCount: churnCount)
+                sharedLoadAlone = loadTarget.reloadAll()
+            }
+            lines.append(formatLoad(
+                prefix: "case1", result: sharedLoadAlone,
+                prefault: pf1, churnCount: churnCount))
+            guard loadTarget.unloadAll() else {
+                throw AnimapkError.validation("case1 final unload failed")
+            }
+            loadTarget.invalidateAll()
+
+            // Shared evaluation model + dynamic loop length (~>=600ms and at
+            // least 3x the isolated load) so overlap/no-overlap is obvious.
+            let sharedEvalModel = try makeProjection(
+                file: file, block: 0, suffix: evalSuffix,
+                label: "conc_shared_eval")
+            let sharedEval = EvalContext(model: sharedEvalModel, surfaces: surfaces)
+            _ = try prefault(cacheKeys: [try projectionKey(
+                file: file, block: 0, suffix: evalSuffix)])
+            _ = measureEval(sharedEval, calls: 2) // warm-up outside all cases
+            let oneEval = measureEval(sharedEval, calls: 1)
+            guard oneEval.ok, oneEval.apiMS > 0 else {
+                throw AnimapkError.validation(
+                    "unable to calibrate ANE evaluation loop: \(oneEval.error ?? "unknown")")
+            }
+            let targetEvalMS = max(600.0, sharedLoadAlone.wallMS * 3.0)
+            let evalCalls = max(16, min(256,
+                Int(ceil(targetEvalMS / max(oneEval.apiMS, 0.5)))))
+            lines.append(String(
+                format: "calibration oneEval=%.2fms targetEval=%.1fms calls=%d",
+                oneEval.apiMS, targetEvalMS, evalCalls))
+            lines.append("")
+
+            // CASE 2 — shared evaluation alone.
+            lines.append("CASE 2 — EVAL ALONE / sharedConnection")
+            let sharedEvalAlone = measureEval(sharedEval, calls: evalCalls)
+            lines.append(formatEval(prefix: "case2", result: sharedEvalAlone))
+            lines.append("")
+
+            // CASE 3 — same shared client object underneath both wrappers.
+            lines.append("CASE 3 — CONCURRENT LOAD+EVAL / sharedConnection")
+            let sharedConcurrentTarget = try Warm6Target(file: file, block: 13)
+            guard sharedConcurrentTarget.unloadAll() else {
+                throw AnimapkError.validation("case3 initial warm6 unload failed")
+            }
+            let pf3 = try prepareColdPageHot(
+                target: sharedConcurrentTarget, file: file, churnCount: churnCount)
+            let sharedJoint = runConcurrent(
+                eval: sharedEval,
+                target: sharedConcurrentTarget,
+                calls: evalCalls)
+            lines.append(formatJoint(prefix: "case3", joint: sharedJoint, prefault: pf3))
+            lines.append(overlapLine(
+                prefix: "case3",
+                evalBaseline: sharedEvalAlone.wallMS,
+                loadBaseline: sharedLoadAlone.wallMS,
+                joint: sharedJoint.wallMS))
+            _ = sharedConcurrentTarget.unloadAll()
+            sharedConcurrentTarget.invalidateAll()
+            sharedEvalModel.invalidate()
+            lines.append("")
+
+            // CASE 4 — two separately initialized _ANEClient objects.
+            lines.append("CASE 4 — CONCURRENT LOAD+EVAL / two independent _ANEClient objects")
+            do {
+                let evalClient = try makeIndependentClient()
+                let loadClient = try makeIndependentClient()
+                let distinct = evalClient !== loadClient
+                lines.append(
+                    "independent clients: eval=\(ObjectIdentifier(evalClient)) load=\(ObjectIdentifier(loadClient)) distinct=\(distinct ? "yes" : "NO")")
+                guard distinct else {
+                    throw AnimapkError.validation(
+                        "_ANEClient init returned the same object twice")
                 }
+
+                let independentEvalModel = try makeProjection(
+                    file: file, block: 1, suffix: evalSuffix,
+                    label: "conc_independent_eval")
+                guard independentEvalModel.diagnosticUnloadKeepingModel() else {
+                    throw AnimapkError.validation(
+                        "case4 eval model initial unload failed")
+                }
+                try setClient(independentEvalModel, client: evalClient)
+                let evalReload = independentEvalModel.diagnosticReloadMilliseconds()
+                guard evalReload >= 0 else {
+                    throw AnimapkError.validation(
+                        "case4 eval model failed to load on independent client")
+                }
+                let independentEval = EvalContext(
+                    model: independentEvalModel, surfaces: surfaces)
+                _ = measureEval(independentEval, calls: 2)
+                let independentEvalAlone = measureEval(
+                    independentEval, calls: evalCalls)
+                lines.append(formatEval(
+                    prefix: "case4-control-eval", result: independentEvalAlone))
+
+                let independentTarget = try Warm6Target(file: file, block: 14)
+                guard independentTarget.unloadAll() else {
+                    throw AnimapkError.validation(
+                        "case4 target initial unload failed")
+                }
+                try independentTarget.setClient(loadClient)
+
+                let pf4a = try prepareColdPageHot(
+                    target: independentTarget, file: file, churnCount: churnCount)
+                let independentLoadAlone = independentTarget.reloadAll()
+                lines.append(formatLoad(
+                    prefix: "case4-control-load",
+                    result: independentLoadAlone,
+                    prefault: pf4a,
+                    churnCount: churnCount))
+                guard independentTarget.unloadAll() else {
+                    throw AnimapkError.validation(
+                        "case4 target control unload failed")
+                }
+
+                let pf4 = try prepareColdPageHot(
+                    target: independentTarget, file: file, churnCount: churnCount)
+                let independentJoint = runConcurrent(
+                    eval: independentEval,
+                    target: independentTarget,
+                    calls: evalCalls)
+                lines.append(formatJoint(
+                    prefix: "case4", joint: independentJoint, prefault: pf4))
+                lines.append(overlapLine(
+                    prefix: "case4",
+                    evalBaseline: independentEvalAlone.wallMS,
+                    loadBaseline: independentLoadAlone.wallMS,
+                    joint: independentJoint.wallMS))
+                _ = independentTarget.unloadAll()
+                independentTarget.invalidateAll()
+                independentEvalModel.invalidate()
+            } catch {
+                lines.append("case4 SKIP/FAIL: \(error.localizedDescription)")
+                lines.append("Interpretation: cases 1–3 remain valid; independent-client path was unavailable or rejected on this runtime.")
             }
 
             lines.append("")
-            lines.append("FAMILY WORST CASES")
-            let families = [
-                "self_q", "self_k", "self_v", "self_o",
-                "cross_q", "cross_k", "cross_v", "cross_o",
-                "mlp1", "mlp2"
-            ]
-            for family in families {
-                let valid = measurements.filter {
-                    $0.name == family && $0.errorText == nil
-                }
-                if let worst = valid.max(by: { $0.relativeRMSE < $1.relativeRMSE }) {
-                    lines.append(
-                        "\(family) worst=b\(twoInt(worst.block)) "
-                        + "rel=\(five(worst.relativeRMSE)) "
-                        + "maxAbs=\(six(worst.maxAbs)) "
-                        + "spatialBits=\(worst.spatialBitMismatches)")
-                } else {
-                    lines.append("\(family) unavailable")
-                }
-            }
-
-            let layoutFailures = layouts.filter { !$0.passed }
-            let projectionFailures = measurements.filter { !$0.passed }
-            let validCount = measurements.filter { $0.errorText == nil }.count
-            lines.append("")
-            lines.append(
-                "summary: layout=\(layouts.count - layoutFailures.count)/\(layouts.count) pass "
-                + "projectionTensors=\(measurements.count - projectionFailures.count)/\(measurements.count) pass "
-                + "validMeasurements=\(validCount) programsAttempted=224")
-
-            if let failure = layoutFailures.first {
-                lines.append("FIRST BAD BOUNDARY: layout-\(failure.name)")
-                lines.append("Interpretation: a page-valid layout check failed; inspect the two Metal bridge kernels before ANE math.")
-            } else if let failure = projectionFailures.first {
-                lines.append("FIRST BAD BOUNDARY: block \(failure.block) / \(failure.name)")
-                lines.append("Interpretation: this prepared ANE projection disagrees with the native pack row contract or differs across identical spatial positions. Fix the projection/model ABI before attention or scheduler policy.")
-            } else {
-                lines.append("ALL V8 NATIVE PROJECTION BOUNDARIES PASSED")
-                lines.append("Interpretation: page-valid layout, fused QKV ordering, rectangular cross K/V, both MLP shapes, and sampled rows from every native projection tensor are clean across all 28 blocks.")
-                lines.append("Next target: instrument one real ANE hybrid block at self/cross/MLP residual boundaries and then inside RMSNorm/RoPE/attention/gating.")
-            }
+            lines.append("RESULT COMPLETE memoryWarnings=\(warnings.value())")
+            lines.append("Interpretation guide:")
+            lines.append("  overlapScore≈0: API calls overlap on CPU threads but ANE load/eval serialize in practice")
+            lines.append("  overlapScore≈1: load is substantially hidden under ANE evaluation")
+            lines.append("  case3≈0 but case4≫0: sharedConnection is the bottleneck; separate clients are actionable")
+            lines.append("  case3≈0 and case4≈0: serialization is likely below the client object (aned/driver/hardware path)")
         } catch {
-            lines.append("FAIL V8 setup threw: \(error.localizedDescription)")
+            lines.append("FAIL setup/runtime: \(error.localizedDescription)")
+            lines.append("memoryWarnings=\(warnings.value())")
         }
         return lines.joined(separator: "\n")
     }
 
-    private static func two(_ value: Double) -> String {
-        String(format: "%.2f", value)
+    // MARK: - Measured operations
+
+    private static func measureEval(
+        _ context: EvalContext,
+        calls: Int
+    ) -> EvalResult {
+        let start = nowMS()
+        var api = 0.0
+        do {
+            for _ in 0..<calls {
+                var ms = 0.0
+                _ = try context.model.evaluateInput(
+                    context.surfaces.tokenInput,
+                    output: context.surfaces.hidden,
+                    milliseconds: &ms)
+                api += ms
+            }
+            return EvalResult(
+                calls: calls,
+                apiMS: api,
+                wallMS: nowMS() - start,
+                error: nil)
+        } catch {
+            return EvalResult(
+                calls: calls,
+                apiMS: api,
+                wallMS: nowMS() - start,
+                error: error.localizedDescription)
+        }
     }
 
-    private static func five(_ value: Float) -> String {
-        String(format: "%.5f", value)
+    private static func runConcurrent(
+        eval: EvalContext,
+        target: Warm6Target,
+        calls: Int
+    ) -> JointResult {
+        let ready = DispatchSemaphore(value: 0)
+        let startGate = DispatchSemaphore(value: 0)
+        let group = DispatchGroup()
+        let evalBox = Box<EvalResult>()
+        let loadBox = Box<LoadResult>()
+        let evalQueue = DispatchQueue(
+            label: "com.invisiblestrangler.AnimaXS.ane-concurrency-eval",
+            qos: .userInitiated)
+        let loadQueue = DispatchQueue(
+            label: "com.invisiblestrangler.AnimaXS.ane-concurrency-load",
+            qos: .userInitiated)
+
+        group.enter()
+        evalQueue.async {
+            ready.signal()
+            startGate.wait()
+            evalBox.set(measureEval(eval, calls: calls))
+            group.leave()
+        }
+
+        group.enter()
+        loadQueue.async {
+            ready.signal()
+            startGate.wait()
+            loadBox.set(target.reloadAll())
+            group.leave()
+        }
+
+        ready.wait()
+        ready.wait()
+        let jointStart = nowMS()
+        startGate.signal()
+        startGate.signal()
+        group.wait()
+        let wall = nowMS() - jointStart
+
+        return JointResult(
+            load: loadBox.get() ?? LoadResult(
+                apiMS: 0, wallMS: wall,
+                error: "loader thread returned no result"),
+            eval: evalBox.get() ?? EvalResult(
+                calls: calls, apiMS: 0, wallMS: wall,
+                error: "eval thread returned no result"),
+            wallMS: wall)
     }
 
-    private static func six(_ value: Float) -> String {
-        String(format: "%.6g", value)
+    // MARK: - Runtime-hot eviction + page-hot control
+
+    private static func prepareColdPageHot(
+        target: Warm6Target,
+        file: AnimapkFile,
+        churnCount: Int
+    ) throws -> PrefaultResult {
+        guard target.unloadAll() else {
+            throw AnimapkError.validation(
+                "warm6 target b\(target.block) unload before churn failed")
+        }
+        try churn(file: file, count: churnCount)
+        return try prefault(cacheKeys: target.cacheKeys)
     }
 
-    private static func eight(_ value: Float) -> String {
-        String(format: "%.8g", value)
+    private static func churn(file: AnimapkFile, count: Int) throws {
+        var made = 0
+        var cursor = 0
+        while made < count {
+            let block = 16 + ((cursor / projectionSuffixes.count) % 12)
+            let suffix = projectionSuffixes[cursor % projectionSuffixes.count]
+            cursor += 1
+            guard let spec = ANEW8NativePack.spec(suffix: suffix) else { continue }
+            let key = try projectionKey(file: file, block: block, suffix: suffix)
+            _ = try prefault(cacheKeys: [key])
+            let model = try A12ANEProjectionModel(
+                preparedInputChannels: UInt(spec.columns),
+                outputChannels: UInt(spec.rows),
+                spatial: UInt(spec.spatial),
+                label: "conc_churn_b\(block)_\(spec.tag)_\(made)",
+                cacheKey: key)
+            model.invalidate()
+            made += 1
+        }
     }
 
-    private static func twoInt(_ value: Int) -> String {
-        String(format: "%02d", value)
+    private static func prefault(cacheKeys: [String]) throws -> PrefaultResult {
+        let start = nowMS()
+        var total: UInt64 = 0
+        var checksum: UInt8 = 0
+        let fm = FileManager.default
+        guard let root = fm.urls(
+            for: .cachesDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("AnimaXS-ANE", isDirectory: true) else {
+            throw AnimapkError.validation("unable to resolve ANE cache root")
+        }
+
+        for key in cacheKeys {
+            let bundle = root.appendingPathComponent(
+                "\(key).mlmodelc", isDirectory: true)
+            guard fm.fileExists(atPath: bundle.path) else {
+                throw AnimapkError.validation(
+                    "prepared bundle missing for concurrency prefault")
+            }
+            guard let enumerator = fm.enumerator(
+                at: bundle,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]) else {
+                throw AnimapkError.validation(
+                    "unable to enumerate prepared bundle")
+            }
+            for case let url as URL in enumerator {
+                let values = try url.resourceValues(forKeys: [.isRegularFileKey])
+                guard values.isRegularFile == true else { continue }
+                let handle = try FileHandle(forReadingFrom: url)
+                defer { try? handle.close() }
+                while true {
+                    let data = try handle.read(upToCount: 1 << 20) ?? Data()
+                    if data.isEmpty { break }
+                    total += UInt64(data.count)
+                    checksum ^= data.first ?? 0
+                    checksum ^= data.last ?? 0
+                }
+            }
+        }
+        return PrefaultResult(
+            bytes: total,
+            wallMS: nowMS() - start,
+            checksum: checksum)
+    }
+
+    // MARK: - Model / client construction
+
+    private static func projectionKey(
+        file: AnimapkFile,
+        block: Int,
+        suffix: String
+    ) throws -> String {
+        guard let spec = ANEW8NativePack.spec(suffix: suffix) else {
+            throw AnimapkError.validation(
+                "unknown projection suffix \(suffix)")
+        }
+        let tensor = try ANEW8NativePack.tensor(
+            file: file, block: block, suffix: suffix)
+        guard let digest = tensor.blobSHA256 else {
+            throw AnimapkError.validation(
+                "missing projection digest b\(block) \(suffix)")
+        }
+        return ANEW8NativePack.projectionCacheKey(
+            block: block, tag: spec.tag, hash: digest)
+    }
+
+    private static func makeProjection(
+        file: AnimapkFile,
+        block: Int,
+        suffix: String,
+        label: String
+    ) throws -> A12ANEProjectionModel {
+        guard let spec = ANEW8NativePack.spec(suffix: suffix) else {
+            throw AnimapkError.validation("unknown projection suffix")
+        }
+        return try A12ANEProjectionModel(
+            preparedInputChannels: UInt(spec.columns),
+            outputChannels: UInt(spec.rows),
+            spatial: UInt(spec.spatial),
+            label: label,
+            cacheKey: try projectionKey(
+                file: file, block: block, suffix: suffix))
+    }
+
+    private static func makeIndependentClient() throws -> NSObject {
+        guard let clientType = NSClassFromString("_ANEClient") as? NSObject.Type else {
+            throw AnimapkError.validation("_ANEClient class unavailable")
+        }
+        let client = clientType.init()
+        guard client.responds(to: NSSelectorFromString(
+            "loadModel:options:qos:error:")),
+              client.responds(to: NSSelectorFromString(
+                "evaluateWithModel:options:request:qos:error:")) else {
+            throw AnimapkError.validation(
+                "independently initialized _ANEClient lacks load/evaluate selectors")
+        }
+        return client
+    }
+
+    private static func setClient(
+        _ model: A12ANEProjectionModel,
+        client: NSObject
+    ) throws {
+        let object = model as NSObject
+        guard object.responds(to: NSSelectorFromString("setClient:")) else {
+            throw AnimapkError.validation(
+                "projection wrapper private client setter unavailable")
+        }
+        object.setValue(client, forKey: "client")
+    }
+
+    // MARK: - Reporting
+
+    private static func overlapLine(
+        prefix: String,
+        evalBaseline: Double,
+        loadBaseline: Double,
+        joint: Double
+    ) -> String {
+        let serial = evalBaseline + loadBaseline
+        let ideal = max(evalBaseline, loadBaseline)
+        let hideable = max(1.0, serial - ideal)
+        let rawScore = (serial - joint) / hideable
+        let score = max(-2.0, min(2.0, rawScore))
+        let classification: String
+        if score >= 0.75 {
+            classification = "OVERLAP"
+        } else if score <= 0.25 {
+            classification = "SERIALIZED"
+        } else {
+            classification = "PARTIAL"
+        }
+        return String(
+            format: "%@ COMPARISON serialBaseline=%.1fms idealOverlap=%.1fms joint=%.1fms overlapScore=%.2f => %@",
+            prefix, serial, ideal, joint, score, classification)
+    }
+
+    private static func formatLoad(
+        prefix: String,
+        result: LoadResult,
+        prefault: PrefaultResult,
+        churnCount: Int
+    ) -> String {
+        String(
+            format: "%@ load ok=%@ api=%.1fms wall=%.1fms churn=%d prefault=%.1fMB/%.1fms checksum=%u%@",
+            prefix, result.ok ? "yes" : "NO",
+            result.apiMS, result.wallMS, churnCount,
+            Double(prefault.bytes) / 1_048_576.0,
+            prefault.wallMS, prefault.checksum,
+            result.error.map { " error=\($0)" } ?? "")
+    }
+
+    private static func formatEval(
+        prefix: String,
+        result: EvalResult
+    ) -> String {
+        String(
+            format: "%@ eval ok=%@ calls=%d apiSum=%.1fms wall=%.1fms avgApi=%.2fms%@",
+            prefix, result.ok ? "yes" : "NO",
+            result.calls, result.apiMS, result.wallMS,
+            result.calls > 0 ? result.apiMS / Double(result.calls) : 0,
+            result.error.map { " error=\($0)" } ?? "")
+    }
+
+    private static func formatJoint(
+        prefix: String,
+        joint: JointResult,
+        prefault: PrefaultResult
+    ) -> String {
+        String(
+            format: "%@ jointWall=%.1fms | load(api=%.1f wall=%.1f ok=%@) | eval(calls=%d api=%.1f wall=%.1f ok=%@) | prefault=%.1fMB/%.1fms",
+            prefix, joint.wallMS,
+            joint.load.apiMS, joint.load.wallMS, joint.load.ok ? "yes" : "NO",
+            joint.eval.calls, joint.eval.apiMS, joint.eval.wallMS,
+            joint.eval.ok ? "yes" : "NO",
+            Double(prefault.bytes) / 1_048_576.0, prefault.wallMS)
+    }
+
+    private static func nowMS() -> Double {
+        ProcessInfo.processInfo.systemUptime * 1_000.0
     }
 }
