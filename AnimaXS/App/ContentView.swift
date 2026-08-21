@@ -5,51 +5,97 @@ import os
 import Darwin
 #endif
 
-/// K001 — minimal useful app. Model section (3 packs: download/import/repair),
-/// optional user LoRA, prompt, seed + Randomize, Generate, Cancel, progress,
-/// image, Share, Diagnostics, and user-recoverable errors.
+/// Image-first generation surface. Heavy diagnostics and run metrics deliberately
+/// live in Diagnostics; this screen stays focused on the image, prompt, and the
+/// few controls that materially shape the next generation.
 struct ContentView: View {
     @StateObject private var coordinator = GenerationCoordinator()
     @StateObject private var catalog = ModelCatalog()
     @StateObject private var loraCatalog = LoRACatalog()
     @StateObject private var optimizationSettings = InferenceOptimizationSettings()
+
     @AppStorage("generation.lastPrompt")
     private var prompt = "masterpiece, best quality, score_7, safe, 1girl"
+    @AppStorage("generation.lastNegativePrompt")
+    private var negativePrompt = ""
     @AppStorage("generation.lastSeed")
     private var seedText = "1337"
     @AppStorage("generation.loraStrength")
     private var loraStrength = 1.0
+
     @State private var generationStart = Date()
     @State private var elapsedText = ""
     @State private var elapsedTimer: Timer?
-    @State private var shareImage: UIImage?
     @State private var showDiagnostics = false
     @State private var showingImporter = false
     @State private var importComponent: ModelComponent?
     @State private var showingLoRAImporter = false
+    @State private var showModelManager = false
+    @State private var expandedPanel: ComposerPanel?
+    @State private var lastVisibleImage: UIImage?
     @FocusState private var focusedField: FocusField?
 
     private enum FocusField: Hashable {
         case prompt
+        case negative
+        case seed
+    }
+
+    private enum ComposerPanel: Hashable {
+        case lora
+        case negative
         case seed
     }
 
     private static let generationLog = Logger(
         subsystem: "com.invisiblestrangler.AnimaXS", category: "Generation")
 
+    private static let background = Color(
+        red: 0.047, green: 0.043, blue: 0.039)
+    private static let panel = Color(
+        red: 0.088, green: 0.081, blue: 0.073)
+    private static let panelRaised = Color(
+        red: 0.118, green: 0.108, blue: 0.096)
+    private static let cream = Color(
+        red: 0.91, green: 0.84, blue: 0.69)
+    private static let creamMuted = Color(
+        red: 0.68, green: 0.61, blue: 0.49)
+
     var body: some View {
         NavigationStack {
-            Form {
-                modelSection
-                loraSection
-                promptSection
-                seedSection
-                generationSection
-                errorSection
-                imageSection
-                metricsSection
+            ZStack {
+                Self.background.ignoresSafeArea()
+
+                VStack(spacing: 0) {
+                    topBar
+                        .padding(.horizontal, 18)
+                        .padding(.top, 8)
+
+                    resultStage
+                        .padding(.horizontal, 14)
+                        .padding(.top, 12)
+                        .frame(maxHeight: .infinity)
+
+                    if let reason = eligibility.blockedReason, !isGenerating {
+                        Text(reason)
+                            .font(.caption2)
+                            .foregroundStyle(.orange.opacity(0.9))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 26)
+                            .padding(.bottom, 6)
+                    }
+
+                    composer
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 8)
+                }
+
+                if showModelManager {
+                    modelManagerOverlay
+                        .zIndex(20)
+                }
             }
-            .navigationTitle("AnimaXS")
+            .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(isPresented: $showDiagnostics) {
                 DiagnosticsView(
                     lastMetricsText: coordinator.lastMetricsText,
@@ -58,11 +104,7 @@ struct ContentView: View {
                     ditVariantID: catalog.resolved?.dit.variant.id,
                     isGenerating: coordinator.isGenerating)
             }
-            .scrollDismissesKeyboard(.interactively)
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("Diagnostics") { showDiagnostics = true }
-                }
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
                     Button("Done") { focusedField = nil }
@@ -83,7 +125,10 @@ struct ContentView: View {
             ) { _ in coordinator.handleMemoryWarning() }
             .onChange(of: coordinator.state) { _, newState in
                 switch newState {
-                case .completed, .cancelled, .failed:
+                case .completed:
+                    if let image = coordinator.image { lastVisibleImage = image }
+                    stopElapsedTimer(updateFinalElapsed: true)
+                case .cancelled, .failed:
                     stopElapsedTimer(updateFinalElapsed: true)
                 default:
                     break
@@ -116,9 +161,6 @@ struct ContentView: View {
             ) { result in
                 guard !isGenerating,
                       let url = try? result.get().first else { return }
-                // Keep Files access alive for validation AND the complete copy
-                // into app-owned storage. Inference never depends on a transient
-                // security-scoped picker URL.
                 let didStart = url.startAccessingSecurityScopedResource()
                 Task {
                     defer {
@@ -128,215 +170,657 @@ struct ContentView: View {
                 }
             }
         }
+        .preferredColorScheme(.dark)
     }
 
-    // MARK: - Model section
+    // MARK: - Header
 
-    private var modelSection: some View {
-        Section("Models") {
-            ForEach(ModelComponent.allCases, id: \.self) { component in
-                modelRow(component)
+    private var topBar: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(Self.cream)
+                    .frame(width: 36, height: 36)
+                Image(systemName: "sparkles")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(Self.background)
+            }
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("AnimaXS")
+                    .font(.system(size: 19, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(catalog.resolved == nil ? Color.orange : Color.green)
+                        .frame(width: 6, height: 6)
+                    Text(catalog.resolved == nil ? "Models need attention" : "On-device · private")
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.52))
+                }
+            }
+
+            Spacer()
+
+            topIconButton(systemName: "shippingbox", badge: missingModelCount > 0 ? "\(missingModelCount)" : nil) {
+                withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
+                    focusedField = nil
+                    showModelManager = true
+                }
+            }
+            topIconButton(systemName: "waveform.path.ecg", badge: nil) {
+                focusedField = nil
+                showDiagnostics = true
             }
         }
+        .frame(height: 46)
+    }
+
+    private func topIconButton(
+        systemName: String, badge: String?, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: systemName)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.78))
+                    .frame(width: 38, height: 38)
+                    .background(Self.panelRaised, in: Circle())
+                if let badge {
+                    Text(badge)
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .foregroundStyle(Self.background)
+                        .frame(minWidth: 16, minHeight: 16)
+                        .background(Self.cream, in: Capsule())
+                        .offset(x: 3, y: -3)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - Image stage
+
+    private var resultStage: some View {
+        GeometryReader { proxy in
+            let side = min(proxy.size.width, proxy.size.height)
+            ZStack {
+                RoundedRectangle(cornerRadius: 30, style: .continuous)
+                    .fill(Self.panel)
+
+                if let image = coordinator.image ?? lastVisibleImage {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: side, height: side)
+                        .clipped()
+                        .opacity(isGenerating ? 0.34 : 1)
+                        .scaleEffect(isGenerating ? 1.015 : 1)
+                        .animation(.easeInOut(duration: 0.28), value: isGenerating)
+                } else {
+                    ambientPlaceholder
+                }
+
+                LinearGradient(
+                    colors: [.clear, .black.opacity(isGenerating ? 0.48 : 0.18)],
+                    startPoint: .center,
+                    endPoint: .bottom)
+                    .allowsHitTesting(false)
+
+                if isGenerating {
+                    generatingOverlay
+                        .transition(.opacity)
+                } else if coordinator.image != nil {
+                    resultActions
+                        .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                } else if case .failed(let message) = coordinator.state {
+                    errorOverlay(message)
+                } else {
+                    idleHint
+                }
+            }
+            .frame(width: side, height: side)
+            .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 30, style: .continuous)
+                    .stroke(.white.opacity(0.07), lineWidth: 1)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+            .animation(.easeInOut(duration: 0.24), value: isGenerating)
+        }
+        .aspectRatio(1, contentMode: .fit)
+    }
+
+    private var ambientPlaceholder: some View {
+        ZStack {
+            RadialGradient(
+                colors: [Self.cream.opacity(0.17), Self.panel, Self.background.opacity(0.8)],
+                center: .topLeading,
+                startRadius: 8,
+                endRadius: 360)
+            Circle()
+                .fill(Self.cream.opacity(0.08))
+                .frame(width: 180, height: 180)
+                .blur(radius: 2)
+            Image(systemName: "sparkles.rectangle.stack")
+                .font(.system(size: 46, weight: .ultraLight))
+                .foregroundStyle(Self.cream.opacity(0.48))
+        }
+    }
+
+    private var idleHint: some View {
+        VStack(spacing: 8) {
+            Spacer()
+            Text("Your next image lives here")
+                .font(.system(size: 14, weight: .medium, design: .rounded))
+                .foregroundStyle(.white.opacity(0.68))
+            Text("Describe it below · generated entirely on this iPhone")
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.38))
+                .multilineTextAlignment(.center)
+                .padding(.bottom, 20)
+        }
+        .padding(.horizontal, 20)
+    }
+
+    private var generatingOverlay: some View {
+        VStack(spacing: 11) {
+            Spacer()
+            HStack(spacing: 8) {
+                ProgressView()
+                    .tint(Self.cream)
+                    .controlSize(.small)
+                Text(generationStatusText)
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.88))
+                    .lineLimit(1)
+                if !elapsedText.isEmpty {
+                    Text(elapsedText)
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Self.cream.opacity(0.78))
+                }
+            }
+            .padding(.horizontal, 13)
+            .padding(.vertical, 9)
+            .background(.black.opacity(0.48), in: Capsule())
+
+            if let progress = generationProgress {
+                ProgressView(value: progress)
+                    .tint(Self.cream)
+                    .frame(maxWidth: 220)
+            }
+        }
+        .padding(.bottom, 22)
+    }
+
+    private var resultActions: some View {
+        VStack {
+            Spacer()
+            HStack {
+                Spacer()
+                if let image = coordinator.image,
+                   let url = shareURL(for: image) {
+                    ShareLink(
+                        item: url,
+                        preview: SharePreview("AnimaXS image", image: Image(uiImage: image))
+                    ) {
+                        Label("Share", systemImage: "square.and.arrow.up")
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Self.background)
+                            .padding(.horizontal, 15)
+                            .padding(.vertical, 10)
+                            .background(Self.cream, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(16)
+    }
+
+    private func errorOverlay(_ message: String) -> some View {
+        VStack(spacing: 8) {
+            Spacer()
+            Label("Generation failed", systemImage: "exclamationmark.triangle.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.orange)
+            Text(message)
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.65))
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+                .padding(.horizontal, 24)
+                .padding(.bottom, 18)
+        }
+    }
+
+    // MARK: - Composer
+
+    private var composer: some View {
+        VStack(spacing: 10) {
+            if let expandedPanel {
+                expandedComposerPanel(expandedPanel)
+                    .transition(
+                        .move(edge: .bottom)
+                        .combined(with: .opacity)
+                    )
+            }
+
+            HStack(alignment: .bottom, spacing: 10) {
+                TextEditor(text: $prompt)
+                    .focused($focusedField, equals: .prompt)
+                    .font(.system(size: 15, weight: .regular, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .scrollContentBackground(.hidden)
+                    .frame(minHeight: 54, maxHeight: 96)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .overlay(alignment: .topLeading) {
+                        if prompt.isEmpty {
+                            Text("Describe your image…")
+                                .font(.system(size: 15, design: .rounded))
+                                .foregroundStyle(.white.opacity(0.30))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 10)
+                                .allowsHitTesting(false)
+                        }
+                    }
+
+                generationButton
+            }
+
+            HStack(spacing: 7) {
+                composerChip(
+                    title: loraChipTitle,
+                    systemName: "square.3.layers.3d",
+                    panel: .lora,
+                    active: loraCatalog.selected != nil)
+                composerChip(
+                    title: negativeChipTitle,
+                    systemName: "minus.circle",
+                    panel: .negative,
+                    active: !negativePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                composerChip(
+                    title: "Seed",
+                    systemName: "dice",
+                    panel: .seed,
+                    active: false)
+                Spacer(minLength: 0)
+                Text("CFG 1 · local")
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.28))
+            }
+        }
+        .padding(12)
+        .background(Self.panel, in: RoundedRectangle(cornerRadius: 25, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 25, style: .continuous)
+                .stroke(.white.opacity(0.075), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.22), radius: 18, y: 8)
+        .animation(.spring(response: 0.42, dampingFraction: 0.84), value: expandedPanel)
+    }
+
+    private var generationButton: some View {
+        Button {
+            if isGenerating {
+                stopElapsedTimer(updateFinalElapsed: true)
+                coordinator.cancel()
+            } else {
+                startGeneration()
+            }
+        } label: {
+            Image(systemName: isGenerating ? "xmark" : "arrow.up")
+                .font(.system(size: 17, weight: .bold))
+                .foregroundStyle(isGenerating ? .white : Self.background)
+                .frame(width: 48, height: 48)
+                .background(
+                    isGenerating ? Color.white.opacity(0.12) : Self.cream,
+                    in: Circle())
+                .overlay {
+                    if isGenerating {
+                        Circle().stroke(.white.opacity(0.16), lineWidth: 1)
+                    }
+                }
+        }
+        .buttonStyle(.plain)
+        .disabled(!isGenerating && !eligibility.isReady)
+        .opacity(!isGenerating && !eligibility.isReady ? 0.42 : 1)
+        .animation(.easeInOut(duration: 0.2), value: isGenerating)
+        .accessibilityLabel(isGenerating ? "Cancel generation" : "Generate image")
+    }
+
+    private func composerChip(
+        title: String,
+        systemName: String,
+        panel: ComposerPanel,
+        active: Bool
+    ) -> some View {
+        let selected = expandedPanel == panel
+        return Button {
+            withAnimation(.spring(response: 0.38, dampingFraction: 0.84)) {
+                focusedField = nil
+                expandedPanel = selected ? nil : panel
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: systemName)
+                    .font(.system(size: 11, weight: .semibold))
+                Text(title)
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .lineLimit(1)
+                if active {
+                    Circle()
+                        .fill(Self.cream)
+                        .frame(width: 5, height: 5)
+                }
+            }
+            .foregroundStyle(selected ? Self.background : .white.opacity(active ? 0.84 : 0.58))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                selected ? Self.cream : Self.panelRaised,
+                in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(isGenerating)
     }
 
     @ViewBuilder
-    private func modelRow(_ component: ModelComponent) -> some View {
-        let state = catalog.state(for: component)
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(component.displayName).font(.subheadline)
-                Text(stateLabel(state)).font(.caption).foregroundStyle(stateColor(state))
-                if case .failed(let message) = state {
-                    Text(message).font(.caption2).foregroundStyle(.red).lineLimit(2)
-                }
-            }
-            Spacer()
-            if case .ready = state {
-                Button("Repair") { Task { await catalog.repair(component) } }
-                    .font(.caption)
-                    .buttonStyle(.borderless)
-            } else if case .failed = state {
-                Button("Retry") { Task { await catalog.retry(component) } }
-                    .font(.caption)
-                    .buttonStyle(.borderless)
-                Button("Import") { importComponent = component; showingImporter = true }
-                    .font(.caption)
-                    .buttonStyle(.borderless)
-            } else if case .missing = state {
-                Button("Download") { Task { await catalog.download(component) } }
-                    .font(.caption)
-                    .buttonStyle(.borderless)
-                Button("Import") { importComponent = component; showingImporter = true }
-                    .font(.caption)
-                    .buttonStyle(.borderless)
-            }
+    private func expandedComposerPanel(_ panel: ComposerPanel) -> some View {
+        switch panel {
+        case .negative:
+            negativePanel
+        case .lora:
+            loraPanel
+        case .seed:
+            seedPanel
         }
     }
 
-    // MARK: - External DiT LoRA
-
-    private var loraSection: some View {
-        Section("LoRA") {
+    private var negativePanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(loraCatalog.selected?.displayName ?? "None")
-                        .font(.subheadline)
-                        .lineLimit(1)
-                    if let selected = loraCatalog.selected {
-                        Text("\(selected.moduleCount) adapted projection\(selected.moduleCount == 1 ? "" : "s")")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else if loraCatalog.isImporting {
-                        Text("Importing and validating…")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text("Optional DiT adapter")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
+                Label("Negative · NegPiP", systemImage: "minus.circle.fill")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Self.cream)
                 Spacer()
-                if loraCatalog.selected != nil {
-                    Button("Remove", role: .destructive) {
-                        loraCatalog.remove()
+                Text("single-pass")
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.34))
+            }
+            TextEditor(text: $negativePrompt)
+                .focused($focusedField, equals: .negative)
+                .font(.system(size: 14, design: .rounded))
+                .foregroundStyle(.white.opacity(0.86))
+                .scrollContentBackground(.hidden)
+                .frame(height: 68)
+                .padding(6)
+                .background(Self.background.opacity(0.55), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(alignment: .topLeading) {
+                    if negativePrompt.isEmpty {
+                        Text("Things to avoid — watermark, blurry, bad hands…")
+                            .font(.system(size: 13, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.25))
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 14)
+                            .allowsHitTesting(false)
                     }
-                    .font(.caption)
-                    .buttonStyle(.borderless)
-                    .disabled(isGenerating || loraCatalog.isImporting)
                 }
-                Button("Import") { showingLoRAImporter = true }
-                    .font(.caption)
-                    .buttonStyle(.borderless)
-                    .disabled(isGenerating || loraCatalog.isImporting)
+            Text("Combined with the main prompt at Generate; NegPiP subtracts these tokens through cross-attention V while keeping CFG at 1.")
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(0.34))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(11)
+        .background(Self.panelRaised.opacity(0.72), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var loraPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("LoRA stack")
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Self.cream)
+                Spacer()
+                if loraCatalog.isImporting {
+                    ProgressView().controlSize(.small).tint(Self.cream)
+                }
+                Button(loraCatalog.selected == nil ? "Add LoRA" : "Import / Replace") {
+                    showingLoRAImporter = true
+                }
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundStyle(Self.cream)
+                .buttonStyle(.plain)
+                .disabled(isGenerating || loraCatalog.isImporting)
             }
 
-            if loraCatalog.selected != nil {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("Strength")
-                        Spacer()
-                        Text(loraStrength, format: .number.precision(.fractionLength(2)))
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
+            if loraCatalog.adapters.isEmpty {
+                HStack(spacing: 9) {
+                    Image(systemName: "square.3.layers.3d")
+                        .foregroundStyle(.white.opacity(0.28))
+                    Text("No adapter active")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.38))
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(Self.background.opacity(0.48), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            } else {
+                ForEach(loraCatalog.adapters, id: \.url) { adapter in
+                    VStack(alignment: .leading, spacing: 9) {
+                        HStack(spacing: 9) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                    .fill(Self.cream.opacity(0.15))
+                                    .frame(width: 34, height: 34)
+                                Image(systemName: "wand.and.stars")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(Self.cream)
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(adapter.displayName)
+                                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.white.opacity(0.9))
+                                    .lineLimit(1)
+                                Text("\(adapter.moduleCount) projection\(adapter.moduleCount == 1 ? "" : "s")")
+                                    .font(.caption2)
+                                    .foregroundStyle(.white.opacity(0.34))
+                            }
+                            Spacer()
+                            Button(role: .destructive) {
+                                loraCatalog.remove()
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.red.opacity(0.75))
+                                    .frame(width: 30, height: 30)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isGenerating || loraCatalog.isImporting)
+                        }
+                        HStack(spacing: 10) {
+                            Text("Strength")
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.42))
+                            Slider(value: $loraStrength, in: 0...2, step: 0.05)
+                                .tint(Self.cream)
+                                .disabled(isGenerating || loraCatalog.isImporting)
+                            Text(loraStrength, format: .number.precision(.fractionLength(2)))
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .foregroundStyle(Self.creamMuted)
+                                .frame(width: 34, alignment: .trailing)
+                        }
                     }
-                    Slider(value: $loraStrength, in: 0...2, step: 0.05)
-                        .disabled(isGenerating || loraCatalog.isImporting)
-                    if loraStrength == 0 {
-                        Text("0.00 disables the adapter and uses the baseline path.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
+                    .padding(10)
+                    .background(Self.background.opacity(0.48), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
                 }
             }
 
             if let error = loraCatalog.errorMessage {
                 Text(error)
-                    .font(.caption)
-                    .foregroundStyle(.red)
+                    .font(.caption2)
+                    .foregroundStyle(.red.opacity(0.82))
             }
         }
+        .padding(11)
+        .background(Self.panelRaised.opacity(0.72), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
-    // MARK: - Prompt
-
-    private var promptSection: some View {
-        Section("Prompt") {
-            TextEditor(text: $prompt)
-                .frame(minHeight: 100)
-                .focused($focusedField, equals: .prompt)
-        }
-    }
-
-    // MARK: - Seed
-
-    private var seedSection: some View {
-        Section("Seed") {
-            HStack {
+    private var seedPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Seed")
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .foregroundStyle(Self.cream)
+            HStack(spacing: 10) {
                 TextField("Seed", text: $seedText)
                     .keyboardType(.numberPad)
                     .focused($focusedField, equals: .seed)
-                Button("Randomize") {
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.86))
+                    .padding(.horizontal, 12)
+                    .frame(height: 38)
+                    .background(Self.background.opacity(0.55), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                Button {
                     seedText = String(UInt64.random(in: 0..<UInt64.max))
+                } label: {
+                    Label("Random", systemImage: "dice")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(Self.background)
+                        .padding(.horizontal, 12)
+                        .frame(height: 38)
+                        .background(Self.cream, in: Capsule())
                 }
+                .buttonStyle(.plain)
                 .disabled(isGenerating)
             }
         }
+        .padding(11)
+        .background(Self.panelRaised.opacity(0.72), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
-    // MARK: - Generation controls
+    // MARK: - Model manager overlay
 
-    private var generationSection: some View {
-        Section {
-            if isGenerating {
-                Button("Cancel", role: .destructive) {
-                    stopElapsedTimer(updateFinalElapsed: true)
-                    coordinator.cancel()
+    private var modelManagerOverlay: some View {
+        ZStack(alignment: .top) {
+            Color.black.opacity(0.62)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    withAnimation(.spring(response: 0.36, dampingFraction: 0.88)) {
+                        showModelManager = false
+                    }
                 }
-            } else {
-                Button("Generate") {
-                    startGeneration()
+
+            VStack(spacing: 13) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Model library")
+                            .font(.system(size: 18, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.white)
+                        Text("Base packs stay out of the creative workspace")
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.35))
+                    }
+                    Spacer()
+                    Button {
+                        withAnimation(.spring(response: 0.36, dampingFraction: 0.88)) {
+                            showModelManager = false
+                        }
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.68))
+                            .frame(width: 34, height: 34)
+                            .background(Self.panelRaised, in: Circle())
+                    }
+                    .buttonStyle(.plain)
                 }
-                .disabled(!eligibility.isReady)
-                if let reason = eligibility.blockedReason {
-                    Text(reason).font(.caption).foregroundStyle(.orange)
+
+                ForEach(ModelComponent.allCases, id: \.self) { component in
+                    modelCard(component)
                 }
             }
-            progressView
-        }
-    }
-
-    private var errorSection: some View {
-        Group {
-            if case .failed(let message) = coordinator.state {
-                Section("Error") {
-                    Text(message).foregroundStyle(.red)
-                }
+            .padding(16)
+            .background(Self.panel, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .stroke(.white.opacity(0.08), lineWidth: 1)
             }
-        }
-    }
-
-    private var imageSection: some View {
-        Section {
-            if let image = coordinator.image {
-                Image(uiImage: image)
-                    .resizable().scaledToFit().frame(maxHeight: 300)
-                if let url = shareURL(for: image) {
-                    ShareLink(item: url, preview: SharePreview("AnimaXS image", image: Image(uiImage: image)))
-                }
-            }
+            .padding(.horizontal, 12)
+            .padding(.top, 62)
+            .transition(.move(edge: .top).combined(with: .opacity))
         }
     }
 
     @ViewBuilder
-    private var metricsSection: some View {
-        if let text = coordinator.lastMetricsText {
-            Section("Run metrics") {
-                Text(text)
-                    .font(.system(.caption, design: .monospaced))
-                    .textSelection(.enabled)
-                ShareLink(item: text) {
-                    Label("Copy / share metrics", systemImage: "square.and.arrow.up")
+    private func modelCard(_ component: ModelComponent) -> some View {
+        let state = catalog.state(for: component)
+        HStack(spacing: 11) {
+            Circle()
+                .fill(stateColor(state).opacity(0.9))
+                .frame(width: 8, height: 8)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(component.displayName)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.86))
+                    .lineLimit(1)
+                Text(stateLabel(state))
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.38))
+                if case .failed(let message) = state {
+                    Text(message)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.red.opacity(0.75))
+                        .lineLimit(2)
                 }
-                .font(.caption)
             }
+            Spacer()
+            modelActions(component, state: state)
+        }
+        .padding(12)
+        .background(Self.panelRaised.opacity(0.72), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func modelActions(_ component: ModelComponent, state: ModelStore.State) -> some View {
+        switch state {
+        case .ready:
+            smallModelButton("Repair") {
+                Task { await catalog.repair(component) }
+            }
+        case .failed:
+            HStack(spacing: 6) {
+                smallModelButton("Retry") { Task { await catalog.retry(component) } }
+                smallModelButton("Import") {
+                    importComponent = component
+                    showingImporter = true
+                }
+            }
+        case .missing:
+            HStack(spacing: 6) {
+                smallModelButton("Download") { Task { await catalog.download(component) } }
+                smallModelButton("Import") {
+                    importComponent = component
+                    showingImporter = true
+                }
+            }
+        case .downloading, .verifying:
+            ProgressView().controlSize(.small).tint(Self.cream)
         }
     }
 
-    private func shareURL(for image: UIImage) -> URL? {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("anima-xs-\(UUID().uuidString).png")
-        guard let data = image.pngData() else { return nil }
-        do {
-            try data.write(to: url)
-            return url
-        } catch {
-            return nil
-        }
+    private func smallModelButton(_ title: String, action: @escaping () -> Void) -> some View {
+        Button(title, action: action)
+            .font(.system(size: 10, weight: .semibold, design: .rounded))
+            .foregroundStyle(Self.cream)
+            .buttonStyle(.plain)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(Self.background.opacity(0.58), in: Capsule())
+            .disabled(isGenerating)
     }
 
-    // MARK: - Helpers
+    // MARK: - Generation
 
     private var resolvedDitNumericsPolicy: DiTNumericsPolicy {
         if let resolved = catalog.resolved {
@@ -364,34 +848,21 @@ struct ContentView: View {
             optimizationBlockingReason: optimizationBlockingReason)
     }
 
-    private func stopElapsedTimer(updateFinalElapsed: Bool = true) {
-        guard elapsedTimer != nil else { return }
-        elapsedTimer?.invalidate()
-        elapsedTimer = nil
-        if updateFinalElapsed {
-            elapsedText = String(format: "%.1f s", Date().timeIntervalSince(generationStart))
-        }
-    }
-
     private func startGeneration() {
-        logGenerationAttempt()
         guard case .ready = eligibility else {
             Self.generationLog.warning(
                 "generation blocked: \(eligibility.blockedReason ?? "unknown", privacy: .public)")
             return
         }
-        guard let seed = UInt64(seedText) else {
-            Self.generationLog.error("generation guard: seed did not parse despite eligibility")
-            return
-        }
-        guard let baseModels = catalog.resolved else {
-            Self.generationLog.error("generation guard: models disappeared after eligibility")
-            return
+        guard let seed = UInt64(seedText),
+              let baseModels = catalog.resolved else { return }
+
+        if let current = coordinator.image { lastVisibleImage = current }
+        focusedField = nil
+        withAnimation(.spring(response: 0.34, dampingFraction: 0.88)) {
+            expandedPanel = nil
         }
 
-        // Freeze adapter identity + strength into the same immutable generation
-        // snapshot as the three model packs. Strength zero intentionally becomes
-        // nil, so the runtime never parses/allocates LoRA buffers for baseline.
         let adapterSnapshot: ResolvedLoRA?
         if let selected = loraCatalog.selected, loraStrength != 0 {
             adapterSnapshot = ResolvedLoRA(
@@ -401,94 +872,110 @@ struct ContentView: View {
         } else {
             adapterSnapshot = nil
         }
-        let models = baseModels.withLoRA(adapterSnapshot)
+        let trimmedNegative = negativePrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let negPiPSnapshot = trimmedNegative.isEmpty
+            ? nil
+            : ResolvedNegPiP(prompt: negativePrompt)
+        let models = baseModels
+            .withLoRA(adapterSnapshot)
+            .withNegPiP(negPiPSnapshot)
 
-        Self.generationLog.info("generation accepted")
         generationStart = Date()
         elapsedText = ""
         elapsedTimer?.invalidate()
         elapsedTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
             elapsedText = String(format: "%.1f s", Date().timeIntervalSince(generationStart))
         }
-        let config = optimizationSettings.snapshot
         coordinator.generate(
             prompt: prompt, seed: seed, models: models,
-            optimization: config)
-        Self.generationLog.info(
-            "generation state after start: \(String(describing: coordinator.state), privacy: .public)")
+            optimization: optimizationSettings.snapshot)
     }
 
-    private func logGenerationAttempt() {
-        let thermal = ProcessInfo.processInfo.thermalState
-        let availableMemory = availableProcessMemory().map { "\($0)" } ?? "n/a"
-        let promptValid = !prompt.trimmingCharacters(in: .whitespaces).isEmpty
-        let seedParses = UInt64(seedText.trimmingCharacters(in: .whitespaces)) != nil
-        let modelsResolved = catalog.resolved != nil
-        let thermalDescription = String(describing: thermal)
-        let stateDescription = String(describing: coordinator.state)
-        Self.generationLog.info(
-            "Generate tapped: promptValid=\(promptValid) seedParses=\(seedParses) modelsResolved=\(modelsResolved) thermal=\(thermalDescription) availableMemoryBytes=\(availableMemory) coordinatorState=\(stateDescription)")
-    }
-
-    private func availableProcessMemory() -> UInt64? {
-        #if canImport(Darwin)
-        return UInt64(os_proc_available_memory())
-        #else
-        return nil
-        #endif
+    private func stopElapsedTimer(updateFinalElapsed: Bool = true) {
+        guard elapsedTimer != nil else { return }
+        elapsedTimer?.invalidate()
+        elapsedTimer = nil
+        if updateFinalElapsed {
+            elapsedText = String(format: "%.1f s", Date().timeIntervalSince(generationStart))
+        }
     }
 
     private var isGenerating: Bool { coordinator.isGenerating }
 
-    @ViewBuilder
-    private var progressView: some View {
+    private var generationProgress: Double? {
+        if case .diffusing(let step, let block, let totalSteps, let totalBlocks) = coordinator.state {
+            let completed = Double(max(0, step - 1)) + Double(block) / Double(totalBlocks)
+            return min(1, completed / Double(totalSteps))
+        }
+        if case .decoding = coordinator.state { return 0.985 }
+        return nil
+    }
+
+    private var generationStatusText: String {
         switch coordinator.state {
-        case .idle:
-            Text("Ready.").foregroundStyle(.secondary)
-        case .tokenizing:
-            Text("Tokenizing…")
-        case .encodingPrompt:
-            Text("Encoding prompt…")
-        case .adapting:
-            Text("Adapting…")
+        case .idle: return "Ready"
+        case .tokenizing: return "Preparing prompt"
+        case .encodingPrompt: return "Reading prompt"
+        case .adapting: return "Building context"
         case .diffusing(let step, let block, let totalSteps, let totalBlocks):
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Diffusing step \(step)/\(totalSteps) · block \(block)/\(totalBlocks) · \(elapsedText)")
-                ProgressView(
-                    value: Double(step - 1) + Double(block) / Double(totalBlocks),
-                    total: Double(totalSteps))
-            }
-        case .decoding:
-            Text("Decoding VAE… · \(elapsedText)")
-        case .completed:
-            Text("Done. · \(elapsedText)").foregroundStyle(.green)
-        case .cancelled:
-            Text("Cancelled. · \(elapsedText)").foregroundStyle(.orange)
-        case .failed:
-            EmptyView()
+            return "Step \(step)/\(totalSteps) · block \(block)/\(totalBlocks)"
+        case .decoding: return "Developing image"
+        case .completed: return "Done"
+        case .cancelled: return "Cancelled"
+        case .failed: return "Failed"
+        }
+    }
+
+    private var loraChipTitle: String {
+        guard !loraCatalog.adapters.isEmpty else { return "LoRA" }
+        return "LoRA \(loraCatalog.adapters.count)"
+    }
+
+    private var negativeChipTitle: String {
+        negativePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Negative" : "NegPiP"
+    }
+
+    private var missingModelCount: Int {
+        ModelComponent.allCases.reduce(into: 0) { result, component in
+            if case .ready = catalog.state(for: component) { return }
+            result += 1
+        }
+    }
+
+    private func shareURL(for image: UIImage) -> URL? {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("anima-xs-\(UUID().uuidString).png")
+        guard let data = image.pngData() else { return nil }
+        do {
+            try data.write(to: url)
+            return url
+        } catch {
+            return nil
         }
     }
 
     private func stateLabel(_ state: ModelStore.State) -> String {
         switch state {
-        case .missing: return "missing"
-        case .downloading: return "downloading…"
-        case .verifying: return "verifying…"
-        case .ready: return "ready"
-        case .failed: return "failed"
+        case .missing: return "Missing"
+        case .downloading: return "Downloading…"
+        case .verifying: return "Verifying…"
+        case .ready: return "Ready"
+        case .failed: return "Needs attention"
         }
     }
 
     private func stateColor(_ state: ModelStore.State) -> Color {
         switch state {
         case .ready: return .green
-        case .missing, .downloading, .verifying: return .secondary
+        case .missing: return .orange
+        case .downloading, .verifying: return Self.creamMuted
         case .failed: return .red
         }
     }
 }
 
-// MARK: - Model catalog (K001 model section)
+// MARK: - Model catalog
 
 @MainActor
 final class ModelCatalog: ObservableObject {
@@ -579,15 +1066,18 @@ struct ImportedLoRA: Equatable, Sendable {
     let moduleCount: Int
 }
 
-/// Owns one v1 external DiT LoRA. The imported file is copied into Application
-/// Support so a generation never depends on a Files picker URL or bookmark.
-/// Parsing/copying runs off the MainActor; only the small published state is
-/// returned to the UI.
+/// Owns one v1 external DiT LoRA. `adapters` intentionally presents it as a
+/// collection so the generation UI already has the right visual/data shape for
+/// future simultaneous LoRAs; runtime semantics remain exactly one active LoRA.
 @MainActor
 final class LoRACatalog: ObservableObject {
     @Published private(set) var selected: ImportedLoRA?
     @Published private(set) var isImporting = false
     @Published private(set) var errorMessage: String?
+
+    var adapters: [ImportedLoRA] {
+        selected.map { [$0] } ?? []
+    }
 
     private static let displayNameKey = "generation.activeLoRADisplayName"
     private let directory: URL?
@@ -633,7 +1123,6 @@ final class LoRACatalog: ObservableObject {
         let displayName = source.deletingPathExtension().lastPathComponent
         do {
             let moduleCount = try await Task.detached(priority: .userInitiated) {
-                // Validate the security-scoped source before copying it.
                 _ = try DiTLoRAFile(url: source)
                 let fm = FileManager.default
                 try fm.createDirectory(
@@ -642,7 +1131,6 @@ final class LoRACatalog: ObservableObject {
                     "import-\(UUID().uuidString).safetensors")
                 defer { try? fm.removeItem(at: temporary) }
                 try fm.copyItem(at: source, to: temporary)
-                // Validate the exact app-owned bytes before publishing them.
                 let copied = try DiTLoRAFile(url: temporary)
                 let count = copied.modules.count
                 withExtendedLifetime(copied) {}
@@ -686,7 +1174,7 @@ final class LoRACatalog: ObservableObject {
 extension ModelComponent {
     var displayName: String {
         switch self {
-        case .dit: return "Anima Turbo DiT (adapter + diffusion)"
+        case .dit: return "Anima Turbo DiT"
         case .textEncoder: return "Qwen3 text encoder"
         case .vae: return "Qwen-Image VAE"
         }
