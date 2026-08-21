@@ -443,31 +443,36 @@ struct GenerationEngine {
         }
         defer { withExtendedLifetime(sampler) {} }
 
-        // Install only for the sampler's lexical lifetime. The context is read
-        // solely by exact-shape DiT cross-attention; Qwen/adapter/VAE attention
-        // cannot observe it. Empty-negative runs install nothing at all.
-        let negPiPLease = try NegPiPGenerationContext.install(signs: negPiPValueSigns)
-        defer {
-            if let negPiPLease { NegPiPGenerationContext.clear(lease: negPiPLease) }
-        }
-
         let output = try makeBuffer(
             length: DiffusionSampler.latentElements * 4, "diffusion output buffer")
         let blocks = ModelConstants.ditBlocks
-        try await sampler.execute(
-            initialLatent: initialLatent, crossContext: cross, outputLatent: output,
-            startStep: 0,
-            blockProgress: { step, block in
-                try Task.checkCancellation()
-                progress?(.diffusing(
-                    step: step + 1, block: block + 1,
-                    totalSteps: totalSteps, totalBlocks: blocks))
-            },
-            stepCompleted: { step, _, _, _, _ in
-                progress?(.diffusing(
-                    step: step + 1, block: blocks,
-                    totalSteps: totalSteps, totalBlocks: blocks))
-            })
+
+        func executeSampler() async throws {
+            try await sampler.execute(
+                initialLatent: initialLatent, crossContext: cross, outputLatent: output,
+                startStep: 0,
+                blockProgress: { step, block in
+                    try Task.checkCancellation()
+                    progress?(.diffusing(
+                        step: step + 1, block: block + 1,
+                        totalSteps: totalSteps, totalBlocks: blocks))
+                },
+                stepCompleted: { step, _, _, _, _ in
+                    progress?(.diffusing(
+                        step: step + 1, block: blocks,
+                        totalSteps: totalSteps, totalBlocks: blocks))
+                })
+        }
+
+        // Task-local binding means only this diffusion call observes the mask.
+        // Empty-negative/all-positive paths do not create a scope at all.
+        if let negPiPScope = try NegPiPGenerationContext.make(signs: negPiPValueSigns) {
+            try await NegPiPGenerationContext.$active.withValue(negPiPScope) {
+                try await executeSampler()
+            }
+        } else {
+            try await executeSampler()
+        }
         return output
     }
 
