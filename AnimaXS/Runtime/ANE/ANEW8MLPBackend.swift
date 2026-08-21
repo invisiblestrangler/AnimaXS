@@ -758,6 +758,7 @@ final class ANEW8DiTModelCache: @unchecked Sendable {
     }
 }
 
+
 /// Reused shared IOSurfaces for one block execution. The large hidden surface
 /// is also the Metal GELU buffer. At spatial=1024 its H11 plane stride is tight,
 /// so elementwise activation can run in-place without a layout conversion.
