@@ -1,0 +1,52 @@
+name: Update serial ANE scheduler policy test
+
+on:
+  push:
+    branches:
+      - experiment/ane-legacy-serial-7p1
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: experiment/ane-legacy-serial-7p1
+      - name: Update exact scheduler assertions
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('AnimaXSTests/DiTBlockExecutorTests.swift')
+          text = path.read_text()
+          old = '''        XCTAssertEqual(ANEW8DiTSchedulerPolicy.prefetchDepth, 3)
+          XCTAssertEqual(ANEW8DiTSchedulerPolicy.retireDepth, 1)
+          XCTAssertEqual(ANEW8DiTSchedulerPolicy.pinnedBlocks(for: .full8), 4)
+          XCTAssertEqual(ANEW8DiTSchedulerPolicy.pinnedBlocks(for: .kvWarm6), 6)
+          XCTAssertEqual(ANEW8DiTSchedulerPolicy.theoreticalPeakPrograms(for: .full8), 64)
+          XCTAssertEqual(ANEW8DiTSchedulerPolicy.theoreticalPeakPrograms(for: .kvWarm6), 60)
+          '''
+          new = '''        XCTAssertEqual(ANEW8DiTSchedulerPolicy.streamingSlots, 1)
+          XCTAssertEqual(ANEW8DiTSchedulerPolicy.pinnedBlocks(for: .full8), 4)
+          XCTAssertEqual(ANEW8DiTSchedulerPolicy.pinnedBlocks(for: .kvWarm6), 7)
+          XCTAssertEqual(ANEW8DiTSchedulerPolicy.theoreticalPeakPrograms(for: .full8), 40)
+          XCTAssertEqual(ANEW8DiTSchedulerPolicy.theoreticalPeakPrograms(for: .kvWarm6), 48)
+          '''
+          assert text.count(old) == 1, 'expected old scheduler policy assertions exactly once'
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
+          rm .github/workflows/apply-serial-7p1-test-fix.yml
+          git diff --check
+      - name: Commit test update and self-remove
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add AnimaXSTests/DiTBlockExecutorTests.swift .github/workflows/apply-serial-7p1-test-fix.yml
+          git commit -m "Update serial ANE scheduler policy test"
+          git push origin HEAD:experiment/ane-legacy-serial-7p1
