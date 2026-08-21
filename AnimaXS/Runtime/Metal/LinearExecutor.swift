@@ -89,11 +89,6 @@ final class LinearExecutor {
         try validate(input: input, inputOffset: inputOffset, weight: weight,
                      output: output, outputOffset: outputOffset, inputRows: inputRows)
 
-        // P8: backend dispatch. M=1 modulation matvecs are NEVER routed to
-        // the QGEMM (the existing direct matvec kernels are the precision
-        // baseline for those); QGEMM requires packed W4/W8 weights with a
-        // group-64 layout. Every other case falls through to the legacy
-        // dequantized-MPS path, which stays byte-for-byte unchanged.
         let direct = (weight.storage == .w4 || weight.storage == .w8)
             && inputRows > 1
         if direct {
@@ -118,10 +113,6 @@ final class LinearExecutor {
                     break
                 }
             case .aneHybridW8:
-                // Whole-branch ANE scheduling lives in DiTBlockExecutor because
-                // ANE/Metal dependency boundaries require command-buffer
-                // completion between projections. Any linear not explicitly
-                // offloaded there stays on this known-good MPS implementation.
                 break
             }
         }
@@ -132,8 +123,6 @@ final class LinearExecutor {
                       inputRows: inputRows)
     }
 
-    /// P8: the legacy dequantize-once + MPS-tile path (byte-for-byte the
-    /// P0-P7 behavior; `encode` keeps it as the default and hybrid fallback).
     private func encodeMPS(
         commandBuffer: MTLCommandBuffer,
         input: MTLBuffer,
@@ -188,18 +177,12 @@ final class LinearExecutor {
             MTLSize(width: k, height: n, depth: 1),
             threadsPerThreadgroup: MTLSize(width: width, height: height, depth: 1))
         encoder.endEncoding()
-        // P2-C: logical traffic counter — bytes the dequant kernel materializes
-        // (n×k fp16, counted once). Arithmetic counter, not a GPU readback.
         metrics?.recordDequantizedWeightBytesWritten(UInt64(n * rightRowBytes))
 
         let scalarBytes = MemoryLayout<Float16>.stride
         let rightDescriptor = MPSMatrixDescriptor(
             rows: n, columns: k, rowBytes: rightRowBytes, dataType: .float16)
         let right = MPSMatrix(buffer: scratch, descriptor: rightDescriptor)
-
-        // MPS-recommended row strides for this tile shape. A tile may wrap the
-        // existing tight input/output buffers directly ONLY when the tight
-        // stride exactly equals the recommended stride.
         let mpsLeftRowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: k, dataType: .float16)
         let mpsResultRowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: n, dataType: .float16)
         let tightLeftRowBytes = k * scalarBytes
@@ -212,8 +195,6 @@ final class LinearExecutor {
             let rowsThisTile = min(tileRows, inputRows - rowStart)
             let leftRowBytes = mpsLeftRowBytes
             let resultRowBytes = mpsResultRowBytes
-            // Direct input wrap: construct the MPSMatrix over the existing
-            // input buffer at the tile's row offset (no per-tile copy).
             let left: MPSMatrix
             if inputEligible {
                 left = MPSMatrix(
@@ -236,8 +217,6 @@ final class LinearExecutor {
                         rows: rowsThisTile, columns: k,
                         rowBytes: leftRowBytes, dataType: .float16))
             }
-            // Direct output wrap: MPS writes into the existing output buffer at
-            // the tile's row offset when the tight stride matches.
             let result: MPSMatrix
             let resultBuffer: MTLBuffer
             if outputEligible {
@@ -273,7 +252,6 @@ final class LinearExecutor {
                 rightMatrix: right,
                 resultMatrix: result)
             if !outputEligible {
-                // Copy the MPS result scratch back into the tight destination.
                 try encodeCopy(commandBuffer: commandBuffer,
                                source: resultBuffer, sourceOffset: 0,
                                destination: output,
@@ -284,23 +262,15 @@ final class LinearExecutor {
             metrics?.recordLinearGEMMTile(
                 directInput: inputEligible, directOutput: outputEligible)
             if !inputEligible {
-                // P2-C: per-tile input materialization (fp16, counted once).
                 metrics?.recordConversionBytes(UInt64(rowsThisTile * k * scalarBytes))
             }
             if !outputEligible {
-                // P2-C: per-tile result materialization (fp16, counted once).
                 metrics?.recordConversionBytes(UInt64(rowsThisTile * n * scalarBytes))
             }
             rowStart += rowsThisTile
         }
     }
 
-    /// P8: direct packed W4/W8 GEMM. Dequantizes each 64-wide K group's W tile
-    /// into threadgroup memory and MACs immediately with an FP32 accumulator —
-    /// no full `[N,K]` fp16 weight scratch. Picks the 8x8 or 8x16 tile profile
-    /// by output width N; W4 vs W8 selects the matching kernel. The kernel
-    /// reuses the EXACT `dequant_w4_to_half`/`dequant_w8_to_half` decode
-    /// semantics (group K = 64). M=1 is never routed here (see `encode`).
     private func encodeQGEMM(
         commandBuffer: MTLCommandBuffer,
         input: MTLBuffer,
@@ -318,8 +288,6 @@ final class LinearExecutor {
             throw AnimapkError.validation("invalid QGEMM shape M=\(m) N=\(n) K=\(k)")
         }
         let isW4 = weight.storage == .w4
-        // Profile: 8x16 (128 threads) for wide outputs, 8x8 (64 threads) for
-        // narrow ones (the runbook's two simple profiles; no autotuner).
         let wide = n >= Self.qgemmWideProfileMinN
         let kernelName: String
         if isW4 {
@@ -347,7 +315,7 @@ final class LinearExecutor {
         encoder.setBytes(&rowStride, length: 4, index: 8)
         encoder.setBytes(&inputStride, length: 4, index: 9)
         encoder.setBytes(&outputStride, length: 4, index: 10)
-        let tm = wide ? 8 : 8
+        let tm = 8
         let tn = wide ? 16 : 8
         let threads = wide ? 128 : 64
         let groupX = (m + tm - 1) / tm
@@ -356,9 +324,9 @@ final class LinearExecutor {
             MTLSize(width: groupX, height: groupY, depth: 1),
             threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1))
         encoder.endEncoding()
-        // P2-E: count the QGEMM dispatch (simple integer; no GPU readback).
         metrics?.recordQGEMMCall(family: family)
     }
+
     private func encodeCopy(
         commandBuffer: MTLCommandBuffer, source: MTLBuffer, sourceOffset: Int,
         destination: MTLBuffer, destinationOffset: Int, columns: Int, rows: Int,
@@ -382,7 +350,6 @@ final class LinearExecutor {
         encoder.endEncoding()
     }
 
-    /// Convenience async submission. Completion resumes off the command-buffer callback.
     func execute(
         input: MTLBuffer,
         inputOffset: Int = 0,
@@ -525,5 +492,201 @@ enum DiTQuantizedWeightFactory {
         default:
             throw AnimapkError.validation("DiT direct matvec requires W4 or W8")
         }
+    }
+}
+
+// MARK: - Runtime DiT LoRA overlay
+
+/// MPS-friendly immutable low-rank weights for one adapted projection.
+struct DiTLoRAProjectionBuffers {
+    let key: DiTLoRAKey
+    let down: MTLBuffer
+    let downRowBytes: Int
+    let up: MTLBuffer
+    let upRowBytes: Int
+    let rank: Int
+    let inputFeatures: Int
+    let outputFeatures: Int
+    let effectiveScale: Float
+}
+
+/// Generation-local backend-independent LoRA overlay. Base projections still
+/// execute through their existing W4/W8/MPS/ANE backend. This object only
+/// encodes `output += strength * alpha/rank * ((input A^T) B^T)` at the exact
+/// projection-output boundary. No command buffer is committed or waited here.
+final class DiTLoRAExecutor {
+    private let context: MetalContext
+    private let scratch: BufferPool
+    private let projections: [DiTLoRAKey: DiTLoRAProjectionBuffers]
+
+    let adapterBytes: Int
+    let moduleCount: Int
+
+    init(context: MetalContext, file: DiTLoRAFile, strength: Float) throws {
+        guard strength.isFinite, strength != 0 else {
+            throw AnimapkError.validation("LoRA executor requires a finite non-zero strength")
+        }
+        self.context = context
+        self.scratch = BufferPool(device: context.device)
+
+        var built: [DiTLoRAKey: DiTLoRAProjectionBuffers] = [:]
+        built.reserveCapacity(file.modules.count)
+        var totalBytes = 0
+        for descriptor in file.modules.values {
+            let downRowBytes = MPSMatrixDescriptor.rowBytes(
+                fromColumns: descriptor.key.target.inputFeatures, dataType: .float16)
+            let upRowBytes = MPSMatrixDescriptor.rowBytes(
+                fromColumns: descriptor.rank, dataType: .float16)
+            let downBytes = try Self.checkedProduct(descriptor.rank, downRowBytes)
+            let upBytes = try Self.checkedProduct(
+                descriptor.key.target.outputFeatures, upRowBytes)
+            guard let down = context.device.makeBuffer(
+                    length: downBytes, options: .storageModeShared),
+                  let up = context.device.makeBuffer(
+                    length: upBytes, options: .storageModeShared) else {
+                throw AnimapkError.validation("failed to allocate LoRA weight buffers")
+            }
+            try file.copyMatrixToFP16(
+                descriptor.down, destination: down.contents(),
+                destinationRowBytes: downRowBytes)
+            try file.copyMatrixToFP16(
+                descriptor.up, destination: up.contents(),
+                destinationRowBytes: upRowBytes)
+            let projection = DiTLoRAProjectionBuffers(
+                key: descriptor.key,
+                down: down, downRowBytes: downRowBytes,
+                up: up, upRowBytes: upRowBytes,
+                rank: descriptor.rank,
+                inputFeatures: descriptor.key.target.inputFeatures,
+                outputFeatures: descriptor.key.target.outputFeatures,
+                effectiveScale: strength * descriptor.scale)
+            built[descriptor.key] = projection
+            totalBytes += downBytes + upBytes
+        }
+        self.projections = built
+        self.adapterBytes = totalBytes
+        self.moduleCount = built.count
+    }
+
+    func hasModule(block: Int, target: DiTLoRATarget) -> Bool {
+        projections[DiTLoRAKey(block: block, target: target)] != nil
+    }
+
+    /// Encodes the adapter delta for one projection into the caller's existing
+    /// command buffer. Returns false when this adapter does not target the
+    /// projection, allowing call sites to remain zero-overhead when absent.
+    @discardableResult
+    func encode(
+        commandBuffer: MTLCommandBuffer,
+        input: MTLBuffer,
+        output: MTLBuffer,
+        inputRows: Int,
+        block: Int,
+        target: DiTLoRATarget
+    ) throws -> Bool {
+        guard let projection = projections[DiTLoRAKey(block: block, target: target)] else {
+            return false
+        }
+        try Self.encodeLowRankResidual(
+            context: context, scratch: scratch,
+            commandBuffer: commandBuffer, input: input, output: output,
+            inputRows: inputRows, projection: projection)
+        return true
+    }
+
+    /// Internal test seam for a precise synthetic oracle. The two GEMMs are
+    /// encoded back-to-back in one command buffer; MPS `beta=1` performs the
+    /// residual add directly into the base output, so there is no CPU/GPU sync
+    /// and no separate add kernel.
+    static func encodeLowRankResidual(
+        context: MetalContext,
+        scratch: BufferPool,
+        commandBuffer: MTLCommandBuffer,
+        input: MTLBuffer,
+        output: MTLBuffer,
+        inputRows: Int,
+        projection: DiTLoRAProjectionBuffers
+    ) throws {
+        let m = inputRows
+        let k = projection.inputFeatures
+        let n = projection.outputFeatures
+        let r = projection.rank
+        guard m > 0, k > 0, n > 0, r > 0,
+              projection.effectiveScale.isFinite else {
+            throw AnimapkError.validation("invalid LoRA projection shape/scale")
+        }
+        let scalarBytes = MemoryLayout<Float16>.stride
+        let inputRowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: k, dataType: .float16)
+        let outputRowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: n, dataType: .float16)
+        let tightInputRowBytes = k * scalarBytes
+        let tightOutputRowBytes = n * scalarBytes
+        guard inputRowBytes == tightInputRowBytes,
+              outputRowBytes == tightOutputRowBytes else {
+            throw AnimapkError.validation(
+                "LoRA projection requires direct MPS rows for K=\(k) N=\(n)")
+        }
+        let inputBytes = try checkedProduct(m, tightInputRowBytes)
+        let outputBytes = try checkedProduct(m, tightOutputRowBytes)
+        guard input.length >= inputBytes, output.length >= outputBytes else {
+            throw AnimapkError.validation("LoRA projection input/output buffer is too small")
+        }
+
+        let rankRowBytes = MPSMatrixDescriptor.rowBytes(fromColumns: r, dataType: .float16)
+        let rankScratch = scratch.buffer(
+            key: "lora.rank.\(r).rows.\(m)",
+            bytes: try checkedProduct(m, rankRowBytes))
+
+        let x = MPSMatrix(
+            buffer: input,
+            descriptor: MPSMatrixDescriptor(
+                rows: m, columns: k, rowBytes: inputRowBytes, dataType: .float16))
+        let down = MPSMatrix(
+            buffer: projection.down,
+            descriptor: MPSMatrixDescriptor(
+                rows: r, columns: k,
+                rowBytes: projection.downRowBytes, dataType: .float16))
+        let low = MPSMatrix(
+            buffer: rankScratch,
+            descriptor: MPSMatrixDescriptor(
+                rows: m, columns: r, rowBytes: rankRowBytes, dataType: .float16))
+        let up = MPSMatrix(
+            buffer: projection.up,
+            descriptor: MPSMatrixDescriptor(
+                rows: n, columns: r,
+                rowBytes: projection.upRowBytes, dataType: .float16))
+        let y = MPSMatrix(
+            buffer: output,
+            descriptor: MPSMatrixDescriptor(
+                rows: m, columns: n, rowBytes: outputRowBytes, dataType: .float16))
+
+        let downMultiply = MPSMatrixMultiplication(
+            device: context.device,
+            transposeLeft: false, transposeRight: true,
+            resultRows: m, resultColumns: r, interiorColumns: k,
+            alpha: 1, beta: 0)
+        downMultiply.encode(
+            commandBuffer: commandBuffer,
+            leftMatrix: x, rightMatrix: down, resultMatrix: low)
+
+        let upMultiply = MPSMatrixMultiplication(
+            device: context.device,
+            transposeLeft: false, transposeRight: true,
+            resultRows: m, resultColumns: n, interiorColumns: r,
+            alpha: Double(projection.effectiveScale), beta: 1)
+        upMultiply.encode(
+            commandBuffer: commandBuffer,
+            leftMatrix: low, rightMatrix: up, resultMatrix: y)
+    }
+
+    private static func checkedProduct(_ values: Int...) throws -> Int {
+        var result = 1
+        for value in values {
+            let (next, overflow) = result.multipliedReportingOverflow(by: value)
+            guard !overflow else {
+                throw AnimapkError.validation("LoRA byte size overflow")
+            }
+            result = next
+        }
+        return result
     }
 }

@@ -53,13 +53,17 @@ final class DitForward {
             context: context, file: file, attentionNumerics: attentionNumerics,
             activationNumerics: activationNumerics, monitor: monitor,
             optimization: optimization, crossKVCache: crossKVCache)
-        // The final-residual ENTRY boundary is final-layer-only: it must NOT
-        // feed into block execution (the block loop keeps the activation
-        // numerics as-is).
         finalLayer = try DiTFinalLayerExecutor(
             context: context, file: file, activationNumerics: activationNumerics,
             finalResidualBoundary: finalResidualBoundary,
             monitor: monitor, optimization: optimization)
+    }
+
+    /// Configured once before a generation starts. The block owns the concrete
+    /// generation-local GPU adapter buffers; the final layer is deliberately
+    /// outside the v1 external-LoRA target set.
+    func configureLoRA(_ selection: ResolvedLoRA?) throws {
+        try block.configureLoRA(selection)
     }
 
     /// Mutates the tightly packed fp32 `[1024,2048]` residual in place.
@@ -87,8 +91,6 @@ final class DitForward {
     ) async throws {
         let blockCount = DiTBlockLocator.blockCount
         let pingPong = block.slotCount > 1
-        // Ping-pong prologue: block 0 into slot 0. One-slot mode loads block 0
-        // into the single slot, then each iteration synchronously reloads it.
         try block.prefetch(blockIndex: 0, slot: 0)
         for logicalIndex in 0..<blockCount {
             let step = Self.loopStep(logicalIndex: logicalIndex, blockCount: blockCount, pingPong: pingPong)

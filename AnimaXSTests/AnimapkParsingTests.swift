@@ -39,7 +39,7 @@ final class AnimapkParsingTests: XCTestCase {
             var bits = h.bitPattern.littleEndian
             scaleData.append(contentsOf: withUnsafeBytes(of: &bits) { [UInt8]($0) })
         }
-        var zero = Data(repeating: 0, count: 32 * 2)
+        let zero = Data(repeating: 0, count: 32 * 2)
 
         let blob = TestPackFactory.BlobSpec(
             name: "model.diffusion_model.blocks.0.mlp.layer1.weight",
@@ -69,7 +69,7 @@ final class AnimapkParsingTests: XCTestCase {
         let url = try makeW4Pack()
         let file = try AnimapkFile(url: url)
         let t = try XCTUnwrap(file.tensor(named: "model.diffusion_model.blocks.0.mlp.layer1.weight"))
-        XCTAssertEqual(t.shape, [8192, 2048]) // full 2-D shape from JSON, not truncated
+        XCTAssertEqual(t.shape, [8192, 2048])
         XCTAssertEqual(t.storageDtype, "w4")
         XCTAssertEqual(t.dataSize, 1024)
         XCTAssertEqual(t.blobOffset % 16_384, 0)
@@ -84,7 +84,7 @@ final class AnimapkParsingTests: XCTestCase {
     func testBadMagicRejected() throws {
         let url = try makeW4Pack()
         var data = try Data(contentsOf: url)
-        data[0] = 0x58 // 'X'
+        data[0] = 0x58
         try data.write(to: url)
         XCTAssertThrowsError(try AnimapkFile(url: url)) { err in
             guard case AnimapkError.header = err else {
@@ -94,14 +94,10 @@ final class AnimapkParsingTests: XCTestCase {
     }
 
     func testAlignmentEnforced() throws {
-        // A blob that is NOT 16 KB aligned must be rejected.
         let k = 64
-        var data = Data(repeating: 0, count: k / 2)
-        var scale = Data(repeating: 0, count: (k / 64) * 2)
-        var zero = Data(repeating: 0, count: (k / 64) * 2)
-        // Manually write a pack whose blob offset lands off-alignment is complex via factory;
-        // instead assert factory-produced blobs are aligned (already covered) and the
-        // parser enforces the invariant for any non-aligned blob.
+        let data = Data(repeating: 0, count: k / 2)
+        let scale = Data(repeating: 0, count: (k / 64) * 2)
+        let zero = Data(repeating: 0, count: (k / 64) * 2)
         let blob = TestPackFactory.BlobSpec(
             name: "x", shape: [64], logicalDtype: "w4", storageDtype: "w4", storageCode: 0,
             data: data, scale: scale, zero: zero)
@@ -114,12 +110,12 @@ final class AnimapkParsingTests: XCTestCase {
 
     func testFileSizeMismatchRejected() throws {
         let url = try makeW4Pack()
-        // Append junk so actual size != declared file_size.
         var data = try Data(contentsOf: url)
         data.append(Data(repeating: 0, count: 100))
         try data.write(to: url)
         XCTAssertThrowsError(try AnimapkFile(url: url))
     }
+
     func testOptionalANEQuantizationMetadataDecodesWithoutBreakingLegacy() throws {
         let data = Data([0, 127, 255, 64])
         var scale = Data()
@@ -151,8 +147,8 @@ final class AnimapkParsingTests: XCTestCase {
         XCTAssertNil(legacy.tensors.first?.quantizationFormat)
         XCTAssertNil(legacy.tensors.first?.blobSHA256)
     }
-
 }
+
 final class ANEW8NativePackTests: XCTestCase {
     private func tensor(
         suffix: String, offset: UInt64, native: Bool,
@@ -238,5 +234,132 @@ final class ANEW8NativePackTests: XCTestCase {
         }
         XCTAssertThrowsError(
             try DiTANEHybridMetalLocator.metalRange(tensors: tensors, logicalIndex: 0))
+    }
+}
+
+/// Native Anima LoRA parser tests use real production dimensions but tiny rank,
+/// keeping each synthetic safetensors fixture only a few kilobytes.
+final class DiTLoRAFileTests: XCTestCase {
+    private var directory: URL!
+
+    override func setUpWithError() throws {
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lora-parser-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    func testNativeSelfQKeysRankAndAlphaScaling() throws {
+        let url = try makeLoRA(target: .selfQ, rank: 2, alpha: 4)
+        let file = try DiTLoRAFile(url: url)
+        let descriptor = try XCTUnwrap(file.module(block: 0, target: .selfQ))
+        XCTAssertEqual(file.modules.count, 1)
+        XCTAssertEqual(descriptor.rank, 2)
+        XCTAssertEqual(descriptor.alpha, 4, accuracy: 0.0001)
+        XCTAssertEqual(descriptor.scale, 2, accuracy: 0.0001)
+        XCTAssertEqual(descriptor.down.shape, [2, 2_048])
+        XCTAssertEqual(descriptor.up.shape, [2_048, 2])
+    }
+
+    func testCrossKVAndMLPShapesMapToTheirRealFeatureCounts() throws {
+        let cross = try DiTLoRAFile(url: makeLoRA(target: .crossK, rank: 1, alpha: 1))
+        let crossDescriptor = try XCTUnwrap(cross.module(block: 0, target: .crossK))
+        XCTAssertEqual(crossDescriptor.down.shape, [1, 1_024])
+        XCTAssertEqual(crossDescriptor.up.shape, [2_048, 1])
+
+        let mlp = try DiTLoRAFile(url: makeLoRA(target: .mlpDown, rank: 1, alpha: 1))
+        let mlpDescriptor = try XCTUnwrap(mlp.module(block: 0, target: .mlpDown))
+        XCTAssertEqual(mlpDescriptor.down.shape, [1, 8_192])
+        XCTAssertEqual(mlpDescriptor.up.shape, [2_048, 1])
+    }
+
+    func testMissingAlphaIsRejectedInsteadOfGuessingScaling() throws {
+        let url = try makeLoRA(target: .selfQ, rank: 1, alpha: 1, includeAlpha: false)
+        XCTAssertThrowsError(try DiTLoRAFile(url: url)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("down/up/alpha"))
+        }
+    }
+
+    func testWrongProjectionShapeIsRejected() throws {
+        let url = try makeLoRA(
+            target: .selfQ, rank: 1, alpha: 1,
+            overrideInputFeatures: 2_047)
+        XCTAssertThrowsError(try DiTLoRAFile(url: url)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("shape mismatch"))
+        }
+    }
+
+    func testUnsupportedAnimaModuleIsRejectedRatherThanPartiallyApplied() throws {
+        let name = "lora_unet_blocks_0_adaln_modulation_self_attn_1.lora_down.weight"
+        let url = try writeSafetensors(entries: [
+            name: (dtype: "F16", shape: [1, 1], bytes: halfData([1]))
+        ])
+        XCTAssertThrowsError(try DiTLoRAFile(url: url)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("unsupported Anima LoRA module"))
+        }
+    }
+
+    private func makeLoRA(
+        target: DiTLoRATarget,
+        rank: Int,
+        alpha: Float,
+        includeAlpha: Bool = true,
+        overrideInputFeatures: Int? = nil
+    ) throws -> URL {
+        let stem = "lora_unet_blocks_0_\(target.rawValue)"
+        let input = overrideInputFeatures ?? target.inputFeatures
+        let output = target.outputFeatures
+        var entries: [String: (dtype: String, shape: [Int], bytes: Data)] = [
+            "\(stem).lora_down.weight": (
+                "F16", [rank, input],
+                halfData((0..<(rank * input)).map { Float(($0 % 7) - 3) / 16 })),
+            "\(stem).lora_up.weight": (
+                "F16", [output, rank],
+                halfData((0..<(output * rank)).map { Float(($0 % 5) - 2) / 16 })),
+        ]
+        if includeAlpha {
+            var bits = alpha.bitPattern.littleEndian
+            entries["\(stem).alpha"] = (
+                "F32", [], Data(bytes: &bits, count: MemoryLayout<UInt32>.size))
+        }
+        return try writeSafetensors(entries: entries)
+    }
+
+    private func halfData(_ values: [Float]) -> Data {
+        var data = Data(capacity: values.count * 2)
+        for value in values {
+            var bits = Float16(value).bitPattern.littleEndian
+            withUnsafeBytes(of: &bits) { data.append(contentsOf: $0) }
+        }
+        return data
+    }
+
+    private func writeSafetensors(
+        entries: [String: (dtype: String, shape: [Int], bytes: Data)]
+    ) throws -> URL {
+        var header: [String: Any] = [:]
+        var payload = Data()
+        for name in entries.keys.sorted() {
+            let entry = entries[name]!
+            let start = payload.count
+            payload.append(entry.bytes)
+            header[name] = [
+                "dtype": entry.dtype,
+                "shape": entry.shape,
+                "data_offsets": [start, payload.count],
+            ]
+        }
+        header["__metadata__"] = ["ss_network_module": "networks.lora_anima"]
+        let headerData = try JSONSerialization.data(withJSONObject: header, options: [.sortedKeys])
+        var headerLength = UInt64(headerData.count).littleEndian
+        var file = Data(bytes: &headerLength, count: MemoryLayout<UInt64>.size)
+        file.append(headerData)
+        file.append(payload)
+        let url = directory.appendingPathComponent("\(UUID().uuidString).safetensors")
+        try file.write(to: url)
+        return url
     }
 }

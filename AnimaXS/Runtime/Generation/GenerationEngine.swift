@@ -10,12 +10,22 @@ struct ResolvedModelPack: Hashable {
     let variant: ModelVariantDescriptor
 }
 
-/// Production model resolution: exactly three packs (K002 §5.1).
+/// Immutable user-LoRA selection captured at Generate time. The adapter is not
+/// a model pack and never replaces/mutates the base DiT. Strength and identity
+/// are frozen for the whole generation, which also makes generation-local
+/// cross-K/V caching safe when cross-attention K/V are adapted.
+struct ResolvedLoRA: Equatable {
+    let url: URL
+    let displayName: String
+    let strength: Float
+}
+
+/// Production model resolution: exactly three base packs (K002 §5.1), plus an
+/// optional external DiT LoRA snapshot.
 ///
-/// The DiT pack serves both the LLM adapter and the diffusion sampler —
-/// there is deliberately no fourth "adapter" pack in production app state.
-/// Isolated adapter tests may construct `LLMAdapterMetal` directly with a
-/// dedicated fixture; that fixture architecture never leaks into here.
+/// The DiT pack serves both the LLM adapter and the diffusion sampler. External
+/// LoRA is an overlay over diffusion projections; it is deliberately not a
+/// fourth model pack and does not participate in base model resolution.
 ///
 /// Each pack carries its resolved variant descriptor so consumers can report
 /// which variant (W4 or W8-v2) actually ran.
@@ -23,20 +33,33 @@ struct ResolvedModels: Equatable {
     let textEncoder: ResolvedModelPack
     let dit: ResolvedModelPack
     let vae: ResolvedModelPack
+    let lora: ResolvedLoRA?
 
-    init(textEncoder: ResolvedModelPack, dit: ResolvedModelPack, vae: ResolvedModelPack) {
+    init(
+        textEncoder: ResolvedModelPack,
+        dit: ResolvedModelPack,
+        vae: ResolvedModelPack,
+        lora: ResolvedLoRA? = nil
+    ) {
         self.textEncoder = textEncoder
         self.dit = dit
         self.vae = vae
+        self.lora = lora
     }
 
     /// Convenience init from raw URLs and variant descriptors.
     init(textEncoderURL: URL, textEncoderVariant: ModelVariantDescriptor,
          ditURL: URL, ditVariant: ModelVariantDescriptor,
-         vaeURL: URL, vaeVariant: ModelVariantDescriptor) {
+         vaeURL: URL, vaeVariant: ModelVariantDescriptor,
+         lora: ResolvedLoRA? = nil) {
         self.textEncoder = ResolvedModelPack(url: textEncoderURL, component: .textEncoder, variant: textEncoderVariant)
         self.dit = ResolvedModelPack(url: ditURL, component: .dit, variant: ditVariant)
         self.vae = ResolvedModelPack(url: vaeURL, component: .vae, variant: vaeVariant)
+        self.lora = lora
+    }
+
+    func withLoRA(_ lora: ResolvedLoRA?) -> ResolvedModels {
+        ResolvedModels(textEncoder: textEncoder, dit: dit, vae: vae, lora: lora)
     }
 }
 
@@ -190,7 +213,7 @@ struct GenerationEngine {
     ///   - prompt: User prompt. Not altered between UI and tokenization.
     ///   - seed: User seed. `SeededRNG(seed:)` creates the initial latent unless
     ///           `noise` is injected (test-only golden path).
-    ///   - models: Exactly three resolved pack URLs.
+    ///   - models: Exactly three resolved base packs plus optional LoRA snapshot.
     ///   - noise: Optional pre-generated initial noise (test-only injection).
     ///   - progress: Stage progress, including diffusion step/block counts.
     ///   - metrics: Optional collector for this run's timing/memory telemetry;
@@ -217,7 +240,6 @@ struct GenerationEngine {
         defer {
             metrics.finalize(totalWall: ProcessInfo.processInfo.systemUptime - generationStart)
         }
-        // ---- 1. Tokenization (production TokenizerLoader semantics) ----
         progress?(.tokenizing)
         try Task.checkCancellation()
         let tokenized = try measuredSync(.tokenizing, metrics: metrics) {
@@ -227,16 +249,12 @@ struct GenerationEngine {
         let t5IDs = tokenized.t5
         let t5Weights = tokenized.t5Weights
 
-        // ---- 2. Qwen text encoding (stage-scoped; Qwen + its mmap cannot
-        // escape this helper) ----
         progress?(.encodingPrompt)
         try Task.checkCancellation()
         let qwenOutput = try await measured(.textEncode, metrics: metrics) {
             try await encodePrompt(models: models, tokenIDs: qwenTokenIDs)
         }
 
-        // ---- 3. Adapter → crossContext [512, 1024] fp32 (adapter + its mmap
-        // cannot escape this helper) ----
         progress?(.adapting)
         try Task.checkCancellation()
         let cross = try await measured(.adapter, metrics: metrics) {
@@ -245,9 +263,6 @@ struct GenerationEngine {
                 contextTokens: qwenTokenIDs.count, t5IDs: t5IDs, t5Weights: t5Weights)
         }
 
-        // ---- 4. Diffusion: seeded noise → final latent (sampler-space).
-        // Always starts from step 0: there is no checkpoint/resume path, so
-        // no per-step latent snapshot is copied to the CPU. ----
         let totalSteps = ModelConstants.samplerSteps
         let initialLatent = try makeInitialLatent(seed: seed, noise: noise)
         let finalLatent = try await measured(.diffusion, metrics: metrics) {
@@ -258,16 +273,8 @@ struct GenerationEngine {
                 optimization: optimization)
         }
 
-        // ---- 4b. Wan21 latent-format boundary (sampler-space → VAE-space) ----
-        // Root-cause fix (2026-08-14): ComfyUI applies latent_format.process_out
-        // to the sampler return before the workflow's VAE decode
-        // (samplers.py CFGGuider.inner_sample). The custom runtime omitted it,
-        // decoding raw sampler latents as VAE latents — the 8px grid. Apply
-        // EXACTLY ONCE here; VAEDecoder still consumes its canonical latent
-        // unchanged (D060).
         Wan21LatentFormat.applyProcessOutInPlace(finalLatent)
 
-        // ---- 5. VAE decode (VAE + its mmap cannot escape this helper) ----
         progress?(.decoding)
         try Task.checkCancellation()
         let decoded = try await measured(.vae, metrics: metrics) {
@@ -278,8 +285,6 @@ struct GenerationEngine {
 
     // MARK: - Stage helpers (lexical lifetime boundaries)
 
-    /// Measures a synchronous stage, ALWAYS closing its timer even when `body`
-    /// throws (so a failed stage is not silently folded into "Other").
     private func measuredSync<T>(
         _ stage: MetricsCollector.Stage, metrics: MetricsCollector,
         _ body: () throws -> T
@@ -289,9 +294,6 @@ struct GenerationEngine {
         return try body()
     }
 
-    /// Measures an async stage, ALWAYS closing its timer even when `body`
-    /// throws. This is the failure-safe replacement for scattered begin/end
-    /// pairs: e.g. a thrown `diffuse()` must still record nonzero diffusion time.
     private func measured<T>(
         _ stage: MetricsCollector.Stage, metrics: MetricsCollector,
         _ body: () async throws -> T
@@ -302,9 +304,6 @@ struct GenerationEngine {
     }
 
     private func tokenize(prompt: String) throws -> (qwen: [Int], t5: [Int], t5Weights: [Float]) {
-        // Qwen: encode(prompt, no specials) — no start/end token.
-        // T5:   encode(prompt, no specials) + [1] (trailing </s> EOS).
-        // t5Weights: all 1.0 (verified from case1 fixture JSON).
         let qwenTokenizer = try TokenizerLoader.qwen()
         let qwen = qwenTokenizer.encode(text: prompt, addSpecialTokens: false)
         guard !qwen.isEmpty else {
@@ -320,8 +319,6 @@ struct GenerationEngine {
         models: ResolvedModels, tokenIDs: [Int]
     ) async throws -> MTLBuffer {
         let encoder = try factory.makePromptEncoder(context: context, fileURL: models.textEncoder.url)
-        // Structural lifetime boundary: `encoder` (and its AnimapkFile mmap) is
-        // strongly held by this defer until the helper returns, then released.
         defer { withExtendedLifetime(encoder) {} }
         let output = try makeBuffer(
             length: tokenIDs.count * QwenEncoderMetal.hidden * 4,
@@ -334,7 +331,6 @@ struct GenerationEngine {
         models: ResolvedModels, qwenContext: MTLBuffer, contextTokens: Int,
         t5IDs: [Int], t5Weights: [Float]
     ) async throws -> MTLBuffer {
-        // Production topology: adapter reads the DiT pack (same URL as sampler).
         let adapter = try factory.makeContextAdapter(context: context, fileURL: models.dit.url)
         defer { withExtendedLifetime(adapter) {} }
         let output = try makeBuffer(
@@ -358,18 +354,14 @@ struct GenerationEngine {
             context: context, fileURL: models.dit.url,
             optimization: optimization,
             numerics: DiTNumericsPolicy.fromVariantID(models.dit.variant.id))
-        // Production path: inject the run's metrics collector into the sampler
-        // (and through it the preparation/forward/final-layer/euler executors).
-        if let sampler = sampler as? DiffusionSampler {
-            sampler.metrics = metrics
+        if let productionSampler = sampler as? DiffusionSampler {
+            productionSampler.metrics = metrics
+            try productionSampler.configureLoRA(models.lora)
         }
         defer { withExtendedLifetime(sampler) {} }
         let output = try makeBuffer(
             length: DiffusionSampler.latentElements * 4, "diffusion output buffer")
         let blocks = ModelConstants.ditBlocks
-        // Production always starts from step 0 and passes NO stepCompleted
-        // callback: there is no checkpoint to write, so the sampler never
-        // snapshots the fp32 latent to the CPU after each step.
         try await sampler.execute(
             initialLatent: initialLatent, crossContext: cross, outputLatent: output,
             startStep: 0,
@@ -395,8 +387,6 @@ struct GenerationEngine {
 
     // MARK: - Helpers
 
-    /// Seeded production RNG (K002 §5.2). The user's seed always feeds
-    /// `SeededRNG`; only an explicit test-injected noise buffer bypasses it.
     private func makeInitialLatent(seed: UInt64, noise: MTLBuffer?) throws -> MTLBuffer {
         if let noise { return noise }
         var rng = SeededRNG(seed: seed)
