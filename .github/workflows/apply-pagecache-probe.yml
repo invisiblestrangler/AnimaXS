@@ -1,14 +1,16 @@
 name: Apply ANE page-cache probe wiring
 
 on:
-  pull_request:
+  push:
+    branches:
+      - experiment/ane-pagecache-saturation
 
 permissions:
   contents: write
 
 jobs:
   apply:
-    if: github.head_ref == 'experiment/ane-pagecache-saturation'
+    if: github.ref == 'refs/heads/experiment/ane-pagecache-saturation'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
