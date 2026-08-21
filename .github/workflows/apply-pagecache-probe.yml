@@ -1,0 +1,127 @@
+name: Apply ANE page-cache probe wiring
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.head_ref == 'experiment/ane-pagecache-saturation'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: experiment/ane-pagecache-saturation
+      - name: Fold probe into existing compiled source and wire Diagnostics UI
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          ring = Path('AnimaXS/App/ANERingProbe.swift')
+          probe = Path('AnimaXS/App/ANEPageCacheProbe.swift')
+          view = Path('AnimaXS/App/DiagnosticsView.swift')
+
+          r = ring.read_text()
+          p = probe.read_text()
+          v = view.read_text()
+
+          old_imports = 'import Foundation\nimport Metal\n'
+          new_imports = 'import Foundation\nimport Metal\nimport UIKit\n#if canImport(Darwin)\nimport Darwin\n#endif\n'
+          assert r.count(old_imports) == 1
+          r = r.replace(old_imports, new_imports, 1)
+
+          probe_imports = 'import Foundation\nimport Metal\nimport UIKit\n#if canImport(Darwin)\nimport Darwin\n#endif\n\n'
+          assert p.startswith(probe_imports)
+          p = p[len(probe_imports):]
+          assert 'enum ANEPageCacheProbe' in p
+          assert 'enum ANEPageCacheProbe' not in r
+          r = r.rstrip() + '\n\n' + p.rstrip() + '\n'
+
+          state_old = '    @State private var aneProbeText: String?\n'
+          state_new = state_old + '    @State private var anePageCacheText: String?\n'
+          assert v.count(state_old) == 1
+          v = v.replace(state_old, state_new, 1)
+
+          probe_ui_anchor = '''            if let aneProbeText {
+                Text(aneProbeText)
+                    .font(.system(.caption2, design: .monospaced))
+                    .textSelection(.enabled)
+                ShareLink(item: aneProbeText) {
+                    Label("Copy / share ANE probe", systemImage: "square.and.arrow.up")
+                }
+                .font(.caption)
+            }
+'''
+          probe_ui_new = probe_ui_anchor + '''            Divider()
+            Text("Page-cache saturation v1: maps the real prepared legacy W8 bundles as ordinary reclaimable file-backed pages, measures residency, then compares untouched vs prefaulted legacy ANE loading. It uses warm6 steady-state models, attempts full 224-model cache saturation when safe, and automatically steps ANE residency from 6+2 toward 2+2 after pressure.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button(isRunning && currentTest == "ANE page-cache saturation probe"
+                   ? "Running ANE page-cache probe…" : "Run ANE page-cache saturation probe") {
+                Task { await runANEPageCacheProbe() }
+            }
+            .disabled(isRunning || isGenerating)
+            if let anePageCacheText {
+                Text(anePageCacheText)
+                    .font(.system(.caption2, design: .monospaced))
+                    .textSelection(.enabled)
+                ShareLink(item: anePageCacheText) {
+                    Label("Copy / share page-cache probe", systemImage: "square.and.arrow.up")
+                }
+                .font(.caption)
+            }
+'''
+          assert v.count(probe_ui_anchor) == 1
+          v = v.replace(probe_ui_anchor, probe_ui_new, 1)
+
+          load_anchor = '''        previousRunWarning = marker.unfinishedTest().map {
+            "Previous diagnostic run ended unexpectedly while: \\($0)."
+        }
+'''
+          load_new = load_anchor + '''        if anePageCacheText == nil {
+            anePageCacheText = ANEPageCacheProbe.previousLiveLog()
+        }
+'''
+          assert v.count(load_anchor) == 1
+          v = v.replace(load_anchor, load_new, 1)
+
+          action_anchor = '''    private func runDeep() async {
+'''
+          action_new = '''    private func runANEPageCacheProbe() async {
+        guard !isRunning, !isGenerating else { return }
+        isRunning = true
+        currentTest = "ANE page-cache saturation probe"
+        anePageCacheText = "Running…"
+        marker.beginSession()
+        marker.markStarted("ANE page-cache saturation probe")
+        let result = await Task.detached(priority: .userInitiated) {
+            await ANEPageCacheProbe.run()
+        }.value
+        anePageCacheText = result
+        marker.markCompleted("ANE page-cache saturation probe")
+        marker.markSessionClean()
+        isRunning = false
+        currentTest = nil
+    }
+
+''' + action_anchor
+          assert v.count(action_anchor) == 1
+          v = v.replace(action_anchor, action_new, 1)
+
+          ring.write_text(r)
+          view.write_text(v)
+          probe.unlink()
+          PY
+          rm .github/workflows/apply-pagecache-probe.yml
+          git diff --check
+      - name: Commit probe wiring and self-remove
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add AnimaXS/App/ANERingProbe.swift AnimaXS/App/DiagnosticsView.swift AnimaXS/App/ANEPageCacheProbe.swift .github/workflows/apply-pagecache-probe.yml
+          git commit -m "Wire ANE page-cache saturation diagnostic"
+          git push origin HEAD:experiment/ane-pagecache-saturation
