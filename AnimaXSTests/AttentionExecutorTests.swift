@@ -87,6 +87,54 @@ final class AttentionExecutorTests: XCTestCase {
         print("ATTENTION_CROSS_512=PASS Q=129 K=512")
     }
 
+    /// Exact production DiT cross-attention shape with uniform scores. One V
+    /// token contains +32; NegPiP marks only that row negative, so every output
+    /// element must become -32/512 while the source V buffer itself stays +32.
+    func testNegPiPFlipsOnlyCrossAttentionValueRows() throws {
+        let context = try requireContext()
+        let heads = DiTBlockExecutor.heads
+        let headDim = DiTBlockExecutor.headDim
+        let modelDim = heads * headDim
+        let keyCount = DiTBlockExecutor.contextTokens
+        let queryCount = 1
+
+        let q = makeHalfBuffer(
+            [Float16](repeating: 0, count: queryCount * modelDim), context: context)
+        let k = makeHalfBuffer(
+            [Float16](repeating: 0, count: keyCount * modelDim), context: context)
+        var values = [Float16](repeating: 0, count: keyCount * modelDim)
+        for column in 0..<modelDim { values[7 * modelDim + column] = 32 }
+        let v = makeHalfBuffer(values, context: context)
+        let output = try XCTUnwrap(context.device.makeBuffer(
+            length: queryCount * modelDim * 2, options: .storageModeShared))
+
+        var signs = [Float](repeating: 1, count: LLMAdapterMetal.maximumTokens)
+        signs[7] = -1
+        let lease = try XCTUnwrap(NegPiPGenerationContext.install(signs: signs))
+        defer { NegPiPGenerationContext.clear(lease: lease) }
+
+        let command = try XCTUnwrap(context.commandQueue.makeCommandBuffer())
+        try AttentionExecutor(context: context).encode(
+            commandBuffer: command,
+            query: q, key: k, value: v, output: output,
+            heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
+            probe: .crossScores,
+            layout: .tokenMajor(tokenStride: modelDim))
+        command.commit()
+        command.waitUntilCompleted()
+        XCTAssertNil(command.error)
+
+        let actual = readHalf(output, count: modelDim)
+        for (index, value) in actual.enumerated() {
+            XCTAssertEqual(value, -32.0 / 512.0, accuracy: 0.001,
+                           "NegPiP output mismatch at column \(index)")
+        }
+        let originalV = readHalf(v, count: keyCount * modelDim)
+        XCTAssertEqual(originalV[7 * modelDim], 32, "NegPiP must never mutate the cached/source V")
+        XCTAssertEqual(readHalf(k, count: 1)[0], 0, "cross-K source must remain untouched")
+        print("ATTENTION_NEGPIP_V_ONLY=PASS row=7 sign=-1")
+    }
+
     func testGroupedQueryAttentionUsesContiguousKVHeads() async throws {
         let context = try requireContext()
         let heads = 4, kvHeads = 2, dim = 4
