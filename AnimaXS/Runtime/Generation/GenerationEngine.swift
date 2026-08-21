@@ -20,8 +20,27 @@ struct ResolvedLoRA: Equatable {
     let strength: Float
 }
 
-/// Production model resolution: exactly three base packs (K002 §5.1), plus an
-/// optional external DiT LoRA snapshot.
+/// Optional negative-prompt input captured into the same immutable generation
+/// snapshot as the model/LoRA choices. This is NOT CFG: GenerationEngine folds
+/// it into the one positive conditioning stream and emits a V-only NegPiP sign
+/// mask, keeping Anima-Turbo at one DiT evaluation per sigma step.
+struct ResolvedNegPiP: Equatable {
+    let prompt: String
+}
+
+/// The dual-tokenized conditioning contract consumed by the production text
+/// stages. `negPiPValueSigns == nil` is the exact historical baseline path.
+/// When present it is always 512 rows: +1 for positive/padding/EOS rows and -1
+/// for rows originating in the user-facing negative prompt.
+struct CompiledPromptConditioning: Equatable {
+    let qwenIDs: [Int]
+    let t5IDs: [Int]
+    let t5Weights: [Float]
+    let negPiPValueSigns: [Float]?
+}
+
+/// Production model resolution: exactly three base packs (K002 §5.1), plus
+/// optional generation-local overlays/options.
 ///
 /// The DiT pack serves both the LLM adapter and the diffusion sampler. External
 /// LoRA is an overlay over diffusion projections; it is deliberately not a
@@ -34,32 +53,45 @@ struct ResolvedModels: Equatable {
     let dit: ResolvedModelPack
     let vae: ResolvedModelPack
     let lora: ResolvedLoRA?
+    let negPiP: ResolvedNegPiP?
 
     init(
         textEncoder: ResolvedModelPack,
         dit: ResolvedModelPack,
         vae: ResolvedModelPack,
-        lora: ResolvedLoRA? = nil
+        lora: ResolvedLoRA? = nil,
+        negPiP: ResolvedNegPiP? = nil
     ) {
         self.textEncoder = textEncoder
         self.dit = dit
         self.vae = vae
         self.lora = lora
+        self.negPiP = negPiP
     }
 
     /// Convenience init from raw URLs and variant descriptors.
     init(textEncoderURL: URL, textEncoderVariant: ModelVariantDescriptor,
          ditURL: URL, ditVariant: ModelVariantDescriptor,
          vaeURL: URL, vaeVariant: ModelVariantDescriptor,
-         lora: ResolvedLoRA? = nil) {
+         lora: ResolvedLoRA? = nil,
+         negPiP: ResolvedNegPiP? = nil) {
         self.textEncoder = ResolvedModelPack(url: textEncoderURL, component: .textEncoder, variant: textEncoderVariant)
         self.dit = ResolvedModelPack(url: ditURL, component: .dit, variant: ditVariant)
         self.vae = ResolvedModelPack(url: vaeURL, component: .vae, variant: vaeVariant)
         self.lora = lora
+        self.negPiP = negPiP
     }
 
     func withLoRA(_ lora: ResolvedLoRA?) -> ResolvedModels {
-        ResolvedModels(textEncoder: textEncoder, dit: dit, vae: vae, lora: lora)
+        ResolvedModels(
+            textEncoder: textEncoder, dit: dit, vae: vae,
+            lora: lora, negPiP: negPiP)
+    }
+
+    func withNegPiP(_ negPiP: ResolvedNegPiP?) -> ResolvedModels {
+        ResolvedModels(
+            textEncoder: textEncoder, dit: dit, vae: vae,
+            lora: lora, negPiP: negPiP)
     }
 }
 
@@ -208,18 +240,6 @@ struct GenerationEngine {
 
     /// Runs the full production pipeline: prompt → tokens → Qwen → adapter →
     /// diffusion → VAE → RGBA8. Always starts diffusion from step 0.
-    ///
-    /// - Parameters:
-    ///   - prompt: User prompt. Not altered between UI and tokenization.
-    ///   - seed: User seed. `SeededRNG(seed:)` creates the initial latent unless
-    ///           `noise` is injected (test-only golden path).
-    ///   - models: Exactly three resolved base packs plus optional LoRA snapshot.
-    ///   - noise: Optional pre-generated initial noise (test-only injection).
-    ///   - progress: Stage progress, including diffusion step/block counts.
-    ///   - metrics: Optional collector for this run's timing/memory telemetry;
-    ///              a private one is created when nil (test path).
-    ///   - optimization: Immutable per-run inference configuration snapshot.
-    ///              Captured at Generate time; never mutated mid-run.
     func generate(
         prompt: String,
         seed: UInt64,
@@ -242,17 +262,16 @@ struct GenerationEngine {
         }
         progress?(.tokenizing)
         try Task.checkCancellation()
-        let tokenized = try measuredSync(.tokenizing, metrics: metrics) {
-            try tokenize(prompt: prompt)
+        let conditioning = try measuredSync(.tokenizing, metrics: metrics) {
+            try Self.compileConditioning(
+                positive: prompt,
+                negative: models.negPiP?.prompt ?? "")
         }
-        let qwenTokenIDs = tokenized.qwen
-        let t5IDs = tokenized.t5
-        let t5Weights = tokenized.t5Weights
 
         progress?(.encodingPrompt)
         try Task.checkCancellation()
         let qwenOutput = try await measured(.textEncode, metrics: metrics) {
-            try await encodePrompt(models: models, tokenIDs: qwenTokenIDs)
+            try await encodePrompt(models: models, tokenIDs: conditioning.qwenIDs)
         }
 
         progress?(.adapting)
@@ -260,7 +279,9 @@ struct GenerationEngine {
         let cross = try await measured(.adapter, metrics: metrics) {
             try await adaptPrompt(
                 models: models, qwenContext: qwenOutput,
-                contextTokens: qwenTokenIDs.count, t5IDs: t5IDs, t5Weights: t5Weights)
+                contextTokens: conditioning.qwenIDs.count,
+                t5IDs: conditioning.t5IDs,
+                t5Weights: conditioning.t5Weights)
         }
 
         let totalSteps = ModelConstants.samplerSteps
@@ -268,6 +289,7 @@ struct GenerationEngine {
         let finalLatent = try await measured(.diffusion, metrics: metrics) {
             try await diffuse(
                 models: models, initialLatent: initialLatent, cross: cross,
+                negPiPValueSigns: conditioning.negPiPValueSigns,
                 totalSteps: totalSteps,
                 progress: progress, metrics: metrics,
                 optimization: optimization)
@@ -281,6 +303,78 @@ struct GenerationEngine {
             try await decodeVAE(models: models, latent: finalLatent)
         }
         return decoded
+    }
+
+    // MARK: - Conditioning
+
+    /// Compiles the familiar two-box UI into Anima's one CFG=1 conditioning
+    /// stream. Empty negative input deliberately executes the exact historical
+    /// tokenizer recipe. With NegPiP enabled, both encoders see one combined
+    /// caption; the adapter weights remain positive and only the separately
+    /// carried V-sign mask encodes negative influence.
+    static func compileConditioning(
+        positive: String,
+        negative: String
+    ) throws -> CompiledPromptConditioning {
+        let qwenTokenizer = try TokenizerLoader.qwen()
+        let t5Tokenizer = try TokenizerLoader.t5()
+        let hasNegative = !negative.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        if !hasNegative {
+            let qwen = qwenTokenizer.encode(text: positive, addSpecialTokens: false)
+            guard !qwen.isEmpty else {
+                throw GenerationError.tokenizer("Qwen tokenizer produced no tokens")
+            }
+            let t5 = t5Tokenizer.encode(text: positive, addSpecialTokens: false) + [1]
+            return CompiledPromptConditioning(
+                qwenIDs: qwen,
+                t5IDs: t5,
+                t5Weights: [Float](repeating: 1.0, count: t5.count),
+                negPiPValueSigns: nil)
+        }
+
+        let separator: String
+        if positive.last?.isWhitespace == true || positive.hasSuffix(",") {
+            separator = " "
+        } else {
+            separator = ", "
+        }
+        let combined = positive + separator + negative
+        let qwen = qwenTokenizer.encode(text: combined, addSpecialTokens: false)
+        guard !qwen.isEmpty else {
+            throw GenerationError.tokenizer("Qwen tokenizer produced no tokens")
+        }
+        guard qwen.count <= QwenEncoderMetal.maximumTokens else {
+            throw GenerationError.tokenizer(
+                "Combined positive + negative prompt is too long for Qwen (\(qwen.count)/\(QwenEncoderMetal.maximumTokens) tokens).")
+        }
+
+        // Keep the split explicit instead of using negative adapter weights:
+        // negative adapter weights would alter BOTH cross-K and cross-V. NegPiP
+        // requires K to remain unchanged and flips only V after projection.
+        let positiveTarget = t5Tokenizer.encode(
+            text: positive + separator, addSpecialTokens: false)
+        let negativeTarget = t5Tokenizer.encode(
+            text: negative, addSpecialTokens: false)
+        let t5 = positiveTarget + negativeTarget + [1]
+        guard t5.count <= LLMAdapterMetal.maximumTokens else {
+            throw GenerationError.tokenizer(
+                "Combined positive + negative prompt is too long for the Anima adapter (\(t5.count)/\(LLMAdapterMetal.maximumTokens) tokens).")
+        }
+
+        var signs = [Float](repeating: 1.0, count: LLMAdapterMetal.maximumTokens)
+        let negativeStart = positiveTarget.count
+        let negativeEnd = negativeStart + negativeTarget.count
+        if negativeStart < negativeEnd {
+            for row in negativeStart..<negativeEnd { signs[row] = -1.0 }
+        }
+        // EOS and zero-padding rows intentionally remain +1. Their adapter
+        // outputs are normal/zero; the sign is semantically inert there.
+        return CompiledPromptConditioning(
+            qwenIDs: qwen,
+            t5IDs: t5,
+            t5Weights: [Float](repeating: 1.0, count: t5.count),
+            negPiPValueSigns: signs)
     }
 
     // MARK: - Stage helpers (lexical lifetime boundaries)
@@ -301,18 +395,6 @@ struct GenerationEngine {
         metrics.beginStage(stage)
         defer { metrics.endStage(stage) }
         return try await body()
-    }
-
-    private func tokenize(prompt: String) throws -> (qwen: [Int], t5: [Int], t5Weights: [Float]) {
-        let qwenTokenizer = try TokenizerLoader.qwen()
-        let qwen = qwenTokenizer.encode(text: prompt, addSpecialTokens: false)
-        guard !qwen.isEmpty else {
-            throw GenerationError.tokenizer("Qwen tokenizer produced no tokens")
-        }
-        let t5Tokenizer = try TokenizerLoader.t5()
-        let t5 = t5Tokenizer.encode(text: prompt, addSpecialTokens: false) + [1]
-        let t5Weights = [Float](repeating: 1.0, count: t5.count)
-        return (qwen, t5, t5Weights)
     }
 
     private func encodePrompt(
@@ -344,6 +426,7 @@ struct GenerationEngine {
 
     private func diffuse(
         models: ResolvedModels, initialLatent: MTLBuffer, cross: MTLBuffer,
+        negPiPValueSigns: [Float]?,
         totalSteps: Int,
         progress: ProgressCallback?,
         metrics: MetricsCollector, optimization: InferenceOptimizationConfig
@@ -359,6 +442,15 @@ struct GenerationEngine {
             try productionSampler.configureLoRA(models.lora)
         }
         defer { withExtendedLifetime(sampler) {} }
+
+        // Install only for the sampler's lexical lifetime. The context is read
+        // solely by exact-shape DiT cross-attention; Qwen/adapter/VAE attention
+        // cannot observe it. Empty-negative runs install nothing at all.
+        let negPiPLease = try NegPiPGenerationContext.install(signs: negPiPValueSigns)
+        defer {
+            if let negPiPLease { NegPiPGenerationContext.clear(lease: negPiPLease) }
+        }
+
         let output = try makeBuffer(
             length: DiffusionSampler.latentElements * 4, "diffusion output buffer")
         let blocks = ModelConstants.ditBlocks
