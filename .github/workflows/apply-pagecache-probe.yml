@@ -1,3 +1,4 @@
+# Existing push-triggered one-shot helper; this commit intentionally kicks it.
 name: Apply ANE page-cache probe wiring
 
 on:
