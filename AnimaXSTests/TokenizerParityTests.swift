@@ -96,22 +96,30 @@ final class TokenizerParityTests: XCTestCase {
         XCTAssertTrue(signs[(positiveIDs.count + negativeIDs.count + 1)...].allSatisfy { $0 == 1 })
     }
 
-    func testNegPiPLeaseIsGenerationLocal() throws {
+    /// The mask is lexical task state, not process-global mutable state. A
+    /// detached diagnostics-style task cannot inherit it, and the value is gone
+    /// immediately after the diffusion scope exits.
+    func testNegPiPContextIsTaskLocal() async throws {
         var signs = [Float](repeating: 1, count: LLMAdapterMetal.maximumTokens)
         signs[7] = -1
-        let lease = try XCTUnwrap(NegPiPGenerationContext.install(signs: signs))
-        defer { NegPiPGenerationContext.clear(lease: lease) }
+        let scope = try XCTUnwrap(NegPiPGenerationContext.make(signs: signs))
+        XCTAssertNil(NegPiPGenerationContext.snapshot())
 
-        let snapshot = try XCTUnwrap(NegPiPGenerationContext.snapshot())
-        XCTAssertEqual(snapshot.lease, lease)
-        XCTAssertEqual(snapshot.signs[7], -1)
-        NegPiPGenerationContext.clear(lease: lease)
+        try await NegPiPGenerationContext.$active.withValue(scope) {
+            let snapshot = try XCTUnwrap(NegPiPGenerationContext.snapshot())
+            XCTAssertEqual(snapshot.lease, scope.lease)
+            XCTAssertEqual(snapshot.signs[7], -1)
+            let detachedSnapshot = await Task.detached {
+                NegPiPGenerationContext.snapshot()
+            }.value
+            XCTAssertNil(detachedSnapshot, "detached diagnostics work must not inherit generation NegPiP")
+        }
         XCTAssertNil(NegPiPGenerationContext.snapshot())
     }
 
     func testAllPositiveNegPiPMaskIsZeroWork() throws {
         let signs = [Float](repeating: 1, count: LLMAdapterMetal.maximumTokens)
-        XCTAssertNil(try NegPiPGenerationContext.install(signs: signs))
+        XCTAssertNil(try NegPiPGenerationContext.make(signs: signs))
         XCTAssertNil(NegPiPGenerationContext.snapshot())
     }
 }
