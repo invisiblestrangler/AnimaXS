@@ -123,7 +123,7 @@ final class AttentionExecutor {
 
     /// Lazily created so a baseline/empty-negative generation does not even
     /// instantiate the NegPiP image kernel. The mask itself is expanded once
-    /// per generation and reused; only the cheap V multiply runs per cross-attn.
+    /// per generation and reused; only the cheap V multiply runs on a cache miss.
     private lazy var negPiPMultiply = MPSImageMultiply(device: context.device)
     private var negPiPMaskGeneration: UInt64?
     private var negPiPMaskLayoutKey: String?
@@ -161,7 +161,8 @@ final class AttentionExecutor {
         keyValueHeads: Int? = nil,
         causal: Bool = false,
         probe: NumericalMonitor.Probe? = nil,
-        layout: AttentionInputLayout? = nil
+        layout: AttentionInputLayout? = nil,
+        negPiPValueAlreadyMasked: Bool = false
     ) throws {
         let kvHeads = keyValueHeads ?? heads
         let inputLayout = layout ?? self.layout
@@ -175,15 +176,20 @@ final class AttentionExecutor {
                      keyCount: keyCount, headDim: headDim, keyValueHeads: kvHeads,
                      causal: causal, layout: inputLayout)
 
-        // NegPiP lives at the semantic V boundary, after the base projection
-        // and any LoRA delta, but before attention. K is never touched. The
-        // exact DiT cross-attention probe/shape gate prevents Qwen, adapter,
-        // VAE, and DiT self-attention from observing the task-local context.
-        let effectiveValue = try negPiPValueIfNeeded(
-            commandBuffer: commandBuffer,
-            value: value, valueOffset: valueOffset,
-            heads: heads, keyCount: keyCount, headDim: headDim,
-            kvHeads: kvHeads, layout: inputLayout, probe: probe)
+        // Direct callers/tests still get the V-only NegPiP boundary here. The
+        // production DiT path applies the same primitive before its cross-K/V
+        // cache store, then passes `negPiPValueAlreadyMasked` so cache hits are
+        // never flipped a second time. K is never touched.
+        let effectiveValue: (buffer: MTLBuffer, offset: Int)
+        if negPiPValueAlreadyMasked {
+            effectiveValue = (value, valueOffset)
+        } else {
+            effectiveValue = try negPiPValueIfNeeded(
+                commandBuffer: commandBuffer,
+                value: value, valueOffset: valueOffset,
+                heads: heads, keyCount: keyCount, headDim: headDim,
+                kvHeads: kvHeads, layout: inputLayout, probe: probe)
+        }
 
         let halfBytes = MemoryLayout<Float16>.stride
         let scoreScratch = buffers.buffer(
@@ -338,10 +344,11 @@ final class AttentionExecutor {
         }
     }
 
-    /// Returns the original V buffer untouched for every normal call. With an
-    /// active task-local snapshot it recognizes exactly Anima DiT cross-attention
-    /// and creates a V-only sign-adjusted scratch.
-    private func negPiPValueIfNeeded(
+    /// Returns the original V buffer when NegPiP is inactive. Production DiT
+    /// calls this on a cross-K/V cache miss after base projection + LoRA + the
+    /// existing compute boundary, then stores the returned V in the cache.
+    /// Direct attention callers/tests may still use it through `encode`.
+    func negPiPValueIfNeeded(
         commandBuffer: MTLCommandBuffer,
         value: MTLBuffer,
         valueOffset: Int,
@@ -390,6 +397,13 @@ final class AttentionExecutor {
         guard alignment > 0, rowBytes.isMultiple(of: alignment), value.length >= bytes else {
             throw AnimapkError.validation("NegPiP V layout is not compatible with an r16Float buffer texture")
         }
+        // All production DiT projection/transposed V scratch and the unit-test
+        // oracle use BufferPool/.storageModeShared. Linear buffer textures must
+        // declare the same storage mode as their backing buffer; leaving the
+        // descriptor at its default causes Metal validation to abort.
+        guard value.storageMode == .shared else {
+            throw AnimapkError.validation("NegPiP requires shared DiT V scratch")
+        }
 
         let mask = buffers.buffer(key: "attention.negpip.mask.\(layoutKey)", bytes: bytes)
         if negPiPMaskGeneration != snapshot.lease || negPiPMaskLayoutKey != layoutKey {
@@ -418,6 +432,7 @@ final class AttentionExecutor {
         let masked = buffers.buffer(key: "attention.negpip.value.\(layoutKey)", bytes: bytes)
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
             pixelFormat: .r16Float, width: width, height: height, mipmapped: false)
+        descriptor.storageMode = .shared
         descriptor.usage = [.shaderRead, .shaderWrite]
         guard let sourceTexture = value.makeTexture(
                 descriptor: descriptor, offset: valueOffset, bytesPerRow: rowBytes),
