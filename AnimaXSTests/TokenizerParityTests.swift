@@ -67,6 +67,84 @@ final class TokenizerParityTests: XCTestCase {
         }
     }
 
+    func testPromptWeightParserMatchesAnimaReferenceRules() {
+        XCTAssertEqual(
+            GenerationEngine.parsePromptWeights("(cat)"),
+            [PromptWeightSegment(text: "cat", weight: 1.1)])
+        XCTAssertEqual(
+            GenerationEngine.parsePromptWeights("(cat:1.5)"),
+            [PromptWeightSegment(text: "cat", weight: 1.5)])
+
+        let nested = GenerationEngine.parsePromptWeights("a (b (c):2) d")
+        XCTAssertEqual(nested.count, 4)
+        XCTAssertEqual(nested[0], PromptWeightSegment(text: "a ", weight: 1))
+        XCTAssertEqual(nested[1], PromptWeightSegment(text: "b ", weight: 2))
+        XCTAssertEqual(nested[2].text, "c")
+        XCTAssertEqual(nested[2].weight, 2.2, accuracy: 0.0001)
+        XCTAssertEqual(nested[3], PromptWeightSegment(text: " d", weight: 1))
+
+        XCTAssertEqual(
+            GenerationEngine.parsePromptWeights(#"literal \(paren\)"#),
+            [PromptWeightSegment(text: "literal (paren)", weight: 1)])
+    }
+
+    /// Qwen receives syntax-stripped text, while T5 is tokenized per weighted
+    /// segment. Magnitude stays in adapter weights and a negative inline weight
+    /// is represented only by the separate V sign sidecar.
+    func testInlineWeightedPromptSplitsMagnitudeFromNegPiPSign() throws {
+        let prompt = "portrait, (silver hair:1.5), (watermark:-0.4)"
+        let compiled = try GenerationEngine.compileConditioning(
+            positive: prompt, negative: "")
+
+        let qwen = try TokenizerLoader.qwen()
+        XCTAssertEqual(
+            compiled.qwenIDs,
+            qwen.encode(text: "portrait, silver hair, watermark", addSpecialTokens: false))
+
+        let t5 = try TokenizerLoader.t5()
+        let pieces: [(String, Float, Float)] = [
+            ("portrait, ", 1, 1),
+            ("silver hair", 1.5, 1),
+            (", ", 1, 1),
+            ("watermark", 0.4, -1),
+        ]
+        var expectedIDs: [Int] = []
+        var expectedWeights: [Float] = []
+        var expectedSigns: [Float] = []
+        for (text, weight, sign) in pieces {
+            let ids = t5.encode(text: text, addSpecialTokens: false)
+            expectedIDs.append(contentsOf: ids)
+            expectedWeights.append(contentsOf: repeatElement(weight, count: ids.count))
+            expectedSigns.append(contentsOf: repeatElement(sign, count: ids.count))
+        }
+        expectedIDs.append(1)
+        expectedWeights.append(1)
+        expectedSigns.append(1)
+
+        XCTAssertEqual(compiled.t5IDs, expectedIDs)
+        XCTAssertEqual(compiled.t5Weights.count, expectedWeights.count)
+        for index in expectedWeights.indices {
+            XCTAssertEqual(compiled.t5Weights[index], expectedWeights[index], accuracy: 0.0001)
+        }
+
+        let signs = try XCTUnwrap(compiled.negPiPValueSigns)
+        XCTAssertEqual(signs.count, LLMAdapterMetal.maximumTokens)
+        XCTAssertEqual(Array(signs.prefix(expectedSigns.count)), expectedSigns)
+        XCTAssertTrue(signs.dropFirst(expectedSigns.count).allSatisfy { $0 == 1 })
+    }
+
+    func testEscapedParenthesesAreLiteralAndDoNotAllocateNegPiPMask() throws {
+        let compiled = try GenerationEngine.compileConditioning(
+            positive: #"portrait \(smiling\)"#, negative: "")
+        let clean = "portrait (smiling)"
+        let qwen = try TokenizerLoader.qwen()
+        let t5 = try TokenizerLoader.t5()
+        XCTAssertEqual(compiled.qwenIDs, qwen.encode(text: clean, addSpecialTokens: false))
+        XCTAssertEqual(compiled.t5IDs, t5.encode(text: clean, addSpecialTokens: false) + [1])
+        XCTAssertEqual(compiled.t5Weights, [Float](repeating: 1, count: compiled.t5IDs.count))
+        XCTAssertNil(compiled.negPiPValueSigns)
+    }
+
     /// Two familiar UI boxes compile to ONE Qwen caption + ONE T5 target stream.
     /// Only rows sourced from the negative box receive -1 in the separate V mask;
     /// the adapter token weights stay positive so cross-K is unchanged.
@@ -94,6 +172,28 @@ final class TokenizerParityTests: XCTestCase {
         XCTAssertTrue(signs[negativeRange].allSatisfy { $0 == -1 })
         XCTAssertEqual(signs[positiveIDs.count + negativeIDs.count], 1, "EOS must remain positive")
         XCTAssertTrue(signs[(positiveIDs.count + negativeIDs.count + 1)...].allSatisfy { $0 == 1 })
+    }
+
+    func testNegativeBoxNestedWeightMultipliesOuterNegPiPWeight() throws {
+        let positive = "portrait"
+        let negative = "watermark, (bad hands:1.25)"
+        let compiled = try GenerationEngine.compileConditioning(
+            positive: positive, negative: negative)
+        let t5 = try TokenizerLoader.t5()
+        let positiveIDs = t5.encode(text: positive + ", ", addSpecialTokens: false)
+        let plainNegativeIDs = t5.encode(text: "watermark, ", addSpecialTokens: false)
+        let weightedNegativeIDs = t5.encode(text: "bad hands", addSpecialTokens: false)
+
+        let plainStart = positiveIDs.count
+        let weightedStart = plainStart + plainNegativeIDs.count
+        let weightedEnd = weightedStart + weightedNegativeIDs.count
+        XCTAssertTrue(compiled.t5Weights[plainStart..<weightedStart].allSatisfy { $0 == 1 })
+        for value in compiled.t5Weights[weightedStart..<weightedEnd] {
+            XCTAssertEqual(value, 1.25, accuracy: 0.0001)
+        }
+        let signs = try XCTUnwrap(compiled.negPiPValueSigns)
+        XCTAssertTrue(signs[plainStart..<weightedEnd].allSatisfy { $0 == -1 })
+        XCTAssertEqual(signs[weightedEnd], 1, "EOS must remain positive")
     }
 
     /// The mask is lexical task state, not process-global mutable state. A
