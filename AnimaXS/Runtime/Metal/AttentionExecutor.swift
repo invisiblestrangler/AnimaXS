@@ -121,12 +121,10 @@ final class AttentionExecutor {
     /// Receives the cheap query-tile counter (simple integer increment).
     var metrics: MetricsCollector?
 
-    /// Lazily created so a baseline/empty-negative generation does not even
-    /// instantiate the NegPiP image kernel. The mask itself is expanded once
-    /// per generation and reused; only the cheap V multiply runs on a cache miss.
-    private lazy var negPiPMultiply = MPSImageMultiply(device: context.device)
-    private var negPiPMaskGeneration: UInt64?
-    private var negPiPMaskLayoutKey: String?
+    /// The compact 512-entry sign vector is uploaded once per NegPiP lease.
+    /// The value multiply itself is a direct buffer-native Metal dispatch on a
+    /// cross-K/V cache miss; baseline generations never allocate/dispatch it.
+    private var negPiPSignGeneration: UInt64?
 
     init(context: MetalContext, tileRows: Int = defaultTileRows,
          numerics: AttentionNumerics = .legacy,
@@ -374,79 +372,60 @@ final class AttentionExecutor {
             throw AnimapkError.validation("NegPiP requires a zero-based DiT V buffer")
         }
 
-        let width: Int
-        let height: Int
-        let layoutKey: String
+        let rowWidth: Int
+        let headMajor: UInt32
         switch layout {
         case .tokenMajor(let tokenStride):
             guard tokenStride == heads * headDim else {
                 throw AnimapkError.validation("NegPiP token-major stride does not match DiT model width")
             }
-            width = tokenStride
-            height = keyCount
-            layoutKey = "token"
+            rowWidth = tokenStride
+            headMajor = 0
         case .headMajor:
-            width = headDim
-            height = kvHeads * keyCount
-            layoutKey = "head"
+            rowWidth = headDim
+            headMajor = 1
         }
 
-        let rowBytes = try checkedProduct(width, MemoryLayout<Float16>.stride)
-        let bytes = try checkedProduct(rowBytes, height)
-        let alignment = context.device.minimumLinearTextureAlignment(for: .r16Float)
-        guard alignment > 0, rowBytes.isMultiple(of: alignment), value.length >= bytes else {
-            throw AnimapkError.validation("NegPiP V layout is not compatible with an r16Float buffer texture")
-        }
-        // All production DiT projection/transposed V scratch and the unit-test
-        // oracle use BufferPool/.storageModeShared. Linear buffer textures must
-        // declare the same storage mode as their backing buffer; leaving the
-        // descriptor at its default causes Metal validation to abort.
-        guard value.storageMode == .shared else {
-            throw AnimapkError.validation("NegPiP requires shared DiT V scratch")
+        let elementCount = try checkedProduct(kvHeads, keyCount, headDim)
+        let bytes = try checkedProduct(elementCount, MemoryLayout<Float16>.stride)
+        guard value.length >= bytes else {
+            throw AnimapkError.validation("NegPiP V buffer is smaller than the DiT cross-attention tensor")
         }
 
-        let mask = buffers.buffer(key: "attention.negpip.mask.\(layoutKey)", bytes: bytes)
-        if negPiPMaskGeneration != snapshot.lease || negPiPMaskLayoutKey != layoutKey {
-            let pointer = mask.contents().bindMemory(
-                to: Float16.self, capacity: bytes / MemoryLayout<Float16>.stride)
-            switch layout {
-            case .tokenMajor:
-                for token in 0..<keyCount {
-                    let sign = Float16(snapshot.signs[token])
-                    let base = token * width
-                    for column in 0..<width { pointer[base + column] = sign }
-                }
-            case .headMajor:
-                for head in 0..<kvHeads {
-                    for token in 0..<keyCount {
-                        let sign = Float16(snapshot.signs[token])
-                        let base = (head * keyCount + token) * headDim
-                        for column in 0..<headDim { pointer[base + column] = sign }
-                    }
-                }
+        // Keep only one sign per context token (~1 KiB), rather than expanding
+        // a 2 MiB image mask. The upload happens once for this immutable lease.
+        let signBytes = try checkedProduct(keyCount, MemoryLayout<Float16>.stride)
+        let signs = buffers.buffer(key: "attention.negpip.signs.f16", bytes: signBytes)
+        if negPiPSignGeneration != snapshot.lease {
+            let pointer = signs.contents().bindMemory(to: Float16.self, capacity: keyCount)
+            for token in 0..<keyCount {
+                pointer[token] = Float16(snapshot.signs[token])
             }
-            negPiPMaskGeneration = snapshot.lease
-            negPiPMaskLayoutKey = layoutKey
+            negPiPSignGeneration = snapshot.lease
         }
 
-        let masked = buffers.buffer(key: "attention.negpip.value.\(layoutKey)", bytes: bytes)
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .r16Float, width: width, height: height, mipmapped: false)
-        descriptor.storageMode = .shared
-        descriptor.usage = [.shaderRead, .shaderWrite]
-        guard let sourceTexture = value.makeTexture(
-                descriptor: descriptor, offset: valueOffset, bytesPerRow: rowBytes),
-              let maskTexture = mask.makeTexture(
-                descriptor: descriptor, offset: 0, bytesPerRow: rowBytes),
-              let destinationTexture = masked.makeTexture(
-                descriptor: descriptor, offset: 0, bytesPerRow: rowBytes) else {
-            throw AnimapkError.validation("failed to create NegPiP buffer-backed textures")
+        let masked = buffers.buffer(key: "attention.negpip.value.f16", bytes: bytes)
+        let pipeline = try context.pipeline(named: "negpip_apply_value_signs_half")
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create NegPiP V-sign encoder")
         }
-        negPiPMultiply.encode(
-            commandBuffer: commandBuffer,
-            primaryTexture: sourceTexture,
-            secondaryTexture: maskTexture,
-            destinationTexture: destinationTexture)
+        var count = UInt32(elementCount)
+        var rowWidthU = UInt32(rowWidth)
+        var tokenCountU = UInt32(keyCount)
+        var headMajorU = headMajor
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(value, offset: valueOffset, index: 0)
+        encoder.setBuffer(signs, offset: 0, index: 1)
+        encoder.setBuffer(masked, offset: 0, index: 2)
+        encoder.setBytes(&count, length: 4, index: 3)
+        encoder.setBytes(&rowWidthU, length: 4, index: 4)
+        encoder.setBytes(&tokenCountU, length: 4, index: 5)
+        encoder.setBytes(&headMajorU, length: 4, index: 6)
+        let threads = min(pipeline.threadExecutionWidth, pipeline.maxTotalThreadsPerThreadgroup)
+        encoder.dispatchThreads(
+            MTLSize(width: elementCount, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1))
+        encoder.endEncoding()
         return (masked, 0)
     }
 
