@@ -345,6 +345,31 @@ jobs:
               "xcodebuild build-for-testing/test-without-building (fail-fast subset then full suite)"
           fi
           exit 0
+      - name: Capture main UI preview
+        id: ui_preview
+        if: ${{ steps.simulator.outputs.status == '0' }}
+        continue-on-error: true
+        env:
+          UDID: ${{ steps.sim.outputs.sim }}
+        run: |
+          set -euo pipefail
+          APP=".derivedData/Build/Products/Debug-iphonesimulator/AnimaXS.app"
+          [ -d "$APP" ] || { echo "No built simulator app at $APP"; exit 1; }
+          xcrun simctl terminate "$UDID" com.invisiblestrangler.AnimaXS 2>/dev/null || true
+          xcrun simctl install "$UDID" "$APP"
+          xcrun simctl launch "$UDID" com.invisiblestrangler.AnimaXS
+          sleep 3
+          mkdir -p "$RUNNER_TEMP/ui-preview"
+          xcrun simctl io "$UDID" screenshot "$RUNNER_TEMP/ui-preview/main.png"
+      - name: Upload UI preview
+        if: ${{ steps.ui_preview.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: anima-ui-preview-${{ github.sha }}
+          path: ${{ runner.temp }}/ui-preview/main.png
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Post simulator diagnostics to PR
         if: ${{ github.event_name == 'pull_request' && steps.simulator.outputs.status != '0' }}
         uses: actions/github-script@v8
