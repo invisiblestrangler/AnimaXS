@@ -1,0 +1,48 @@
+name: One-shot XcodeGen sync
+
+on:
+  push:
+    branches: [feature/ui-negative-prompt]
+
+permissions:
+  contents: write
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+  XCODEGEN_VERSION: 2.46.0
+  XCODEGEN_ZIP_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
+
+jobs:
+  sync:
+    if: ${{ github.event.head_commit.message == 'Trigger one-shot XcodeGen sync' }}
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Select Xcode 26.3
+        run: |
+          sudo xcode-select -s "$DEVELOPER_DIR"
+          xcodebuild -version
+      - name: Install pinned XcodeGen
+        run: |
+          curl --fail --location --silent --show-error \
+            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
+            --output "$RUNNER_TEMP/xcodegen.zip"
+          echo "${XCODEGEN_ZIP_SHA256}  $RUNNER_TEMP/xcodegen.zip" | shasum -a 256 --check
+          ditto -x -k "$RUNNER_TEMP/xcodegen.zip" "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/xcodegen/bin" >> "$GITHUB_PATH"
+      - name: Regenerate and commit canonical project
+        run: |
+          export PATH="$RUNNER_TEMP/xcodegen/bin:$PATH"
+          xcodegen generate
+          git diff -- AnimaXS.xcodeproj/project.pbxproj
+          git add AnimaXS.xcodeproj/project.pbxproj
+          if git diff --cached --quiet; then
+            echo "Project already synchronized"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Regenerate Xcode project for app icon"
+          git push origin HEAD:feature/ui-negative-prompt
