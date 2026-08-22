@@ -30,13 +30,20 @@ struct ResolvedNegPiP: Equatable {
 
 /// The dual-tokenized conditioning contract consumed by the production text
 /// stages. `negPiPValueSigns == nil` is the exact historical baseline path.
-/// When present it is always 512 rows: +1 for positive/padding/EOS rows and -1
-/// for rows originating in the user-facing negative prompt.
+/// When present it is always 512 rows: +1 for ordinary/padding/EOS rows and -1
+/// for negative-weight rows from inline syntax or the user-facing negative box.
 struct CompiledPromptConditioning: Equatable {
     let qwenIDs: [Int]
     let t5IDs: [Int]
     let t5Weights: [Float]
     let negPiPValueSigns: [Float]?
+}
+
+/// One syntax-stripped prompt segment and its accumulated ComfyUI-compatible
+/// weight. Negative weight sign is split from magnitude only after T5 tokenization.
+struct PromptWeightSegment: Equatable {
+    let text: String
+    var weight: Float
 }
 
 /// Production model resolution: exactly three base packs (K002 §5.1), plus
@@ -307,11 +314,65 @@ struct GenerationEngine {
 
     // MARK: - Conditioning
 
-    /// Compiles the familiar two-box UI into Anima's one CFG=1 conditioning
-    /// stream. Empty negative input deliberately executes the exact historical
-    /// tokenizer recipe. With NegPiP enabled, both encoders see one combined
-    /// caption; the adapter weights remain positive and only the separately
-    /// carried V-sign mask encodes negative influence.
+    /// ComfyUI-compatible parser mirrored from Anima WebGPU:
+    /// `(x)` = ×1.1, `(x:w)` = ×w, nesting multiplies, and `\(`/`\)` escape
+    /// literal parentheses. Syntax is removed before Qwen sees the caption.
+    static func parsePromptWeights(_ text: String) -> [PromptWeightSegment] {
+        var output: [PromptWeightSegment] = []
+        var starts: [Int] = []
+        var buffer = ""
+        let characters = Array(text)
+
+        func flush() {
+            guard !buffer.isEmpty else { return }
+            output.append(PromptWeightSegment(text: buffer, weight: 1))
+            buffer = ""
+        }
+
+        var index = 0
+        while index < characters.count {
+            let character = characters[index]
+            if character == "\\", index + 1 < characters.count,
+               characters[index + 1] == "(" || characters[index + 1] == ")" {
+                buffer.append(characters[index + 1])
+                index += 2
+                continue
+            }
+            if character == "(" {
+                flush()
+                starts.append(output.count)
+                index += 1
+                continue
+            }
+            if character == ")" {
+                var weight: Float = 1.1
+                if !starts.isEmpty,
+                   let explicit = explicitPromptWeight(in: buffer) {
+                    buffer = explicit.text
+                    weight = explicit.weight
+                }
+                flush()
+                if let start = starts.popLast(), start < output.count {
+                    for segmentIndex in start..<output.count {
+                        output[segmentIndex].weight *= weight
+                    }
+                }
+                index += 1
+                continue
+            }
+            buffer.append(character)
+            index += 1
+        }
+        flush()
+        return output
+    }
+
+    /// Compiles the two-box UI and inline weighting syntax into Anima's one
+    /// CFG=1 conditioning stream. A plain positive prompt with an empty
+    /// negative box deliberately executes the exact historical tokenizer path.
+    /// Otherwise Qwen gets syntax-stripped text, T5 is tokenized per weighted
+    /// segment, magnitude is applied at the adapter output, and only the sign
+    /// is carried to the cross-attention V-only NegPiP boundary.
     static func compileConditioning(
         positive: String,
         negative: String
@@ -319,8 +380,13 @@ struct GenerationEngine {
         let qwenTokenizer = try TokenizerLoader.qwen()
         let t5Tokenizer = try TokenizerLoader.t5()
         let hasNegative = !negative.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let positiveSegments = parsePromptWeights(positive)
+        let positiveClean = positiveSegments.map(\.text).joined()
+        let positiveUsesWeightSyntax = positiveClean != positive ||
+            positiveSegments.contains { $0.weight != 1 }
 
-        if !hasNegative {
+        // Feature-off path: preserve the exact pre-NegPiP recipe and golden IDs.
+        if !hasNegative && !positiveUsesWeightSyntax {
             let qwen = qwenTokenizer.encode(text: positive, addSpecialTokens: false)
             guard !qwen.isEmpty else {
                 throw GenerationError.tokenizer("Qwen tokenizer produced no tokens")
@@ -333,48 +399,84 @@ struct GenerationEngine {
                 negPiPValueSigns: nil)
         }
 
-        let separator: String
-        if positive.last?.isWhitespace == true || positive.hasSuffix(",") {
-            separator = " "
+        let weightedSource: String
+        if hasNegative {
+            let separator: String
+            if positive.last?.isWhitespace == true || positive.hasSuffix(",") {
+                separator = " "
+            } else {
+                separator = ", "
+            }
+            // Match the public Anima NegPiP recipe: the whole negative box is
+            // one outer -1 group, so inner `(tag:1.2)` naturally becomes -1.2.
+            weightedSource = positive + separator + "(" + negative + ":-1)"
         } else {
-            separator = ", "
+            weightedSource = positive
         }
-        let combined = positive + separator + negative
-        let qwen = qwenTokenizer.encode(text: combined, addSpecialTokens: false)
+
+        let segments = parsePromptWeights(weightedSource)
+        guard segments.allSatisfy({ $0.weight.isFinite }) else {
+            throw GenerationError.tokenizer("Prompt weight must be a finite number")
+        }
+        let cleanCaption = segments.map(\.text).joined()
+        let qwen = qwenTokenizer.encode(text: cleanCaption, addSpecialTokens: false)
         guard !qwen.isEmpty else {
             throw GenerationError.tokenizer("Qwen tokenizer produced no tokens")
         }
         guard qwen.count <= QwenEncoderMetal.maximumTokens else {
             throw GenerationError.tokenizer(
-                "Combined positive + negative prompt is too long for Qwen (\(qwen.count)/\(QwenEncoderMetal.maximumTokens) tokens).")
+                "Weighted positive + negative prompt is too long for Qwen (\(qwen.count)/\(QwenEncoderMetal.maximumTokens) tokens).")
         }
 
-        // Keep the split explicit instead of using negative adapter weights:
-        // negative adapter weights would alter BOTH cross-K and cross-V. NegPiP
-        // requires K to remain unchanged and flips only V after projection.
-        let positiveTarget = t5Tokenizer.encode(
-            text: positive + separator, addSpecialTokens: false)
-        let negativeTarget = t5Tokenizer.encode(
-            text: negative, addSpecialTokens: false)
-        let t5 = positiveTarget + negativeTarget + [1]
-        guard t5.count <= LLMAdapterMetal.maximumTokens else {
+        // Reference behavior tokenizes T5 independently per weighted segment,
+        // removes each segment's implicit special handling, then appends EOS once.
+        var t5IDs: [Int] = []
+        var t5Weights: [Float] = []
+        var rowSigns: [Float] = []
+        for segment in segments where !segment.text.isEmpty {
+            let ids = t5Tokenizer.encode(text: segment.text, addSpecialTokens: false)
+            let magnitude = abs(segment.weight)
+            let sign: Float = segment.weight < 0 ? -1 : 1
+            t5IDs.append(contentsOf: ids)
+            t5Weights.append(contentsOf: repeatElement(magnitude, count: ids.count))
+            rowSigns.append(contentsOf: repeatElement(sign, count: ids.count))
+        }
+        t5IDs.append(1)
+        t5Weights.append(1)
+        rowSigns.append(1)
+
+        guard t5IDs.count <= LLMAdapterMetal.maximumTokens else {
             throw GenerationError.tokenizer(
-                "Combined positive + negative prompt is too long for the Anima adapter (\(t5.count)/\(LLMAdapterMetal.maximumTokens) tokens).")
+                "Weighted positive + negative prompt is too long for the Anima adapter (\(t5IDs.count)/\(LLMAdapterMetal.maximumTokens) tokens).")
         }
 
-        var signs = [Float](repeating: 1.0, count: LLMAdapterMetal.maximumTokens)
-        let negativeStart = positiveTarget.count
-        let negativeEnd = negativeStart + negativeTarget.count
-        if negativeStart < negativeEnd {
-            for row in negativeStart..<negativeEnd { signs[row] = -1.0 }
+        let negPiPValueSigns: [Float]?
+        if rowSigns.contains(-1) {
+            negPiPValueSigns = rowSigns + [Float](
+                repeating: 1, count: LLMAdapterMetal.maximumTokens - rowSigns.count)
+        } else {
+            negPiPValueSigns = nil
         }
-        // EOS and zero-padding rows intentionally remain +1. Their adapter
-        // outputs are normal/zero; the sign is semantically inert there.
+
         return CompiledPromptConditioning(
             qwenIDs: qwen,
-            t5IDs: t5,
-            t5Weights: [Float](repeating: 1.0, count: t5.count),
-            negPiPValueSigns: signs)
+            t5IDs: t5IDs,
+            t5Weights: t5Weights,
+            negPiPValueSigns: negPiPValueSigns)
+    }
+
+    private static func explicitPromptWeight(in buffer: String) -> (text: String, weight: Float)? {
+        let pattern = #"^([\s\S]*?):([+-]?\d+(?:\.\d+)?)\s*$"#
+        guard let expression = try? NSRegularExpression(pattern: pattern),
+              let match = expression.firstMatch(
+                in: buffer, range: NSRange(buffer.startIndex..., in: buffer)),
+              match.numberOfRanges == 3,
+              let textRange = Range(match.range(at: 1), in: buffer),
+              let weightRange = Range(match.range(at: 2), in: buffer),
+              let weight = Float(buffer[weightRange]) else {
+            return nil
+        }
+        return (String(buffer[textRange]), weight)
     }
 
     // MARK: - Stage helpers (lexical lifetime boundaries)
