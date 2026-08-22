@@ -682,6 +682,7 @@ final class DiTBlockExecutor {
         let kTokenCount = keyRows * Self.dim
         let cacheEnabled = cross && crossKVCache != nil
         let cacheHit = cacheEnabled && (crossKVCache?.isReady(blockIndex) ?? false)
+        var attentionValue = vToken
 
         if cacheHit, let cache = crossKVCache {
             guard let encoder = command.makeBlitCommandEncoder() else {
@@ -715,6 +716,15 @@ final class DiTBlockExecutor {
                                   rope: rope, output: kToken, slot: slot)
             }
             try encodeHalfComputeBoundary(command, kToken, count: kTokenCount)
+            if cross {
+                attentionValue = try attention.negPiPValueIfNeeded(
+                    commandBuffer: command,
+                    value: vToken, valueOffset: 0,
+                    heads: Self.heads, keyCount: keyRows, headDim: Self.headDim,
+                    kvHeads: Self.heads,
+                    layout: .tokenMajor(tokenStride: Self.dim),
+                    probe: .crossScores).buffer
+            }
             if cacheEnabled, let cache = crossKVCache {
                 guard let encoder = command.makeBlitCommandEncoder() else {
                     throw AnimapkError.validation("failed to create ANE cross-K/V cache store encoder")
@@ -722,7 +732,7 @@ final class DiTBlockExecutor {
                 encoder.copy(from: kToken, sourceOffset: 0, to: cache.buffer,
                              destinationOffset: cache.kOffset(block: blockIndex),
                              size: kTokenCount * MemoryLayout<Float16>.stride)
-                encoder.copy(from: vToken, sourceOffset: 0, to: cache.buffer,
+                encoder.copy(from: attentionValue, sourceOffset: 0, to: cache.buffer,
                              destinationOffset: cache.vOffset(block: blockIndex),
                              size: kTokenCount * MemoryLayout<Float16>.stride)
                 encoder.endEncoding()
@@ -749,11 +759,12 @@ final class DiTBlockExecutor {
         if strided {
             let attended = buffer("dit.attended.token.f16", Self.tokens * Self.dim, Float16.self)
             try attention.encode(
-                commandBuffer: command, query: qToken, key: kToken, value: vToken,
+                commandBuffer: command, query: qToken, key: kToken, value: attentionValue,
                 output: attended, heads: Self.heads, queryCount: Self.tokens,
                 keyCount: keyRows, headDim: Self.headDim,
                 probe: cross ? .crossScores : .selfScores,
-                layout: .tokenMajor(tokenStride: Self.dim))
+                layout: .tokenMajor(tokenStride: Self.dim),
+                negPiPValueAlreadyMasked: cross)
             try encodeHalfComputeBoundary(command, attended, count: Self.tokens * Self.dim)
             if NumericalMonitor.detailedProbesEnabled, let monitor {
                 try monitor.encodeProbe(command, values: attended, count: Self.tokens * Self.dim,
@@ -767,13 +778,14 @@ final class DiTBlockExecutor {
         let vHead = buffer("dit.v.head.f16", kTokenCount, Float16.self)
         try encodeTranspose(command, input: qToken, output: qHead, tokens: Self.tokens, toHeadMajor: true)
         try encodeTranspose(command, input: kToken, output: kHead, tokens: keyRows, toHeadMajor: true)
-        try encodeTranspose(command, input: vToken, output: vHead, tokens: keyRows, toHeadMajor: true)
+        try encodeTranspose(command, input: attentionValue, output: vHead, tokens: keyRows, toHeadMajor: true)
         let attendedHead = buffer("dit.attended.head.f16", Self.tokens * Self.dim, Float16.self)
         try attention.encode(
             commandBuffer: command, query: qHead, key: kHead, value: vHead,
             output: attendedHead, heads: Self.heads, queryCount: Self.tokens,
             keyCount: keyRows, headDim: Self.headDim,
-            probe: cross ? .crossScores : .selfScores)
+            probe: cross ? .crossScores : .selfScores,
+            negPiPValueAlreadyMasked: cross)
         try encodeHalfComputeBoundary(command, attendedHead, count: Self.tokens * Self.dim)
         if NumericalMonitor.detailedProbesEnabled, let monitor {
             try monitor.encodeProbe(command, values: attendedHead, count: Self.tokens * Self.dim,
@@ -1069,6 +1081,7 @@ final class DiTBlockExecutor {
         let keyRows = cross ? Self.contextTokens : Self.tokens
         let cacheEnabled = cross && crossKVCache != nil
         let cacheHit = cacheEnabled && (crossKVCache?.isReady(blockIndex) ?? false)
+        var attentionValue = vToken
         if cacheHit, let cache = crossKVCache {
             if let encoder = command.makeBlitCommandEncoder() {
                 encoder.copy(from: cache.buffer, sourceOffset: cache.kOffset(block: blockIndex),
@@ -1107,12 +1120,21 @@ final class DiTBlockExecutor {
                                   rope: rope, output: kToken, slot: slot)
             }
             try encodeHalfComputeBoundary(command, kToken, count: kTokenCount)
+            if cross {
+                attentionValue = try attention.negPiPValueIfNeeded(
+                    commandBuffer: command,
+                    value: vToken, valueOffset: 0,
+                    heads: Self.heads, keyCount: keyRows, headDim: Self.headDim,
+                    kvHeads: Self.heads,
+                    layout: .tokenMajor(tokenStride: Self.dim),
+                    probe: .crossScores).buffer
+            }
             if cacheEnabled, let cache = crossKVCache {
                 if let encoder = command.makeBlitCommandEncoder() {
                     encoder.copy(from: kToken, sourceOffset: 0, to: cache.buffer,
                                  destinationOffset: cache.kOffset(block: blockIndex),
                                  size: kTokenCount * MemoryLayout<Float16>.stride)
-                    encoder.copy(from: vToken, sourceOffset: 0, to: cache.buffer,
+                    encoder.copy(from: attentionValue, sourceOffset: 0, to: cache.buffer,
                                  destinationOffset: cache.vOffset(block: blockIndex),
                                  size: kTokenCount * MemoryLayout<Float16>.stride)
                     encoder.endEncoding()
@@ -1139,11 +1161,12 @@ final class DiTBlockExecutor {
         if strided {
             let attended = buffer("dit.attended.token.f16", Self.tokens * Self.dim, Float16.self)
             try attention.encode(
-                commandBuffer: command, query: qToken, key: kToken, value: vToken,
+                commandBuffer: command, query: qToken, key: kToken, value: attentionValue,
                 output: attended, heads: Self.heads, queryCount: Self.tokens,
                 keyCount: keyRows, headDim: Self.headDim,
                 probe: cross ? .crossScores : .selfScores,
-                layout: .tokenMajor(tokenStride: Self.dim))
+                layout: .tokenMajor(tokenStride: Self.dim),
+                negPiPValueAlreadyMasked: cross)
             try encodeHalfComputeBoundary(command, attended, count: Self.tokens * Self.dim)
             if NumericalMonitor.detailedProbesEnabled, let monitor {
                 try monitor.encodeProbe(command, values: attended, count: Self.tokens * Self.dim,
@@ -1158,13 +1181,14 @@ final class DiTBlockExecutor {
                                 tokens: Self.tokens, toHeadMajor: true)
             try encodeTranspose(command, input: kToken, output: kHead,
                                 tokens: keyRows, toHeadMajor: true)
-            try encodeTranspose(command, input: vToken, output: vHead,
+            try encodeTranspose(command, input: attentionValue, output: vHead,
                                 tokens: keyRows, toHeadMajor: true)
             let attendedHead = buffer("dit.attended.head.f16", Self.tokens * Self.dim, Float16.self)
             try attention.encode(commandBuffer: command, query: qHead, key: kHead, value: vHead,
                                  output: attendedHead, heads: Self.heads, queryCount: Self.tokens,
                                  keyCount: keyRows, headDim: Self.headDim,
-                                 probe: cross ? .crossScores : .selfScores)
+                                 probe: cross ? .crossScores : .selfScores,
+                                 negPiPValueAlreadyMasked: cross)
             try encodeHalfComputeBoundary(command, attendedHead, count: Self.tokens * Self.dim)
             if NumericalMonitor.detailedProbesEnabled, let monitor {
                 try monitor.encodeProbe(command, values: attendedHead, count: Self.tokens * Self.dim,

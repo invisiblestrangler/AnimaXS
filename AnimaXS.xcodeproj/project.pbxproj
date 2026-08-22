@@ -43,6 +43,7 @@
 		49F5054A68EAECB93D9D643A /* case1_dit_context.f32 in Resources */ = {isa = PBXBuildFile; fileRef = 8576A01525AFE9CF6314191E /* case1_dit_context.f32 */; };
 		4B59C78B9770A5CC294C79BE /* ANEW8MLPBackend.swift in Sources */ = {isa = PBXBuildFile; fileRef = 451C73A98E67AF4B94675559 /* ANEW8MLPBackend.swift */; };
 		4CF42C1FB7991B03E9360B0D /* DitRoPE.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63D78F224C62E12AE65A076F /* DitRoPE.swift */; };
+		54F73584F0B4594A2C146A9C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 6019A34511A5D97971EE2D7B /* Assets.xcassets */; };
 		5506617DD3116BF72E8154BD /* QuantDecoders.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A12B10FC621499B2CA281B3 /* QuantDecoders.swift */; };
 		556D3B10877CD4D85A9D4D9F /* TestPackFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 830D15B6FF7E37A06B2C08B2 /* TestPackFactory.swift */; };
 		5A84CFBB6B28FE55EBE82D86 /* AnimapkParsingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1506F4F789C146E6B646F18C /* AnimapkParsingTests.swift */; };
@@ -182,6 +183,7 @@
 		52E7305B1912F5357ACCAEE5 /* Modulation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Modulation.swift; sourceTree = "<group>"; };
 		53EB575530122961AD9BBDBA /* ANERingProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ANERingProbe.swift; sourceTree = "<group>"; };
 		5679855EA2DD29C171356B8B /* case1_decoded_rgb8.bin */ = {isa = PBXFileReference; lastKnownFileType = archive.macbinary; path = case1_decoded_rgb8.bin; sourceTree = "<group>"; };
+		6019A34511A5D97971EE2D7B /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		607907C1088D17DCE300B330 /* GenerationCoordinatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GenerationCoordinatorTests.swift; sourceTree = "<group>"; };
 		6223C8A55E7E942B28480E48 /* Wan21LatentFormatTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wan21LatentFormatTests.swift; sourceTree = "<group>"; };
 		63A581535AFB0BECB025A73F /* QwenEncoderMetalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QwenEncoderMetalTests.swift; sourceTree = "<group>"; };
@@ -326,6 +328,7 @@
 			isa = PBXGroup;
 			children = (
 				1E0C767F4DA500EA0FBCB9A8 /* AnimaXS-Bridging-Header.h */,
+				6019A34511A5D97971EE2D7B /* Assets.xcassets */,
 				EFA18C3237EA1D76A8C2CB94 /* Info.plist */,
 				6524648BBA022DD295EB8F51 /* App */,
 				887036D8E2A1A0017DA5BA1F /* Resources */,
@@ -661,6 +664,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				54F73584F0B4594A2C146A9C /* Assets.xcassets in Resources */,
 				2C3B1F704B3B393A65A60E8B /* Conv2048W8Template.bundle in Resources */,
 				EED314EA6D67446AAFE181EC /* README.md in Resources */,
 				2F02983AD55700559562DA54 /* qwen_tokenizer.json in Resources */,

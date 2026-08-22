@@ -16,6 +16,32 @@ final class MetalContext {
     private let library: MTLLibrary
     private var pipelineCache: [String: MTLComputePipelineState] = [:]
 
+    /// Tiny NegPiP-only kernel kept inline so adding the feature does not force
+    /// another large generated-project/source membership change. It is compiled
+    /// lazily and cached in `pipelineCache`: normal/empty-negative generations
+    /// never compile it. The kernel is deliberately buffer-native — no MPS image
+    /// objects or buffer-backed texture validation at this boundary.
+    private static let negPiPValueSignKernel = """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    kernel void negpip_apply_value_signs_half(
+        device const half *source [[buffer(0)]],
+        device const half *signs [[buffer(1)]],
+        device half *destination [[buffer(2)]],
+        constant uint &count [[buffer(3)]],
+        constant uint &rowWidth [[buffer(4)]],
+        constant uint &tokenCount [[buffer(5)]],
+        constant uint &headMajor [[buffer(6)]],
+        uint gid [[thread_position_in_grid]])
+    {
+        if (gid >= count) return;
+        uint row = gid / rowWidth;
+        uint token = headMajor != 0 ? row % tokenCount : row;
+        destination[gid] = source[gid] * signs[token];
+    }
+    """
+
     // Runtime capability probe (runbook §21)
     private(set) var supportsApple5: Bool = false
     private(set) var maxBufferLength: Int = 0
@@ -53,10 +79,25 @@ final class MetalContext {
     /// Fetch (or build) a compute pipeline state for a named kernel.
     func pipeline(named name: String) throws -> MTLComputePipelineState {
         if let p = pipelineCache[name] { return p }
-        guard let fn = library.makeFunction(name: name) else {
+
+        let function: MTLFunction
+        if let bundled = library.makeFunction(name: name) {
+            function = bundled
+        } else if name == "negpip_apply_value_signs_half" {
+            // Public Metal runtime compilation is used only for this tiny lazy
+            // micro-kernel. The resulting pipeline is cached for the lifetime
+            // of the app's MetalContext, so it is not a per-block/per-step cost.
+            let auxiliary = try device.makeLibrary(
+                source: Self.negPiPValueSignKernel, options: nil)
+            guard let compiled = auxiliary.makeFunction(name: name) else {
+                throw AnimapkError.validation("Metal kernel '\(name)' could not be compiled")
+            }
+            function = compiled
+        } else {
             throw AnimapkError.validation("Metal kernel '\(name)' not found in library")
         }
-        let p = try device.makeComputePipelineState(function: fn)
+
+        let p = try device.makeComputePipelineState(function: function)
         pipelineCache[name] = p
         return p
     }

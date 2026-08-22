@@ -2,6 +2,33 @@ import Foundation
 import Metal
 import MetalPerformanceShaders
 
+/// Immutable NegPiP V signs scoped to one diffusion task. Task-local state is
+/// important here: Diagnostics or tests running concurrently must never observe
+/// the creative generation's negative prompt.
+struct NegPiPValueMaskSnapshot: Sendable {
+    let lease: UInt64
+    let signs: [Float]
+}
+
+enum NegPiPGenerationContext {
+    @TaskLocal static var active: NegPiPValueMaskSnapshot?
+
+    static func make(signs: [Float]?) throws -> NegPiPValueMaskSnapshot? {
+        guard let signs else { return nil }
+        guard signs.count == LLMAdapterMetal.maximumTokens,
+              signs.allSatisfy({ $0 == 1 || $0 == -1 }) else {
+            throw AnimapkError.validation("NegPiP sign mask must contain exactly 512 values of +1/-1")
+        }
+        // A compiler result containing only +1 is equivalent to baseline and
+        // must not allocate/encode any NegPiP GPU work.
+        guard signs.contains(-1) else { return nil }
+        return NegPiPValueMaskSnapshot(
+            lease: UInt64.random(in: 1...UInt64.max), signs: signs)
+    }
+
+    static func snapshot() -> NegPiPValueMaskSnapshot? { active }
+}
+
 enum AttentionNumerics: String, CaseIterable {
     case legacy
     case fp32ScoresAndSoftmax
@@ -35,7 +62,7 @@ enum DiTAttentionBackend: String, Codable, CaseIterable {
     /// no token↔head transposes, full score tile).
     case stridedTokenMajorMPS
     /// P7-A: streaming/online-softmax MPS — MPS QK/PV per KEY CHUNK with a
-    /// running FP32 max/sum and an FP32 output accumulator, so no full
+    /// running FP32 max/sum and FP32 output accumulator, so no full
     /// `[queryTile, keyCount]` score tile is ever live.
     case streamingMPS
     /// P7-B: DiT-specialized pure-Metal Flash-style online attention
@@ -94,6 +121,11 @@ final class AttentionExecutor {
     /// Receives the cheap query-tile counter (simple integer increment).
     var metrics: MetricsCollector?
 
+    /// The compact 512-entry sign vector is uploaded once per NegPiP lease.
+    /// The value multiply itself is a direct buffer-native Metal dispatch on a
+    /// cross-K/V cache miss; baseline generations never allocate/dispatch it.
+    private var negPiPSignGeneration: UInt64?
+
     init(context: MetalContext, tileRows: Int = defaultTileRows,
          numerics: AttentionNumerics = .legacy,
          monitor: NumericalMonitor? = nil,
@@ -111,8 +143,6 @@ final class AttentionExecutor {
 
     func maximumScoreScratchBytes(keyCount: Int, queryCount: Int? = nil) throws -> Int {
         guard keyCount > 0 else { throw AnimapkError.validation("attention key count must be positive") }
-        // Bound the configured tile by the real query count so scratch sizing
-        // never over-allocates beyond what the row loop will actually touch.
         let effectiveTile = queryCount.map { min(tileRows, $0) } ?? tileRows
         let elementBytes = numerics == .legacy
             ? MemoryLayout<Float16>.stride : MemoryLayout<Float>.stride
@@ -129,7 +159,8 @@ final class AttentionExecutor {
         keyValueHeads: Int? = nil,
         causal: Bool = false,
         probe: NumericalMonitor.Probe? = nil,
-        layout: AttentionInputLayout? = nil
+        layout: AttentionInputLayout? = nil,
+        negPiPValueAlreadyMasked: Bool = false
     ) throws {
         let kvHeads = keyValueHeads ?? heads
         let inputLayout = layout ?? self.layout
@@ -142,6 +173,22 @@ final class AttentionExecutor {
                      outputOffset: outputOffset, heads: heads, queryCount: queryCount,
                      keyCount: keyCount, headDim: headDim, keyValueHeads: kvHeads,
                      causal: causal, layout: inputLayout)
+
+        // Direct callers/tests still get the V-only NegPiP boundary here. The
+        // production DiT path applies the same primitive before its cross-K/V
+        // cache store, then passes `negPiPValueAlreadyMasked` so cache hits are
+        // never flipped a second time. K is never touched.
+        let effectiveValue: (buffer: MTLBuffer, offset: Int)
+        if negPiPValueAlreadyMasked {
+            effectiveValue = (value, valueOffset)
+        } else {
+            effectiveValue = try negPiPValueIfNeeded(
+                commandBuffer: commandBuffer,
+                value: value, valueOffset: valueOffset,
+                heads: heads, keyCount: keyCount, headDim: headDim,
+                kvHeads: kvHeads, layout: inputLayout, probe: probe)
+        }
+
         let halfBytes = MemoryLayout<Float16>.stride
         let scoreScratch = buffers.buffer(
             key: "attention.scores.fp16", bytes: try maximumScoreScratchBytes(keyCount: keyCount, queryCount: queryCount))
@@ -158,7 +205,8 @@ final class AttentionExecutor {
                     "P4 strided token-major attention does not support fp32ScoresAndSoftmax; select baseline numerics")
             }
             try encodeFP32(commandBuffer: commandBuffer, query: query, queryOffset: queryOffset,
-                           key: key, keyOffset: keyOffset, value: value, valueOffset: valueOffset,
+                           key: key, keyOffset: keyOffset,
+                           value: effectiveValue.buffer, valueOffset: effectiveValue.offset,
                            output: output, outputOffset: outputOffset, heads: heads,
                            queryCount: queryCount, keyCount: keyCount, headDim: headDim,
                            kvHeads: kvHeads, causal: causal, probe: probe)
@@ -166,38 +214,30 @@ final class AttentionExecutor {
         }
 
         if inputLayout.isTokenMajor {
-            // P4-F: the BF16 boundary round is contiguous in the legacy layout
-            // but would corrupt the strided token-major layout; refuse loudly
-            // instead of silently producing wrong results. Select baseline
-            // numerics (or disable the strided toggle) to proceed.
             guard numerics != .bf16Compute else {
                 throw AnimapkError.validation(
                     "P4 strided token-major attention does not support bf16Compute numerics; select baseline numerics")
             }
-            // Guaranteed non-nil here: isTokenMajor is true only for .tokenMajor.
             guard let tokenStride else {
                 throw AnimapkError.validation(
                     "P4 token-major attention requires a token stride")
             }
             switch attentionBackend {
             case .streamingMPS:
-                // P7-A: streaming/online-softmax MPS — same strided per-head
-                // views, but keys are processed in chunks with a running
-                // FP32 max/sum and FP32 output accumulator.
                 try encodeStreamingTokenMajor(
                     commandBuffer: commandBuffer, query: query, queryOffset: queryOffset,
-                    key: key, keyOffset: keyOffset, value: value, valueOffset: valueOffset,
+                    key: key, keyOffset: keyOffset,
+                    value: effectiveValue.buffer, valueOffset: effectiveValue.offset,
                     output: output, outputOffset: outputOffset,
                     heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
                     kvHeads: kvHeads, tokenStride: tokenStride, causal: causal, probe: probe,
                     halfBytes: halfBytes, scale: scale)
                 return
             case .metalFlash:
-                // P7-B: DiT-specialized pure-Metal Flash attention. Strict
-                // shape requirements; anything else throws (never corrupts).
                 try encodeMetalFlash(
                     commandBuffer: commandBuffer, query: query, queryOffset: queryOffset,
-                    key: key, keyOffset: keyOffset, value: value, valueOffset: valueOffset,
+                    key: key, keyOffset: keyOffset,
+                    value: effectiveValue.buffer, valueOffset: effectiveValue.offset,
                     output: output, outputOffset: outputOffset,
                     heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
                     kvHeads: kvHeads, tokenStride: tokenStride, causal: causal, probe: probe,
@@ -209,7 +249,8 @@ final class AttentionExecutor {
             }
             try encodeTokenMajor(
                 commandBuffer: commandBuffer, query: query, queryOffset: queryOffset,
-                key: key, keyOffset: keyOffset, value: value, valueOffset: valueOffset,
+                key: key, keyOffset: keyOffset,
+                value: effectiveValue.buffer, valueOffset: effectiveValue.offset,
                 output: output, outputOffset: outputOffset,
                 heads: heads, queryCount: queryCount, keyCount: keyCount, headDim: headDim,
                 kvHeads: kvHeads, tokenStride: tokenStride, causal: causal, probe: probe,
@@ -225,7 +266,8 @@ final class AttentionExecutor {
                 descriptor: MPSMatrixDescriptor(rows: keyCount, columns: headDim,
                                                 rowBytes: headRowBytes, dataType: .float16))
             let valueMatrix = MPSMatrix(
-                buffer: value, offset: valueOffset + kvHead * keyCount * headRowBytes,
+                buffer: effectiveValue.buffer,
+                offset: effectiveValue.offset + kvHead * keyCount * headRowBytes,
                 descriptor: MPSMatrixDescriptor(rows: keyCount, columns: headDim,
                                                 rowBytes: headRowBytes, dataType: .float16))
             var queryBase = 0
@@ -292,13 +334,99 @@ final class AttentionExecutor {
                                         output: output, count: rows * headDim,
                                         offset: outputOffset + (head * queryCount + queryBase) * headRowBytes)
                 }
-                // P2-C: fp16 score tile + PV result materialized (counted once each).
                 metrics?.recordConversionBytes(UInt64(rows * keyCount * halfBytes))
                 metrics?.recordConversionBytes(UInt64(rows * headDim * halfBytes))
                 metrics?.recordAttentionQueryTile()
                 queryBase += rows
             }
         }
+    }
+
+    /// Returns the original V buffer when NegPiP is inactive. Production DiT
+    /// calls this on a cross-K/V cache miss after base projection + LoRA + the
+    /// existing compute boundary, then stores the returned V in the cache.
+    /// Direct attention callers/tests may still use it through `encode`.
+    func negPiPValueIfNeeded(
+        commandBuffer: MTLCommandBuffer,
+        value: MTLBuffer,
+        valueOffset: Int,
+        heads: Int,
+        keyCount: Int,
+        headDim: Int,
+        kvHeads: Int,
+        layout: AttentionInputLayout,
+        probe: NumericalMonitor.Probe?
+    ) throws -> (buffer: MTLBuffer, offset: Int) {
+        guard case .crossScores? = probe,
+              let snapshot = NegPiPGenerationContext.snapshot() else {
+            return (value, valueOffset)
+        }
+        guard heads == DiTBlockExecutor.heads,
+              kvHeads == DiTBlockExecutor.heads,
+              keyCount == DiTBlockExecutor.contextTokens,
+              headDim == DiTBlockExecutor.headDim,
+              !snapshot.signs.isEmpty else {
+            throw AnimapkError.validation("active NegPiP reached an unexpected cross-attention shape")
+        }
+        guard valueOffset == 0 else {
+            throw AnimapkError.validation("NegPiP requires a zero-based DiT V buffer")
+        }
+
+        let rowWidth: Int
+        let headMajor: UInt32
+        switch layout {
+        case .tokenMajor(let tokenStride):
+            guard tokenStride == heads * headDim else {
+                throw AnimapkError.validation("NegPiP token-major stride does not match DiT model width")
+            }
+            rowWidth = tokenStride
+            headMajor = 0
+        case .headMajor:
+            rowWidth = headDim
+            headMajor = 1
+        }
+
+        let elementCount = try checkedProduct(kvHeads, keyCount, headDim)
+        let bytes = try checkedProduct(elementCount, MemoryLayout<Float16>.stride)
+        guard value.length >= bytes else {
+            throw AnimapkError.validation("NegPiP V buffer is smaller than the DiT cross-attention tensor")
+        }
+
+        // Keep only one sign per context token (~1 KiB), rather than expanding
+        // a 2 MiB image mask. The upload happens once for this immutable lease.
+        let signBytes = try checkedProduct(keyCount, MemoryLayout<Float16>.stride)
+        let signs = buffers.buffer(key: "attention.negpip.signs.f16", bytes: signBytes)
+        if negPiPSignGeneration != snapshot.lease {
+            let pointer = signs.contents().bindMemory(to: Float16.self, capacity: keyCount)
+            for token in 0..<keyCount {
+                pointer[token] = Float16(snapshot.signs[token])
+            }
+            negPiPSignGeneration = snapshot.lease
+        }
+
+        let masked = buffers.buffer(key: "attention.negpip.value.f16", bytes: bytes)
+        let pipeline = try context.pipeline(named: "negpip_apply_value_signs_half")
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw AnimapkError.validation("failed to create NegPiP V-sign encoder")
+        }
+        var count = UInt32(elementCount)
+        var rowWidthU = UInt32(rowWidth)
+        var tokenCountU = UInt32(keyCount)
+        var headMajorU = headMajor
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(value, offset: valueOffset, index: 0)
+        encoder.setBuffer(signs, offset: 0, index: 1)
+        encoder.setBuffer(masked, offset: 0, index: 2)
+        encoder.setBytes(&count, length: 4, index: 3)
+        encoder.setBytes(&rowWidthU, length: 4, index: 4)
+        encoder.setBytes(&tokenCountU, length: 4, index: 5)
+        encoder.setBytes(&headMajorU, length: 4, index: 6)
+        let threads = min(pipeline.threadExecutionWidth, pipeline.maxTotalThreadsPerThreadgroup)
+        encoder.dispatchThreads(
+            MTLSize(width: elementCount, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1))
+        encoder.endEncoding()
+        return (masked, 0)
     }
 
     private func encodeRoundHalf(
@@ -318,7 +446,6 @@ final class AttentionExecutor {
         encoder.dispatchThreads(MTLSize(width: Int(count), height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
         encoder.endEncoding()
-        // P2-C: fp16 elements materialized by the BF16 round-trip (counted once).
         metrics?.recordConversionBytes(UInt64(Int(count) * MemoryLayout<Float16>.stride))
     }
 
@@ -394,8 +521,6 @@ final class AttentionExecutor {
                 pvEncoder.dispatchThreads(MTLSize(width: headDim, height: rows, depth: 1),
                                           threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
                 pvEncoder.endEncoding()
-                // P2-C: fp32 score tile materialized (f16→f32) + fp16 PV result
-                // (f32→f16), each counted once.
                 metrics?.recordConversionBytes(UInt64(rows * keyCount * MemoryLayout<Float>.stride))
                 metrics?.recordConversionBytes(UInt64(rows * headDim * MemoryLayout<Float16>.stride))
                 metrics?.recordAttentionQueryTile()
@@ -405,10 +530,7 @@ final class AttentionExecutor {
     }
 
     /// P4: strided token-major attention. Q/K/V/output are `[rows, tokenStride]`
-    /// half buffers; each head is an `MPSMatrix` VIEW with the token row stride
-    /// (`tokenStride * 2` bytes) and a per-head column offset of
-    /// `head * headDim * 2` bytes. The score tile stays TIGHT (`rows x keyCount`,
-    /// rowBytes = keyCount * 2) — never a token-dim stride. No transpose kernels.
+    /// half buffers; each head is an `MPSMatrix` VIEW with the token row stride.
     private func encodeTokenMajor(
         commandBuffer: MTLCommandBuffer,
         query: MTLBuffer, queryOffset: Int,
@@ -422,8 +544,6 @@ final class AttentionExecutor {
         halfBytes: Int, scoreRowBytes: Int, scale: Double
     ) throws {
         for head in 0..<heads {
-            // kvHeads == heads is validated for token-major (P4-D keeps the
-            // GQA head mapping for the legacy head-major path only).
             _ = kvHeads
             let keyMatrix = tokenMajorHeadMatrix(
                 buffer: key, baseOffset: keyOffset, head: head,
@@ -486,7 +606,6 @@ final class AttentionExecutor {
                     alpha: 1, beta: 0).encode(
                         commandBuffer: commandBuffer, leftMatrix: scoreMatrix,
                         rightMatrix: valueMatrix, resultMatrix: outputMatrix)
-                // P2-C: fp16 score tile + PV result materialized (counted once each).
                 metrics?.recordConversionBytes(UInt64(rows * keyCount * halfBytes))
                 metrics?.recordConversionBytes(UInt64(rows * headDim * halfBytes))
                 metrics?.recordAttentionQueryTile()
@@ -496,13 +615,7 @@ final class AttentionExecutor {
     }
 
     /// P7-A: streaming/online-softmax MPS attention over the strided
-    /// token-major layout (DiT). MPS computes QK^T and PV per KEY CHUNK
-    /// (Bk ∈ {64, 128, 256}); a tiny fp16 `[rows, Bk]` score tile is the only
-    /// live score memory. The online-softmax state (running max FP32, running
-    /// sum FP32, FP32 output accumulator) is carried across chunks by three
-    /// compute kernels; every chunk of every query tile encodes into the
-    /// SAME block command buffer — NO per-chunk wait, NO added command-buffer
-    /// completion. The output accumulator is NEVER fp16.
+    /// token-major layout (DiT).
     private func encodeStreamingTokenMajor(
         commandBuffer: MTLCommandBuffer,
         query: MTLBuffer, queryOffset: Int,
@@ -514,16 +627,11 @@ final class AttentionExecutor {
         causal: Bool, probe: NumericalMonitor.Probe?,
         halfBytes: Int, scale: Double
     ) throws {
-        // The online-softmax kernels are non-causal (DiT self/cross are
-        // non-causal); a causal streaming request would silently produce
-        // wrong results, so refuse loudly.
         guard !causal else {
             throw AnimapkError.validation("P7 streaming MPS attention requires non-causal attention")
         }
-        _ = kvHeads  // == heads, validated by the token-major layout rules
+        _ = kvHeads
         let keyChunks = [64, 128, 256]
-        // Bound the chunk by the key count so a small test (e.g. K=5) still
-        // exercises a single chunk and never over-allocates.
         let chunkColumns = keyChunks.first(where: { $0 <= keyCount }) ?? max(1, keyCount)
         let prepare = try context.pipeline(named: "streaming_softmax_prepare")
         let accumulate = try context.pipeline(named: "streaming_chunk_accumulate")
@@ -531,8 +639,6 @@ final class AttentionExecutor {
         let scoreScratch = buffers.buffer(
             key: "attention.stream.scores.fp16",
             bytes: try checkedProduct(tileRows, chunkColumns, halfBytes))
-        // FP32 online state: max/sum/alpha per query-tile row + output
-        // accumulator [tileRows, headDim]. Bounded by the real query count.
         let maxTileRows = min(tileRows, queryCount)
         let stateBytes = try checkedProduct(maxTileRows, MemoryLayout<Float>.stride)
         let accumulatorBytes = try checkedProduct(maxTileRows, headDim, MemoryLayout<Float>.stride)
@@ -541,6 +647,7 @@ final class AttentionExecutor {
         let runningAlpha = buffers.buffer(key: "attention.stream.alpha.f32", bytes: stateBytes)
         let accumulator = buffers.buffer(key: "attention.stream.acc.f32", bytes: accumulatorBytes)
         let scaleFloat = Float(scale)
+        _ = scaleFloat
         let reduction = reductionThreads(limit: prepare.maxTotalThreadsPerThreadgroup)
 
         for head in 0..<heads {
@@ -567,7 +674,6 @@ final class AttentionExecutor {
                         buffer: scoreScratch,
                         descriptor: MPSMatrixDescriptor(rows: rows, columns: columns,
                                                         rowBytes: columns * halfBytes, dataType: .float16))
-                    // QK^T for this chunk only (strided per-head views).
                     MPSMatrixMultiplication(
                         device: context.device, transposeLeft: false, transposeRight: true,
                         resultRows: rows, resultColumns: columns, interiorColumns: headDim,
@@ -575,8 +681,6 @@ final class AttentionExecutor {
                             commandBuffer: commandBuffer, leftMatrix: queryMatrix,
                             rightMatrix: keyMatrix, resultMatrix: scoreMatrix)
 
-                    // Online-softmax prepare: update running max/sum, rewrite
-                    // the chunk scores to rescaled probabilities, store alpha.
                     guard let prepareEncoder = commandBuffer.makeComputeCommandEncoder() else {
                         throw AnimapkError.validation("failed to create streaming attention prepare encoder")
                     }
@@ -597,7 +701,6 @@ final class AttentionExecutor {
                         threadsPerThreadgroup: MTLSize(width: reduction, height: 1, depth: 1))
                     prepareEncoder.endEncoding()
 
-                    // PV for this chunk (MPS).
                     let chunkOutMatrix = MPSMatrix(
                         buffer: buffers.buffer(
                             key: "attention.stream.chunkOut.fp16",
@@ -611,7 +714,6 @@ final class AttentionExecutor {
                             commandBuffer: commandBuffer, leftMatrix: scoreMatrix,
                             rightMatrix: valueMatrix, resultMatrix: chunkOutMatrix)
 
-                    // FP32 accumulate: acc = alpha * acc + float(chunkOut).
                     guard let accEncoder = commandBuffer.makeComputeCommandEncoder() else {
                         throw AnimapkError.validation("failed to create streaming attention accumulate encoder")
                     }
@@ -632,8 +734,6 @@ final class AttentionExecutor {
                     chunkBase += columns
                     chunkIndex += 1
                 }
-                // Finalize: output = half(acc / runningSum) into the
-                // token-major output view (strided write).
                 guard let finalizeEncoder = commandBuffer.makeComputeCommandEncoder() else {
                     throw AnimapkError.validation("failed to create streaming attention finalize encoder")
                 }
@@ -652,9 +752,6 @@ final class AttentionExecutor {
                     threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
                 finalizeEncoder.endEncoding()
 
-                // P2-C: the score tile and PV result materialized by MPS for
-                // this chunk (counted once each); the fp32 state traffic is
-                // internal to the backend and not double-counted.
                 metrics?.recordConversionBytes(UInt64(rows * chunkColumns * halfBytes))
                 metrics?.recordConversionBytes(UInt64(rows * headDim * halfBytes))
                 metrics?.recordAttentionQueryTile()
@@ -663,13 +760,7 @@ final class AttentionExecutor {
         }
     }
 
-    /// P7-B: DiT-specialized pure-Metal Flash-style online attention. Strict
-    /// shape gate: headDim == 128, heads == 16, non-causal, token-major with
-    /// tokenStride == heads * headDim, and the selected compute pipeline must
-    /// expose `threadExecutionWidth == 32` (the kernel's SIMD-group mapping
-    /// assumes 32 lanes). Anything else throws loudly — the backend never
-    /// runs on an unsupported shape. Qwen/VAE/adapter (head-major layout)
-    /// can never reach this path.
+    /// P7-B: DiT-specialized pure-Metal Flash-style online attention.
     private func encodeMetalFlash(
         commandBuffer: MTLCommandBuffer,
         query: MTLBuffer, queryOffset: Int,
@@ -682,33 +773,26 @@ final class AttentionExecutor {
         scoreScratch: MTLBuffer, softmax: MTLComputePipelineState,
         halfBytes: Int, scoreRowBytes: Int, scale: Double
     ) throws {
+        _ = probe; _ = scoreScratch; _ = softmax; _ = scoreRowBytes; _ = scale
         guard !causal, heads == 16, headDim == 128,
               tokenStride == heads * headDim, kvHeads == heads else {
             throw AnimapkError.validation(
                 "P7 Metal Flash attention is DiT-specialized: requires heads == 16, headDim == 128, non-causal, tokenStride == heads * headDim")
         }
-        // A12-safe gate: the kernel's SIMD-group mapping assumes a 32-lane
-        // SIMD width. If the device/pipeline reports anything else, mark the
-        // backend unsupported for this device and refuse to run.
         let pipeline = try context.pipeline(named: "dit_flash_attention_h128_q4_k32")
         guard pipeline.threadExecutionWidth == 32 else {
             throw AnimapkError.validation(
                 "P7 Metal Flash attention requires a 32-lane SIMD pipeline (threadExecutionWidth == 32); backend unsupported on this device")
         }
-        // The K=16 profile is the fallback for devices whose threadgroup
-        // memory or occupancy prefers a smaller tile; it is selected at the
-        // call site and must pass the same SIMD gate.
         let k16Pipeline = try context.pipeline(named: "dit_flash_attention_h128_q4_k16")
         guard k16Pipeline.threadExecutionWidth == 32 else {
             throw AnimapkError.validation(
                 "P7 Metal Flash attention requires a 32-lane SIMD pipeline (threadExecutionWidth == 32); backend unsupported on this device")
         }
-        // One threadgroup covers 4 query rows; grid = (ceil(queryCount/4),
-        // 1, heads). group.z carries the head index into the kernel.
         let groupsPerHead = (queryCount + 3) / 4
         var queryCountU = UInt32(queryCount), keyCountU = UInt32(keyCount)
         var tokenStrideU = UInt32(tokenStride)
-        var scaleF = Float(scale)
+        var scaleF = Float(1 / sqrt(Double(headDim)))
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
             throw AnimapkError.validation("failed to create Metal Flash attention encoder")
         }
@@ -725,17 +809,12 @@ final class AttentionExecutor {
             MTLSize(width: groupsPerHead, height: 1, depth: heads),
             threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
         encoder.endEncoding()
-        // P2-C: every output element materialized once (the backend writes
-        // the token-major attended buffer directly); no score tile is ever
-        // materialized by the Flash path.
         metrics?.recordConversionBytes(UInt64(queryCount * tokenStride * halfBytes))
         metrics?.recordAttentionQueryTile()
     }
 
     /// P4-B: strided per-head matrix view of a token-major `[rows, tokenStride]`
-    /// half buffer. Each head reads exactly its `headDim` contiguous columns of
-    /// every token row; the row stride is the full token stride, so head `h`
-    /// starts at column `h * headDim` of every row.
+    /// half buffer.
     private func tokenMajorHeadMatrix(
         buffer: MTLBuffer, baseOffset: Int, head: Int,
         rowBase: Int, rows: Int, tokenStride: Int, headDim: Int
@@ -788,8 +867,6 @@ final class AttentionExecutor {
             throw AnimapkError.validation("invalid attention shape, offset, or causal dimensions")
         }
         if case .tokenMajor(let tokenStride) = layout {
-            // P4: each head owns headDim contiguous columns of every token row;
-            // GQA is not expressible without a strided K/V head gather.
             guard tokenStride > 0, headDim <= tokenStride,
                   tokenStride.isMultiple(of: headDim),
                   heads * headDim == tokenStride,
@@ -797,8 +874,6 @@ final class AttentionExecutor {
                 throw AnimapkError.validation(
                     "P4 token-major attention requires tokenStride == heads * headDim and keyValueHeads == heads")
             }
-            // P4-F: refuse to silently corrupt layout when MPS rejects the
-            // strided descriptor — fail the experimental backend loudly.
             guard queryOffset % 16 == 0, keyOffset % 16 == 0,
                   valueOffset % 16 == 0, outputOffset % 16 == 0,
                   (tokenStride * 2).isMultiple(of: 16) else {
